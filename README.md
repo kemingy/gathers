@@ -1,2 +1,7 @@
 # gathers
-clustering algorithm implementation
+
+Clustering algorithm implementation:
+
+- [x] K-means
+- [ ] Parallel
+- [ ] Hierarchical K-means
