@@ -4,12 +4,12 @@ use crate::distance::{assign, update_centroids, Distance};
 use crate::sampling::subsample;
 use crate::utils::{as_continuous_vec, centroid_residual, normalize};
 use core::panic;
+use std::time::Instant;
 
 use log::debug;
 
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
-// const EPS: f32 = 1.0 / 1024.0;
 
 /// K-means clustering algorithm.
 #[derive(Debug)]
@@ -72,7 +72,7 @@ impl KMeans {
         }
 
         // use residual for more accurate L2 distance computations
-        if self.distance == Distance::EuclideanSquared && self.use_residual {
+        if self.distance == Distance::SquaredEuclidean && self.use_residual {
             debug!("use residual");
             centroid_residual(&mut vecs, dim);
         }
@@ -87,18 +87,20 @@ impl KMeans {
         }
 
         let mut centroids = as_continuous_vec(&subsample(self.n_cluster as usize, &vecs, dim));
-        if self.distance == Distance::DotProduct {
+        if self.distance == Distance::NegativeDotProduct {
             centroids.chunks_mut(dim).for_each(normalize);
         }
 
         let mut labels: Vec<u32> = vec![0; num];
+        debug!("start training");
         for i in 0..self.max_iter {
-            debug!("iter {}", i);
+            let start_time = Instant::now();
             assign(&vecs, &centroids, dim, self.distance, &mut labels);
             update_centroids(&vecs, &mut centroids, dim, &labels);
-            if self.distance == Distance::DotProduct {
+            if self.distance == Distance::NegativeDotProduct {
                 centroids.chunks_mut(dim).for_each(normalize);
             }
+            debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
         }
 
         centroids

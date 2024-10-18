@@ -20,7 +20,7 @@ fn main() {
 
     let vecs = read_vecs::<f32>(input).expect("failed to read vecs");
     let dim = vecs[0].len();
-    let kmeans = KMeans::new(4096, 25, 0.01, Distance::EuclideanSquared, false);
+    let kmeans = KMeans::new(4096, 3, 0.01, Distance::SquaredEuclidean, false);
     let centroids = kmeans.fit(as_continuous_vec(&vecs), dim);
     let centroids_mat = as_matrix(&centroids, dim);
     write_vecs(output, centroids_mat).expect("failed to write centroids");

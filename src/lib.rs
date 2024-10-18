@@ -5,4 +5,5 @@
 pub mod distance;
 pub mod kmeans;
 pub mod sampling;
+pub mod simd;
 pub mod utils;
