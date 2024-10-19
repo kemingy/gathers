@@ -29,6 +29,7 @@ where
 }
 
 /// Convert a 2-D Vec<Vec<T>> to a 1-D continuous vector.
+#[inline]
 pub fn as_continuous_vec<T>(mat: &[Vec<T>]) -> Vec<T>
 where
     T: Num + Copy,
@@ -37,6 +38,7 @@ where
 }
 
 /// Convert a 1-D continuous vector to a 2-D Vec<Vec<T>>.
+#[inline]
 pub fn as_matrix<T>(vecs: &[T], dim: usize) -> Vec<Vec<T>>
 where
     T: Num + Copy,

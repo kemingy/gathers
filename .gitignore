@@ -27,3 +27,6 @@ Cargo.lock
 # data
 *.fvecs
 *.ivecs
+
+# profiling data
+profile.json

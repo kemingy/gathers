@@ -46,5 +46,6 @@ jobs:
       with:
         toolchain: stable
     - name: Test
+      env:
+        RUSTFLAGS: -C target-cpu=native
       run: cargo test
-  

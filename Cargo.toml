@@ -12,7 +12,22 @@ keywords = ["clustering"]
 categories = ["algorithms", "science"]
 
 [dependencies]
+argh = "0.1.12"
 env_logger = "0.11.5"
 log = "0.4.22"
 num-traits = "0.2.19"
 rand = "0.8.5"
+
+[profile.perf]
+inherits = "release"
+debug = true
+
+[profile.bench]
+debug=true
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "bench"
+harness = false

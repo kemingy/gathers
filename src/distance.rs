@@ -15,7 +15,8 @@ pub enum Distance {
     NegativeDotProduct,
 }
 
-fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
+/// Native implementation of squared euclidean distance.
+pub fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter()
         .zip(rhs.iter())
         .map(|(&l, &r)| (l - r) * (l - r))
@@ -37,7 +38,8 @@ fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
 }
 
-fn native_neg_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
+/// Native implementation of negative dot product.
+pub fn native_neg_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
     -lhs.iter()
         .zip(rhs.iter())
         .map(|(&l, &r)| l * r)
@@ -126,6 +128,38 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
         let divider = (elements[i] as f32).recip();
         for j in i * dim..(i + 1) * dim {
             centroids[j] = means[j] * divider;
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{native_neg_dot_produce, native_squared_euclidean};
+    use crate::simd::{l2_squared_distance, neg_dot_product};
+    use rand::{thread_rng, Rng};
+
+    #[test]
+    fn test_l2_squared_distance() {
+        let mut rng = thread_rng();
+
+        for dim in [4, 12, 64, 70, 78].into_iter() {
+            let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let diff =
+                unsafe { l2_squared_distance(&lhs, &rhs) } - native_squared_euclidean(&lhs, &rhs);
+            assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+        }
+    }
+
+    #[test]
+    fn test_negative_dot_product_distance() {
+        let mut rng = thread_rng();
+
+        for dim in [4, 12, 64, 70, 78].into_iter() {
+            let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let diff = unsafe { neg_dot_product(&lhs, &rhs) } - native_neg_dot_produce(&lhs, &rhs);
+            assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
     }
 }
