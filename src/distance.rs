@@ -23,6 +23,7 @@ pub fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
         .sum()
 }
 
+#[inline]
 fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
@@ -46,6 +47,7 @@ pub fn native_neg_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
         .sum::<f32>()
 }
 
+#[inline]
 fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
@@ -63,7 +65,7 @@ fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
 
 /// Assign vectors to centroids.
 pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
-    let mut distances = vec![f32::MAX; centroids.len()];
+    let mut distances = vec![f32::MAX; centroids.len() / dim];
     for (i, vec) in vecs.chunks(dim).enumerate() {
         for (j, centroid) in centroids.chunks(dim).enumerate() {
             distances[j] = match distance {
