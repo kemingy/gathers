@@ -163,7 +163,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
             .zip(vec.iter())
             .for_each(|(m, &v)| *m += v);
     }
-    let diff = squared_euclidean(&centroids, &means);
+    let diff = squared_euclidean(centroids, &means);
 
     let mut zero_count = 0;
     for i in 0..elements.len() {
