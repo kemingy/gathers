@@ -103,6 +103,7 @@ pub fn native_argmin(vec: &[f32]) -> usize {
     index
 }
 
+#[inline]
 fn argmin(vec: &[f32]) -> usize {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
@@ -151,7 +152,7 @@ pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, l
 }
 
 /// Update centroids to the mean of assigned vectors.
-pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) {
+pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
     let mut means = vec![0.0; centroids.len()];
     let mut elements = vec![0; centroids.len() / dim];
     for (i, vec) in vecs.chunks(dim).enumerate() {
@@ -162,6 +163,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
             .zip(vec.iter())
             .for_each(|(m, &v)| *m += v);
     }
+    let diff = squared_euclidean(&centroids, &means);
 
     let mut zero_count = 0;
     for i in 0..elements.len() {
@@ -208,6 +210,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
     if zero_count != 0 {
         debug!("fixed {} empty clusters", zero_count);
     }
+    diff
 }
 
 #[cfg(test)]

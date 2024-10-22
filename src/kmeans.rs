@@ -16,7 +16,7 @@ const MAX_POINTS_PER_CENTROID: usize = 256;
 pub struct KMeans {
     n_cluster: u32,
     max_iter: u32,
-    _tolerance: f32,
+    tolerance: f32,
     distance: Distance,
     use_residual: bool,
 }
@@ -26,7 +26,7 @@ impl Default for KMeans {
         Self {
             n_cluster: 8,
             max_iter: 25,
-            _tolerance: 1e-4,
+            tolerance: 1e-4,
             distance: Distance::default(),
             use_residual: false,
         }
@@ -54,7 +54,7 @@ impl KMeans {
         Self {
             n_cluster,
             max_iter,
-            _tolerance: tolerance,
+            tolerance,
             distance,
             use_residual,
         }
@@ -96,11 +96,15 @@ impl KMeans {
         for i in 0..self.max_iter {
             let start_time = Instant::now();
             assign(&vecs, &centroids, dim, self.distance, &mut labels);
-            update_centroids(&vecs, &mut centroids, dim, &labels);
+            let diff = update_centroids(&vecs, &mut centroids, dim, &labels);
             if self.distance == Distance::NegativeDotProduct {
                 centroids.chunks_mut(dim).for_each(normalize);
             }
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
+            if diff < self.tolerance {
+                debug!("converged at iter {}", i);
+                break;
+            }
         }
 
         centroids
