@@ -78,7 +78,7 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 #[target_feature(enable = "fma,avx")]
 #[inline]
-pub unsafe fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
     #[cfg(target_arch = "x86_64")]
@@ -133,5 +133,116 @@ pub unsafe fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
         rhs_ptr = rhs_ptr.add(1);
     }
 
-    -res
+    res
+}
+
+/// Compute the L2 norm of the vector.
+///
+/// # Safety
+///
+/// This function is marked unsafe because it requires the AVX intrinsics.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[target_feature(enable = "fma,avx")]
+#[inline]
+pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let mut vec_ptr = vec.as_ptr();
+    let mut f32x8: __m256;
+    let mut sum = _mm256_setzero_ps();
+
+    for _ in 0..(vec.len() / 16) {
+        f32x8 = _mm256_loadu_ps(vec_ptr);
+        vec_ptr = vec_ptr.add(8);
+        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+
+        f32x8 = _mm256_loadu_ps(vec_ptr);
+        vec_ptr = vec_ptr.add(8);
+        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+    }
+
+    for _ in 0..(vec.len() & 0b1111) / 8 {
+        f32x8 = _mm256_loadu_ps(vec_ptr);
+        vec_ptr = vec_ptr.add(8);
+        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+    }
+
+    #[inline(always)]
+    unsafe fn reduce_f32_256(accumulate: __m256) -> f32 {
+        // add [4..7] to [0..3]
+        let mut combined = _mm256_add_ps(
+            accumulate,
+            _mm256_permute2f128_ps(accumulate, accumulate, 1),
+        );
+        // add [0..3] to [0..1]
+        combined = _mm256_hadd_ps(combined, combined);
+        // add [0..1] to [0]
+        combined = _mm256_hadd_ps(combined, combined);
+        _mm256_cvtss_f32(combined)
+    }
+
+    let mut res = reduce_f32_256(sum);
+    for _ in 0..(vec.len() & 0b111) {
+        res += *vec_ptr * *vec_ptr;
+        vec_ptr = vec_ptr.add(1);
+    }
+
+    res.sqrt()
+}
+
+/// Find the index of the minimum value in the vector.
+///
+/// # Safety
+///
+/// This function is marked unsafe because it requires the AVX intrinsics.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[target_feature(enable = "fma,avx")]
+#[inline]
+pub unsafe fn argmin(vec: &[f32]) -> usize {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let mut index = 0;
+    let mut minimal = f32::MAX;
+    let mut comp = _mm256_set1_ps(minimal);
+    let mut vec_ptr = vec.as_ptr();
+    let (mut y1, mut y2, mut y3, mut y4, mut mask): (__m256, __m256, __m256, __m256, __m256);
+    let mut i = 0;
+
+    for _ in 0..(vec.len() / 32) {
+        y1 = _mm256_loadu_ps(vec_ptr);
+        y2 = _mm256_loadu_ps(vec_ptr.add(8));
+        y3 = _mm256_loadu_ps(vec_ptr.add(16));
+        y4 = _mm256_loadu_ps(vec_ptr.add(24));
+        vec_ptr = vec_ptr.add(32);
+
+        y1 = _mm256_min_ps(y1, y2);
+        y3 = _mm256_min_ps(y3, y4);
+        y1 = _mm256_min_ps(y1, y3);
+        mask = _mm256_cmp_ps(comp, y1, _CMP_GT_OS);
+        if 0 == _mm256_testz_ps(mask, mask) {
+            for j in i..(i + 32) {
+                if minimal > vec[j] {
+                    minimal = vec[j];
+                    index = j;
+                }
+            }
+            comp = _mm256_set1_ps(minimal);
+        }
+        i += 32;
+    }
+
+    for j in i..vec.len() {
+        if minimal > vec[j] {
+            minimal = vec[j];
+            index = j;
+        }
+    }
+
+    index
 }

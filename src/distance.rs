@@ -1,5 +1,7 @@
 //! Compute the distance between vectors.
 
+use core::f32;
+
 use log::debug;
 use rand::{thread_rng, Rng};
 
@@ -15,7 +17,30 @@ pub enum Distance {
     NegativeDotProduct,
 }
 
+/// Native implementation of l2 norm.
+pub fn native_l2_norm(vec: &[f32]) -> f32 {
+    vec.iter().fold(0.0, |acc, &x| acc + x * x).sqrt()
+}
+
+/// Compute the L2 norm of the vector.
+#[inline]
+pub fn l2_norm(vec: &[f32]) -> f32 {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { crate::simd::l2_norm(vec) }
+        } else {
+            native_l2_norm(vec)
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        native_l2_norm
+    }
+}
+
 /// Native implementation of squared euclidean distance.
+#[inline]
 pub fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter()
         .zip(rhs.iter())
@@ -40,8 +65,9 @@ fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
 }
 
 /// Native implementation of negative dot product.
-pub fn native_neg_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
-    -lhs.iter()
+#[inline]
+pub fn native_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
+    lhs.iter()
         .zip(rhs.iter())
         .map(|(&l, &r)| l * r)
         .sum::<f32>()
@@ -52,28 +78,73 @@ fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         if is_x86_feature_detected!("avx2") {
-            unsafe { crate::simd::neg_dot_product(lhs, rhs) }
+            unsafe { -crate::simd::dot_product(lhs, rhs) }
         } else {
-            native_neg_dot_produce(lhs, rhs)
+            -native_dot_produce(lhs, rhs)
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
-        native_neg_dot_produce(lhs, rhs)
+        -native_dot_produce(lhs, rhs)
+    }
+}
+
+/// Native implementation of argmin.
+#[inline]
+pub fn native_argmin(vec: &[f32]) -> usize {
+    let mut minimal = f32::MAX;
+    let mut index = 0;
+    for (i, &val) in vec.iter().enumerate() {
+        if val < minimal {
+            minimal = val;
+            index = i;
+        }
+    }
+    index
+}
+
+fn argmin(vec: &[f32]) -> usize {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            unsafe { crate::simd::argmin(vec) }
+        } else {
+            native_argmin(vec)
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        native_argmin(vec)
     }
 }
 
 /// Assign vectors to centroids.
 pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
     let mut distances = vec![f32::MAX; centroids.len() / dim];
-    for (i, vec) in vecs.chunks(dim).enumerate() {
-        for (j, centroid) in centroids.chunks(dim).enumerate() {
-            distances[j] = match distance {
-                Distance::SquaredEuclidean => squared_euclidean(vec, centroid),
-                Distance::NegativeDotProduct => neg_dot_product(vec, centroid),
-            };
-            if j == 0 || distances[j] < distances[labels[i] as usize] {
-                labels[i] = j as u32;
+
+    match distance {
+        Distance::NegativeDotProduct => {
+            for (i, vec) in vecs.chunks(dim).enumerate() {
+                for (j, centroid) in centroids.chunks(dim).enumerate() {
+                    distances[j] = neg_dot_product(vec, centroid);
+                    if j == 0 || distances[j] < distances[labels[i] as usize] {
+                        labels[i] = j as u32;
+                    }
+                }
+            }
+        }
+        Distance::SquaredEuclidean => {
+            // pre-compute the x**2 & y**2 for L2 distance
+            // let squared_x: Vec<f32> = vecs.chunks(dim).map(l2_norm).collect();
+            // let squared_y: Vec<f32> = centroids.chunks(dim).map(l2_norm).collect();
+
+            for (i, vec) in vecs.chunks(dim).enumerate() {
+                for (j, centroid) in centroids.chunks(dim).enumerate() {
+                    distances[j] =
+                        // squared_x[i] + squared_y[j] + 2.0 * neg_dot_product(vec, centroid);
+                        squared_euclidean(vec, centroid);
+                }
+                labels[i] = argmin(&distances) as u32;
             }
         }
     }
@@ -92,9 +163,11 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
             .for_each(|(m, &v)| *m += v);
     }
 
+    let mut zero_count = 0;
     for i in 0..elements.len() {
         if elements[i] == 0 {
             // need to split another cluster to fill this empty cluster
+            zero_count += 1;
             let mut target = 0;
             let mut rng = thread_rng();
             let base = 1.0 / (vecs.len() / dim - labels.len()) as f32;
@@ -132,12 +205,15 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
             centroids[j] = means[j] * divider;
         }
     }
+    if zero_count != 0 {
+        debug!("fixed {} empty clusters", zero_count);
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use super::{native_neg_dot_produce, native_squared_euclidean};
-    use crate::simd::{l2_squared_distance, neg_dot_product};
+    use super::{native_argmin, native_dot_produce, native_l2_norm, native_squared_euclidean};
+    use crate::simd::{argmin, dot_product, l2_norm, l2_squared_distance};
     use rand::{thread_rng, Rng};
 
     #[test]
@@ -154,14 +230,33 @@ mod test {
     }
 
     #[test]
-    fn test_negative_dot_product_distance() {
+    fn test_dot_product_distance() {
         let mut rng = thread_rng();
 
         for dim in [4, 12, 64, 70, 78].into_iter() {
             let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
             let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let diff = unsafe { neg_dot_product(&lhs, &rhs) } - native_neg_dot_produce(&lhs, &rhs);
+            let diff = unsafe { dot_product(&lhs, &rhs) } - native_dot_produce(&lhs, &rhs);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+        }
+    }
+
+    #[test]
+    fn test_l2_norm() {
+        let mut rng = thread_rng();
+        for dim in [4, 12, 64, 70, 78].into_iter() {
+            let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let diff = unsafe { l2_norm(&vec) } - native_l2_norm(&vec);
+            assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+        }
+    }
+
+    #[test]
+    fn test_argmin() {
+        let mut rng = thread_rng();
+        for dim in [12, 32, 128, 140].into_iter() {
+            let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            assert_eq!(unsafe { argmin(&vec) }, native_argmin(&vec));
         }
     }
 }
