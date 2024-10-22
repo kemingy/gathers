@@ -10,7 +10,7 @@ use gathers::simd::{argmin, dot_product, l2_norm, l2_squared_distance};
 pub fn l2_norm_benchmark(c: &mut Criterion) {
     let mut rng = thread_rng();
 
-    let mut group = c.benchmark_group("l2 norm");
+    let mut group = c.benchmark_group("norm");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
         let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
 

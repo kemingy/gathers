@@ -5,6 +5,7 @@ use env_logger::Env;
 use gathers::distance::Distance;
 use gathers::kmeans::KMeans;
 use gathers::utils::{as_continuous_vec, as_matrix, read_vecs, write_vecs};
+use log::debug;
 
 #[derive(FromArgs, Debug)]
 /// gathers CLI args
@@ -28,6 +29,7 @@ fn main() {
 
     let env = Env::default().filter_or("RUST_LOG", "debug");
     env_logger::init_from_env(env);
+    debug!("{:?}", args);
 
     let vecs = read_vecs::<f32>(Path::new(&args.input)).expect("failed to read vecs");
     let dim = vecs[0].len();

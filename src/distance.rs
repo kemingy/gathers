@@ -143,7 +143,7 @@ pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, l
                 for (j, centroid) in centroids.chunks(dim).enumerate() {
                     distances[j] =
                         // squared_x[i] + squared_y[j] + 2.0 * neg_dot_product(vec, centroid);
-                        squared_euclidean(vec, centroid);
+                    squared_euclidean(vec, centroid);
                 }
                 labels[i] = argmin(&distances) as u32;
             }
