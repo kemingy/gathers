@@ -3,8 +3,8 @@ use core::f32;
 use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
-use gathers::distance::{Distance,squared_euclidean, argmin};
-use gathers::kmeans::KMeans;
+use gathers::distance::{Distance, argmin, squared_euclidean};
+use gathers::kmeans::{KMeans, rabitq_assign};
 use gathers::utils::as_matrix;
 
 /// assign the vector to the nearest centroid.
@@ -24,6 +24,21 @@ fn assign<'py>(
     }
 
     argmin(&distances) as u32
+}
+
+/// assign batch of vectors to the nearest centroid.
+#[pyfunction]
+#[pyo3(signature = (vecs, centroids))]
+fn batch_assign<'py>(
+    vecs: PyReadonlyArray2<'py, f32>,
+    centroids: PyReadonlyArray2<'py, f32>,
+) -> Vec<u32> {
+    let vectors = vecs.as_array();
+    let mut labels = vec![0; vectors.nrows()];
+    rabitq_assign(
+        vectors.as_slice().expect("failed to get the vecs slice"),
+        centroids.as_array().as_slice().expect("failed to get the centroids slice"), vectors.ncols(), &mut labels);
+    labels
 }
 
 /// Train a K-means and return the centroids.
@@ -52,5 +67,6 @@ fn kmeans_fit<'py>(
 fn gatherspy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kmeans_fit, m)?)?;
     m.add_function(wrap_pyfunction!(assign, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_assign, m)?)?;
     Ok(())
 }

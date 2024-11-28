@@ -38,7 +38,7 @@ jobs:
         python-version: '3.11'
     - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
+        toolchain: nightly
     - name: Install lint tools
       run: |
         rustup component add rustfmt clippy

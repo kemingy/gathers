@@ -1,7 +1,7 @@
 format-rust:
-	@cargo fmt
+	@cargo +nightly fmt
 	@cd python
-	@cargo fmt
+	@cargo +nightly fmt
 
 format-python:
 	@ruff check --fix python
@@ -9,10 +9,10 @@ format-python:
 format: format-rust format-python
 
 lint-rust:
-	@cargo fmt --check
+	@cargo +nightly fmt --check
 	@cargo clippy -- -D warnings
 	@cd python
-	@cargo fmt --check
+	@cargo +nightly fmt --check
 	@cargo clippy -- -D warnings
 
 lint-python:
