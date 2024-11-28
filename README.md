@@ -9,3 +9,6 @@ Clustering algorithm implementation:
 - [x] K-means
 - [ ] Parallel
 - [ ] Hierarchical K-means
+- [ ] RaBitQ assignment
+- [ ] mini batch K-means
+- [x] PyO3 binding
