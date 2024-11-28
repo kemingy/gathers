@@ -218,8 +218,8 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
 
 #[cfg(test)]
 mod test {
+    use super::{argmin, l2_norm, neg_dot_product, squared_euclidean};
     use super::{native_argmin, native_dot_produce, native_l2_norm, native_squared_euclidean};
-    use crate::simd::{argmin, dot_product, l2_norm, l2_squared_distance};
     use rand::{thread_rng, Rng};
 
     #[test]
@@ -229,8 +229,7 @@ mod test {
         for dim in [4, 12, 64, 70, 78].into_iter() {
             let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
             let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let diff =
-                unsafe { l2_squared_distance(&lhs, &rhs) } - native_squared_euclidean(&lhs, &rhs);
+            let diff = squared_euclidean(&lhs, &rhs) - native_squared_euclidean(&lhs, &rhs);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
     }
@@ -242,7 +241,7 @@ mod test {
         for dim in [4, 12, 64, 70, 78].into_iter() {
             let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
             let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let diff = unsafe { dot_product(&lhs, &rhs) } - native_dot_produce(&lhs, &rhs);
+            let diff = neg_dot_product(&lhs, &rhs) + native_dot_produce(&lhs, &rhs);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
     }
@@ -252,7 +251,7 @@ mod test {
         let mut rng = thread_rng();
         for dim in [4, 12, 64, 70, 78].into_iter() {
             let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let diff = unsafe { l2_norm(&vec) } - native_l2_norm(&vec);
+            let diff = l2_norm(&vec) - native_l2_norm(&vec);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
     }
@@ -262,7 +261,7 @@ mod test {
         let mut rng = thread_rng();
         for dim in [12, 32, 128, 140].into_iter() {
             let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            assert_eq!(unsafe { argmin(&vec) }, native_argmin(&vec));
+            assert_eq!(argmin(&vec), native_argmin(&vec));
         }
     }
 }
