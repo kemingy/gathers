@@ -1,5 +1,7 @@
 # Gathers Python
 
+[![PyPI version](https://badge.fury.io/py/gathers.svg)](https://badge.fury.io/py/gathers)
+
 ## Installation
 
 ```bash
