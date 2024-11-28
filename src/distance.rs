@@ -35,7 +35,7 @@ pub fn l2_norm(vec: &[f32]) -> f32 {
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
-        native_l2_norm
+        native_l2_norm(vec)
     }
 }
 
