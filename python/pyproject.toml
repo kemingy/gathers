@@ -16,7 +16,6 @@ classifiers = [
 ]
 keywords = ["clustering", "algorithm", "rust", "pyo3", "machine-learning"]
 dynamic = ["version"]
-readme = "README.md"
 dependencies = [
     "numpy",
 ]
