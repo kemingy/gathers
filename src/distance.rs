@@ -48,8 +48,9 @@ pub fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
         .sum()
 }
 
+/// Compute the squared Euclidean distance between two vectors.
 #[inline]
-fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         if is_x86_feature_detected!("avx2") {
@@ -73,8 +74,9 @@ pub fn native_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
         .sum::<f32>()
 }
 
+/// Compute the negative dot product between two vectors.
 #[inline]
-fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         if is_x86_feature_detected!("avx2") {
@@ -103,8 +105,9 @@ pub fn native_argmin(vec: &[f32]) -> usize {
     index
 }
 
+/// Find the index of the minimum value in the vector.
 #[inline]
-fn argmin(vec: &[f32]) -> usize {
+pub fn argmin(vec: &[f32]) -> usize {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
         if is_x86_feature_detected!("avx2") {

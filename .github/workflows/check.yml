@@ -1,20 +1,26 @@
-name: Rust
+name: Check
 
 on:
   push:
     branches: [ "main" ]
     paths:
-      - '.github/workflows/rust.yml'
+      - '.github/workflows/check.yml'
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'python/src/**'
+      - 'python/Cargo.toml'
+      - 'python/Cargo.lock'
   pull_request:
     branches: [ "main" ]
     paths:
-      - '.github/workflows/rust.yml'
+      - '.github/workflows/check.yml'
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'python/src/**'
+      - 'python/Cargo.toml'
+      - 'python/Cargo.lock'
   merge_group:
 
 env:
@@ -27,25 +33,37 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
     - uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
     - name: Install lint tools
-      run: rustup component add rustfmt clippy
+      run: |
+        rustup component add rustfmt clippy
+        pip install ruff
     - name: Lint
       run: |
-        cargo fmt -- --check
-        cargo clippy -- -D warnings
+        make lint
 
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-13, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        pip install pytest
     - uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: stable
     - name: Test
       env:
         RUSTFLAGS: -C target-cpu=native
-      run: cargo test
+      run: make test
