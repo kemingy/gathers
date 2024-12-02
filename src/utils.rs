@@ -85,17 +85,33 @@ where
 }
 
 /// Write the fvecs/ivecs file.
-pub fn write_vecs<T, I>(path: &Path, vecs: I) -> std::io::Result<()>
+pub fn write_vecs<T>(path: &Path, vecs: &[impl AsRef<[T]>]) -> std::io::Result<()>
 where
     T: Sized + ToBytes,
-    I: IntoIterator<Item = Vec<T>>,
 {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
-    for vec in vecs.into_iter() {
-        writer.write_all(&(vec.len() as u32).to_le_bytes())?;
-        for v in vec.iter() {
+    for vec in vecs.iter() {
+        writer.write_all(&(vec.as_ref().len() as u32).to_le_bytes())?;
+        for v in vec.as_ref().iter() {
             writer.write_all(T::to_le_bytes(v).as_ref())?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+/// Write the fvecs/ivecs file from DMatrix.
+pub fn write_matrix<T>(path: &Path, matrix: &faer::MatRef<T>) -> std::io::Result<()>
+where
+    T: Sized + ToBytes + faer::Entity,
+{
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    for vec in matrix.row_iter() {
+        writer.write_all(&(vec.ncols() as u32).to_le_bytes())?;
+        for i in 0..vec.ncols() {
+            writer.write_all(T::to_le_bytes(&vec.read(i)).as_ref())?;
         }
     }
     writer.flush()?;

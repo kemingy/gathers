@@ -4,6 +4,7 @@
 
 pub mod distance;
 pub mod kmeans;
+pub mod rabitq;
 pub mod sampling;
 pub mod simd;
 pub mod utils;

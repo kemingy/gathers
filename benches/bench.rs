@@ -1,11 +1,9 @@
-use criterion::criterion_main;
-use criterion::{criterion_group, BenchmarkId, Criterion};
-use rand::{thread_rng, Rng};
-
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use gathers::distance::{
     native_argmin, native_dot_produce, native_l2_norm, native_squared_euclidean,
 };
 use gathers::simd::{argmin, dot_product, l2_norm, l2_squared_distance};
+use rand::{thread_rng, Rng};
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
     let mut rng = thread_rng();

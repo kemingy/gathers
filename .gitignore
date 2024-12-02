@@ -27,6 +27,7 @@ target/
 # data
 *.fvecs
 *.ivecs
+*.u64vecs
 
 # profiling data
 profile.json
