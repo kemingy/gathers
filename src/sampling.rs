@@ -45,7 +45,6 @@ mod test {
         let data = vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0], vec![5.0]];
         let mut data_iter = data.into_iter();
         let res = reservoir_sampling(n_sample, &mut data_iter);
-        dbg!(&res);
         assert_eq!(res.len(), n_sample);
     }
 }

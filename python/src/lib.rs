@@ -59,7 +59,7 @@ fn kmeans_fit<'py>(
         dim,
     );
     let matrix = as_matrix(&centroids, dim);
-    Ok(PyArray2::from_vec2_bound(source.py(), &matrix)?)
+    Ok(PyArray2::from_vec2(source.py(), &matrix)?)
 }
 
 /// A Python module implemented in Rust.

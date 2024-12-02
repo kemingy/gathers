@@ -42,5 +42,5 @@ fn main() {
     );
     let centroids = kmeans.fit(as_continuous_vec(&vecs), dim);
     let centroids_mat = as_matrix(&centroids, dim);
-    write_vecs(Path::new(&args.output), centroids_mat).expect("failed to write centroids");
+    write_vecs(Path::new(&args.output), &centroids_mat).expect("failed to write centroids");
 }

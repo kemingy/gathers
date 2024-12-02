@@ -9,6 +9,7 @@ use rand::distributions::Distribution;
 use rand_distr::StandardNormal;
 
 use crate::distance::squared_euclidean;
+// use crate::utils::{write_matrix, write_vecs};
 
 const DEFAULT_X_DOT_PRODUCT: f32 = 0.8;
 const EPSILON: f32 = 1.9;
@@ -249,22 +250,35 @@ pub struct RaBitQ {
 impl RaBitQ {
     /// Create a new RaBitQ instance.
     pub fn new(centroids: &[f32], dim: usize) -> Self {
-        let mut rng = rand::thread_rng();
-        let random: Mat<f32> = Mat::from_fn(dim, dim, |_, _| StandardNormal.sample(&mut rng));
-        let orthogonal = random.qr().compute_q();
-
+        // init
         let num = centroids.len() / dim;
-        let dim_sqrt = (dim as f32).sqrt();
-        let centroids_mat = Mat::from_fn(num, dim, |i, j| centroids[i * dim + j]);
+        let dim_pad = dim.div_ceil(64) * 64;
+        let centroids_mat = Mat::from_fn(num, dim_pad, |i, j| match j < dim {
+            true => centroids[i * dim + j],
+            false => 0.0,
+        });
+        let dim_sqrt = (dim_pad as f32).sqrt();
+
+        // orthogonal matrix
+        let mut rng = rand::thread_rng();
+        let random: Mat<f32> =
+            Mat::from_fn(dim_pad, dim_pad, |_, _| StandardNormal.sample(&mut rng));
+        let orthogonal = random.qr().compute_q();
+        // let orthogonal = Mat::identity(dim_pad, dim_pad);
+
         let projected = &centroids_mat * &orthogonal;
         let mut factors = vec![Factor::default(); num];
         let mut xc_distances = vec![0.0; num];
         let mut x_dot_product = vec![0.0; num];
         let mut binary_vec = Vec::with_capacity(num);
         let mut signed_vec = Vec::with_capacity(num);
-        let mut mean = projected.row_iter().fold(Row::zeros(dim), |acc, v| acc + v);
+        let mut mean = Row::zeros(dim_pad);
+        for v in projected.row_iter() {
+            mean += v;
+        }
         mean.iter_mut().for_each(|v| *v /= num as f32);
 
+        // factors
         for (i, p) in projected.row_iter().enumerate() {
             let xc = p - &mean;
             xc_distances[i] = xc.norm_l2();
@@ -278,8 +292,8 @@ impl RaBitQ {
             };
         }
 
-        let error_base = 2.0 * EPSILON / (dim as f32 - 1.0).sqrt();
-        let one_vec: Row<f32> = Row::ones(dim);
+        let error_base = 2.0 * EPSILON / (dim_pad as f32 - 1.0).sqrt();
+        let one_vec: Row<f32> = Row::ones(dim_pad);
         for i in 0..num {
             let xc_over_ip = xc_distances[i] / x_dot_product[i];
             let factor = &mut factors[i];
@@ -289,34 +303,49 @@ impl RaBitQ {
             factor.factor_ppc = factor.factor_ip * (&one_vec * &signed_vec[i]);
         }
 
-        let mut idx = (0..num).collect::<Vec<_>>();
-        idx.sort_by(|&i, &j| xc_distances[i].partial_cmp(&xc_distances[j]).unwrap());
+        // sort by distances
+        let mut idx = xc_distances.iter().enumerate().collect::<Vec<_>>();
+        idx.sort_by(|&x, &y| x.1.partial_cmp(y.1).unwrap());
+        let idx = idx.into_iter().map(|(i, _)| i).collect::<Vec<_>>();
         let binary_vec = idx.iter().flat_map(|&i| binary_vec[i].clone()).collect();
-        let factors = idx.iter().map(|&i| factors[i]).collect();
-        let centroids_matrix = Mat::from_fn(num, dim, |i, j| centroids_mat.read(idx[i], j))
+        let factors: Vec<Factor> = idx.iter().map(|&i| factors[i]).collect();
+        let centroids_col_based = Mat::from_fn(num, dim_pad, |i, j| centroids_mat.read(idx[i], j))
             .transpose()
             .to_owned();
 
+        // save to local dir
+        // let path = std::path::Path::new("gathers_rabitq");
+        // std::fs::create_dir(path).expect("failed to create dir");
+        // write_matrix(&path.join("base.fvecs"), &centroids_col_based.transpose()).expect("failed to write base");
+        // write_vecs(&path.join("binary.u64vecs"), &[&binary_vec]).expect("failed to write binary");
+        // write_vecs(&path.join("factors.fvecs"), &[&factors.iter().flat_map(|f| f.into_vec()).collect::<Vec<_>>()]).expect("failed to write factors");
+        // write_vecs(&path.join("ids.ivecs"), &[&idx]).expect("failed to write ids");
+
         RaBitQ {
-            centroids: centroids_matrix,
+            centroids: centroids_col_based,
             orthogonal,
             mean,
             binary_vec,
             factors,
             idx,
-            dim,
+            dim: dim_pad,
         }
     }
 
     /// Retrieve the top-1 index.
     pub fn retrieve_top_one(&self, query: &[f32]) -> usize {
-        assert_eq!(self.dim, query.len());
-        let projected = project(query, &self.orthogonal.as_ref());
+        assert_eq!(self.dim, query.len().div_ceil(64) * 64);
+        let mut query_pad = query.to_vec();
+        if self.dim > query.len() {
+            query_pad.extend_from_slice(&vec![0.0; self.dim - query.len()]);
+        }
+
+        let projected = project(&query_pad, &self.orthogonal.as_ref());
         let mut rough_distances = Vec::new();
         let mut quantized = vec![0u8; self.dim];
         let mut binary = vec![0u64; (self.dim * THETA_LOG_DIM).div_ceil(64)];
         let mut residual = vec![0.0; self.dim];
-        let yc_distance = squared_euclidean(query, self.mean.as_slice());
+        let yc_distance = squared_euclidean(projected.as_slice(), self.mean.as_slice());
 
         let (lower_bound, upper_bound) =
             min_max_residual(&mut residual, projected.as_slice(), self.mean.as_slice());
@@ -332,7 +361,7 @@ impl RaBitQ {
             delta,
             &mut rough_distances,
         );
-        self.rank(&rough_distances, query)
+        self.rank(&rough_distances, &query_pad)
     }
 
     fn calculate_rough_distance(
@@ -382,7 +411,7 @@ impl RaBitQ {
                 );
                 if accurate < threshold {
                     threshold = accurate;
-                    min_index = i;
+                    min_index = self.idx[i];
                 }
             }
         }
