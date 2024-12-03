@@ -11,11 +11,14 @@ pip install gathers
 ## Usage
 
 ```python
-from gathers import assign, kmeans_fit
+from gathers import Gathers
 import numpy as np
 
 
-data = np.random.rand(1000, 8).astype(np.float32)
-centroids = kmeans_fit(data, 10, 10)
-label = assign(data[0], centroids)
+gathers = Gathers(verbose=True)
+rng = np.random.default_rng()
+data = rng.random((1000, 64), dtype=np.float32)
+centroids = gathers.fit(data, 10)
+labels = gathers.batch_assign(data, centroids)
+print(labels)
 ```

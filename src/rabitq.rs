@@ -1,15 +1,14 @@
 //! A minimal RaBitQ implementation for top-1 retrieval.
 
 use core::f32;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::row::from_slice as row_from_slice;
 use faer::{Col, Mat, MatRef, Row};
-use log::debug;
 use rand::distributions::Distribution;
 use rand_distr::StandardNormal;
 
 use crate::distance::squared_euclidean;
-// use crate::utils::{write_matrix, write_vecs};
 
 const DEFAULT_X_DOT_PRODUCT: f32 = 0.8;
 const EPSILON: f32 = 1.9;
@@ -236,6 +235,26 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
     res
 }
 
+#[derive(Debug, Default)]
+struct Metrics {
+    pub rough: AtomicU64,
+    pub precise: AtomicU64,
+}
+
+impl Metrics {
+    pub fn update(&self, rough: u64, precise: u64) {
+        self.rough.fetch_add(rough, Ordering::Relaxed);
+        self.precise.fetch_add(precise, Ordering::Relaxed);
+    }
+
+    pub fn fetch(&self) -> (u64, u64) {
+        (
+            self.rough.load(Ordering::Relaxed),
+            self.precise.load(Ordering::Relaxed),
+        )
+    }
+}
+
 /// RaBitQ struct for top-1 retrieval.
 pub struct RaBitQ {
     centroids: Mat<f32>,
@@ -245,6 +264,7 @@ pub struct RaBitQ {
     binary_vec: Vec<u64>,
     idx: Vec<usize>,
     dim: usize,
+    metrics: Metrics,
 }
 
 impl RaBitQ {
@@ -313,14 +333,6 @@ impl RaBitQ {
             .transpose()
             .to_owned();
 
-        // save to local dir
-        // let path = std::path::Path::new("gathers_rabitq");
-        // std::fs::create_dir(path).expect("failed to create dir");
-        // write_matrix(&path.join("base.fvecs"), &centroids_col_based.transpose()).expect("failed to write base");
-        // write_vecs(&path.join("binary.u64vecs"), &[&binary_vec]).expect("failed to write binary");
-        // write_vecs(&path.join("factors.fvecs"), &[&factors.iter().flat_map(|f| f.into_vec()).collect::<Vec<_>>()]).expect("failed to write factors");
-        // write_vecs(&path.join("ids.ivecs"), &[&idx]).expect("failed to write ids");
-
         RaBitQ {
             centroids: centroids_col_based,
             orthogonal,
@@ -329,6 +341,7 @@ impl RaBitQ {
             factors,
             idx,
             dim: dim_pad,
+            metrics: Metrics::default(),
         }
     }
 
@@ -341,7 +354,7 @@ impl RaBitQ {
         }
 
         let projected = project(&query_pad, &self.orthogonal.as_ref());
-        let mut rough_distances = Vec::new();
+        let mut rough_distances = Vec::with_capacity(self.centroids.nrows());
         let mut quantized = vec![0u8; self.dim];
         let mut binary = vec![0u64; (self.dim * THETA_LOG_DIM).div_ceil(64)];
         let mut residual = vec![0.0; self.dim];
@@ -415,8 +428,13 @@ impl RaBitQ {
                 }
             }
         }
-        debug!("precise count: {}", count);
+        self.metrics.update(rough_distances.len() as u64, count);
 
         min_index
+    }
+
+    /// Get the rough/precise metrics.
+    pub fn get_metrics(&self) -> (u64, u64) {
+        self.metrics.fetch()
     }
 }

@@ -14,6 +14,7 @@ use crate::utils::{as_continuous_vec, centroid_residual, normalize};
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
+const LARGE_CLUSTER_THRESHOLD: usize = 1 << 20;
 
 /// Assign vectors to centroids.
 pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
@@ -55,6 +56,13 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
     for (i, vec) in vecs.chunks(dim).enumerate() {
         labels[i] = rabitq.retrieve_top_one(vec) as u32;
     }
+    let (rough, precise) = rabitq.get_metrics();
+    debug!(
+        "RaBitQ: rough {}, precise {}, ratio: {}",
+        rough,
+        precise,
+        rough as f32 / precise as f32
+    )
 }
 
 /// Update centroids to the mean of assigned vectors.
@@ -203,8 +211,12 @@ impl KMeans {
         debug!("start training");
         for i in 0..self.max_iter {
             let start_time = Instant::now();
-            assign(&vecs, &centroids, dim, self.distance, &mut labels);
-            // rabitq_assign(&vecs, &centroids, dim, &mut labels);
+            if self.distance == Distance::NegativeDotProduct || num * dim <= LARGE_CLUSTER_THRESHOLD
+            {
+                assign(&vecs, &centroids, dim, self.distance, &mut labels);
+            } else {
+                rabitq_assign(&vecs, &centroids, dim, &mut labels);
+            }
             let diff = update_centroids(&vecs, &mut centroids, dim, &labels);
             if self.distance == Distance::NegativeDotProduct {
                 centroids.chunks_mut(dim).for_each(normalize);
