@@ -487,7 +487,8 @@ pub unsafe fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
         _mm256_castsi256_si128(sum256),
         _mm256_extracti128_si256(sum256, 1),
     );
-    sum += _mm_cvtsi128_si64(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
+    // this assumes the sum is less than 2^31, which should be true for most cases
+    sum += _mm_cvtsi128_si32(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
 
     sum
 }
