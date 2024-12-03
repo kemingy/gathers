@@ -38,3 +38,5 @@ target-version = "py39"
 [tool.ruff.lint]
 select = ["E", "F", "G", "B", "I", "SIM", "TID", "PL", "RUF"]
 ignore = ["E501"]
+[tool.ruff.lint.isort]
+known-first-party = ["gathers", "gatherspy"]

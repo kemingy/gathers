@@ -27,6 +27,6 @@ install-python:
 	@cd python && pip install -e .
 
 test-python: install-python
-	@pytest -v python/tests
+	@pytest -v -s python/tests
 
 test: test-rust test-python

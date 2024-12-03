@@ -27,7 +27,7 @@ struct Args {
 fn main() {
     let args: Args = argh::from_env();
 
-    let env = Env::default().filter_or("RUST_LOG", "debug");
+    let env = Env::default().filter_or("GATHERS_LOG", "debug");
     env_logger::init_from_env(env);
     debug!("{:?}", args);
 

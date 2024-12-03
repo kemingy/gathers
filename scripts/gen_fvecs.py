@@ -54,5 +54,3 @@ def generate_random(dim: int, num: int, query: int, topk: int, filepath: str):
 
 if __name__ == "__main__":
     generate_random(100, 1000, 10, 1, "dataset-random")
-    # vecs = read_vec("dataset-random/base.fvecs")
-    # rabitq_test(vecs)
