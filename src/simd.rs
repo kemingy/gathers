@@ -3,7 +3,8 @@
 use crate::rabitq::THETA_LOG_DIM;
 
 /// Compute the squared Euclidean distance between two vectors.
-/// Code refer to https://github.com/nmslib/hnswlib/blob/master/hnswlib/space_l2.h
+/// 
+/// Code refer to <https://github.com/nmslib/hnswlib/blob/master/hnswlib/space_l2.h>
 ///
 /// # Safety
 ///
@@ -425,7 +426,7 @@ pub unsafe fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
 
 /// Compute the binary dot product of two vectors.
 ///
-/// Refer to: https://github.com/komrad36/popcount
+/// Refer to: <https://github.com/komrad36/popcount>
 ///
 /// # Safety
 ///

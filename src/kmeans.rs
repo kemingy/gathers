@@ -154,6 +154,7 @@ pub struct KMeans {
     tolerance: f32,
     distance: Distance,
     use_residual: bool,
+    use_default_config: bool,
 }
 
 impl Default for KMeans {
@@ -164,12 +165,21 @@ impl Default for KMeans {
             tolerance: 1e-4,
             distance: Distance::default(),
             use_residual: false,
+            use_default_config: true,
         }
     }
 }
 
 impl KMeans {
     /// Create a new KMeans instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `n_cluster` - number of clusters, recommend to be a number in [sqrt(n) * 4, sqrt(n) * 8]
+    /// * `max_iter` - max number of iterations
+    /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
+    /// * `distance` - distance metric
+    /// * `use_residual` - use residual for more accurate L2 distance computations, only work for L2
     pub fn new(
         n_cluster: u32,
         max_iter: u32,
@@ -192,17 +202,27 @@ impl KMeans {
             tolerance,
             distance,
             use_residual,
+            use_default_config: false,
         }
     }
 
     /// Fit the KMeans configurations to the given vectors and return the centroids.
     pub fn fit(&self, mut vecs: Vec<f32>, dim: usize) -> Vec<f32> {
         let num = vecs.len() / dim;
-        debug!("num of points: {}", num);
-        if num < self.n_cluster as usize {
+
+        // auto-config the `n_cluster` if it's initialized with `default()`
+        let n_cluster = match self.use_default_config {
+            true => {
+                (((num as f32).sqrt() as u32) * 4).min((num / MIN_POINTS_PER_CENTROID) as u32)
+            }
+            false => self.n_cluster,
+        };
+        debug!("num of points: {}, num of clusters: {}", num, n_cluster);
+
+        if num < n_cluster as usize {
             panic!("number of samples must be greater than n_cluster");
         }
-        if num < self.n_cluster as usize * MIN_POINTS_PER_CENTROID {
+        if num < n_cluster as usize * MIN_POINTS_PER_CENTROID {
             panic!("too few samples for n_cluster");
         }
 
@@ -213,13 +233,13 @@ impl KMeans {
         }
 
         // subsample
-        if num > MAX_POINTS_PER_CENTROID * self.n_cluster as usize {
-            let n_sample = MAX_POINTS_PER_CENTROID * self.n_cluster as usize;
+        if num > MAX_POINTS_PER_CENTROID * n_cluster as usize {
+            let n_sample = MAX_POINTS_PER_CENTROID * n_cluster as usize;
             debug!("subsample to {} points", n_sample);
             vecs = as_continuous_vec(&subsample(n_sample, &vecs, dim));
         }
 
-        let mut centroids = as_continuous_vec(&subsample(self.n_cluster as usize, &vecs, dim));
+        let mut centroids = as_continuous_vec(&subsample(n_cluster as usize, &vecs, dim));
         if self.distance == Distance::NegativeDotProduct {
             centroids.chunks_mut(dim).for_each(normalize);
         }
