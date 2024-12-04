@@ -19,6 +19,7 @@ log = "0.4.22"
 num-traits = "0.2.19"
 rand = "0.8.5"
 rand_distr = "0.4.3"
+rayon = "1.10.0"
 
 [profile.dev.package.faer]
 opt-level = 3

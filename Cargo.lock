@@ -437,6 +437,7 @@ dependencies = [
  "num-traits",
  "rand",
  "rand_distr",
+ "rayon",
 ]
 
 [[package]]

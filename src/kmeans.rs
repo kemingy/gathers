@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use log::debug;
 use rand::Rng;
+use rayon::prelude::*;
 
 use crate::distance::{argmin, neg_dot_product, squared_euclidean, Distance};
 use crate::rabitq::RaBitQ;
@@ -15,6 +16,7 @@ const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 20;
+const RAYON_BLOCK_SIZE: usize = 1024 * 32;
 
 /// Assign vectors to centroids.
 pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
@@ -36,14 +38,22 @@ pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, l
             // let squared_x: Vec<f32> = vecs.chunks(dim).map(l2_norm).collect();
             // let squared_y: Vec<f32> = centroids.chunks(dim).map(l2_norm).collect();
 
-            for (i, vec) in vecs.chunks(dim).enumerate() {
-                for (j, centroid) in centroids.chunks(dim).enumerate() {
-                    distances[j] =
-                        // squared_x[i] + squared_y[j] + 2.0 * neg_dot_product(vec, centroid);
-                    squared_euclidean(vec, centroid);
-                }
-                labels[i] = argmin(&distances) as u32;
-            }
+            labels.copy_from_slice(
+                &vecs
+                    .par_chunks(dim * RAYON_BLOCK_SIZE)
+                    .flat_map(|vec| {
+                        let mut par_labels = vec![0; vec.len() / dim];
+                        let mut par_distances = vec![f32::MAX; centroids.len() / dim];
+                        for (i, v) in vec.chunks(dim).enumerate() {
+                            for (j, centroid) in centroids.chunks(dim).enumerate() {
+                                par_distances[j] = squared_euclidean(v, centroid);
+                            }
+                            par_labels[i] = argmin(&par_distances) as u32;
+                        }
+                        par_labels
+                    })
+                    .collect::<Vec<_>>(),
+            );
         }
     }
 }
@@ -53,9 +63,18 @@ pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, l
 /// TODO: support dot product distance
 pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
     let rabitq = RaBitQ::new(centroids, dim);
-    for (i, vec) in vecs.chunks(dim).enumerate() {
-        labels[i] = rabitq.retrieve_top_one(vec) as u32;
-    }
+
+    labels.copy_from_slice(
+        &vecs
+            .par_chunks(dim * RAYON_BLOCK_SIZE)
+            .flat_map(|vec| {
+                vec.chunks(dim)
+                    .map(|v| rabitq.retrieve_top_one(v) as u32)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+    );
+
     let (rough, precise) = rabitq.get_metrics();
     debug!(
         "RaBitQ: rough {}, precise {}, ratio: {}",
@@ -197,9 +216,7 @@ impl KMeans {
         if num > MAX_POINTS_PER_CENTROID * self.n_cluster as usize {
             let n_sample = MAX_POINTS_PER_CENTROID * self.n_cluster as usize;
             debug!("subsample to {} points", n_sample);
-            let subsampled = as_continuous_vec(&subsample(n_sample, &vecs, dim));
-            vecs.shrink_to(subsampled.len());
-            vecs.copy_from_slice(&subsampled);
+            vecs = as_continuous_vec(&subsample(n_sample, &vecs, dim));
         }
 
         let mut centroids = as_continuous_vec(&subsample(self.n_cluster as usize, &vecs, dim));
