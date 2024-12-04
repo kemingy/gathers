@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "gathers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argh",
  "env_logger",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "gatherspy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gathers",
  "numpy",
