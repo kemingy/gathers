@@ -212,9 +212,7 @@ impl KMeans {
 
         // auto-config the `n_cluster` if it's initialized with `default()`
         let n_cluster = match self.use_default_config {
-            true => {
-                (((num as f32).sqrt() as u32) * 4).min((num / MIN_POINTS_PER_CENTROID) as u32)
-            }
+            true => (((num as f32).sqrt() as u32) * 4).min((num / MIN_POINTS_PER_CENTROID) as u32),
             false => self.n_cluster,
         };
         debug!("num of points: {}, num of clusters: {}", num, n_cluster);
