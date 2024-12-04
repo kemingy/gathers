@@ -7,8 +7,8 @@
 Clustering algorithm implementation:
 
 - [x] K-means
-- [ ] Parallel
-- [ ] Hierarchical K-means
-- [x] RaBitQ assignment
-- [ ] mini batch K-means
 - [x] PyO3 binding
+- [x] RaBitQ assignment
+- [x] Parallel with Rayon
+- [ ] mini batch K-means
+- [ ] Hierarchical K-means
