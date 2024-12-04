@@ -17,7 +17,7 @@ import numpy as np
 
 gathers = Gathers(verbose=True)
 rng = np.random.default_rng()
-data = rng.random((1000, 64), dtype=np.float32)
+data = rng.random((1000, 64), dtype=np.float32)  # only support float32
 centroids = gathers.fit(data, 10)
 labels = gathers.batch_assign(data, centroids)
 print(labels)

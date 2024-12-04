@@ -28,7 +28,7 @@ where
     }
 }
 
-/// Convert a 2-D Vec<Vec<T>> to a 1-D continuous vector.
+/// Convert a 2-D `Vec<Vec<T>>` to a 1-D continuous vector.
 #[inline]
 pub fn as_continuous_vec<T>(mat: &[Vec<T>]) -> Vec<T>
 where
@@ -37,7 +37,7 @@ where
     mat.iter().flat_map(|v| v.iter().cloned()).collect()
 }
 
-/// Convert a 1-D continuous vector to a 2-D Vec<Vec<T>>.
+/// Convert a 1-D continuous vector to a 2-D `Vec<Vec<T>>`.
 #[inline]
 pub fn as_matrix<T>(vecs: &[T], dim: usize) -> Vec<Vec<T>>
 where
