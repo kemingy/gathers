@@ -187,11 +187,11 @@ impl KMeans {
         distance: Distance,
         use_residual: bool,
     ) -> Self {
-        if n_cluster <= 1 {
-            panic!("n_cluster must be greater than 1");
+        if n_cluster < 1 {
+            panic!("n_cluster must be greater than 0");
         }
-        if max_iter <= 1 {
-            panic!("max_iter must be greater than 1");
+        if max_iter < 1 {
+            panic!("max_iter must be greater than 0");
         }
         if tolerance <= 0.0 {
             panic!("tolerance must be greater than 0.0");
