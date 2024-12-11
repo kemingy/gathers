@@ -16,7 +16,7 @@ const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 20;
-const RAYON_BLOCK_SIZE: usize = 1024 * 32;
+const RAYON_BLOCK_SIZE: usize = 64;
 
 /// Assign vectors to centroids.
 pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {

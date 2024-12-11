@@ -97,6 +97,7 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
 }
 
 // Get the min/max value of the residual of two vectors.
+#[inline]
 fn min_max_raw(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
     let mut min = f32::MAX;
     let mut max = f32::MIN;
@@ -130,6 +131,7 @@ pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
 }
 
 // Quantize the query residual vector.
+#[inline]
 fn scalar_quantize_raw(
     quantized: &mut [u8],
     vec: &[f32],
