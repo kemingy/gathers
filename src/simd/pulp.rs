@@ -221,12 +221,13 @@ pub fn min_max_residual<S: Simd>(simd: S, res: &mut [f32], x: &[f32], y: &[f32])
             let (x2, x1) = as_arrays::<2, _>(x);
             let (y2, y1) = as_arrays::<2, _>(y);
 
-            let infty = f32::INFINITY;
+            let infty = simd.splat_f32s(f32::INFINITY);
+            let neg_infty = simd.splat_f32s(f32::NEG_INFINITY);
 
-            let mut min0 = simd.splat_f32s(infty);
-            let mut min1 = simd.splat_f32s(infty);
-            let mut max0 = simd.splat_f32s(-infty);
-            let mut max1 = simd.splat_f32s(-infty);
+            let mut min0 = infty;
+            let mut min1 = infty;
+            let mut max0 = neg_infty;
+            let mut max1 = neg_infty;
 
             for ([res0, res1], (&[x0, x1], &[y0, y1])) in iter::zip(res2, iter::zip(x2, y2)) {
                 let diff = simd.sub_f32s(x0, y0);
@@ -248,14 +249,16 @@ pub fn min_max_residual<S: Simd>(simd: S, res: &mut [f32], x: &[f32], y: &[f32])
             }
 
             {
+                let m = simd.mask_between_m32s(0, x_tail.len() as u32).mask();
+
                 let x0 = simd.partial_load_f32s(x_tail);
                 let y0 = simd.partial_load_f32s(y_tail);
 
                 let diff = simd.sub_f32s(x0, y0);
                 simd.partial_store_f32s(res_tail, diff);
 
-                min0 = simd.min_f32s(min0, diff);
-                max0 = simd.max_f32s(max0, diff);
+                min0 = simd.min_f32s(min0, simd.select_f32s_m32s(m, diff, infty));
+                max0 = simd.max_f32s(max0, simd.select_f32s_m32s(m, diff, neg_infty));
             }
 
             (simd.reduce_min_f32s(min0), simd.reduce_max_f32s(max0))

@@ -436,7 +436,7 @@ dependencies = [
  "faer",
  "log",
  "num-traits",
- "pulp 0.20.1",
+ "pulp 0.21.0",
  "rand",
  "rand_distr",
  "rayon",
@@ -848,11 +848,12 @@ dependencies = [
 
 [[package]]
 name = "pulp"
-version = "0.20.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e3f19bdeda2e49d16c8ae90f9615adc2298ee16974bb250d0afb705e33043f"
+checksum = "04badad8b0d8851e02f6aac34b8b100c4e6ea0f9b375b3e2df5a89d7453880a0"
 dependencies = [
  "bytemuck",
+ "cfg-if",
  "libm",
  "num-complex",
  "reborrow",
