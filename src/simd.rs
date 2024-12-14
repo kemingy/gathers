@@ -8,6 +8,7 @@ pub mod pulp;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 ::pulp::simd_type!(
+    #[allow(clippy::too_many_arguments)]
     pub(crate) struct Avx2 {
         sse2: "sse2",
         avx: "avx",
