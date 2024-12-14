@@ -248,6 +248,9 @@ pub fn min_max_residual<S: Simd>(simd: S, res: &mut [f32], x: &[f32], y: &[f32])
                 max0 = simd.max_f32s(max0, diff);
             }
 
+            min0 = simd.min_f32s(min0, min1);
+            max0 = simd.max_f32s(max0, max1);
+
             {
                 let m = simd.mask_between_m32s(0, x_tail.len() as u32).mask();
 
