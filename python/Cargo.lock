@@ -315,7 +315,7 @@ dependencies = [
  "libm",
  "num-complex",
  "num-traits",
- "pulp",
+ "pulp 0.18.22",
  "reborrow",
 ]
 
@@ -324,10 +324,12 @@ name = "gathers"
 version = "0.3.1"
 dependencies = [
  "argh",
+ "bytemuck",
  "env_logger",
  "faer",
  "log",
  "num-traits",
+ "pulp 0.21.0",
  "rand",
  "rand_distr",
  "rayon",
@@ -335,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "gatherspy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "gathers",
  "numpy",
@@ -405,7 +407,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
- "pulp",
+ "pulp 0.18.22",
  "raw-cpuid",
  "seq-macro",
  "sysctl",
@@ -745,6 +747,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a0a01a0dc67cf4558d279f0c25b0962bd08fc6dec0137699eae304103e882fe6"
 dependencies = [
  "bytemuck",
+ "libm",
+ "num-complex",
+ "reborrow",
+]
+
+[[package]]
+name = "pulp"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04badad8b0d8851e02f6aac34b8b100c4e6ea0f9b375b3e2df5a89d7453880a0"
+dependencies = [
+ "bytemuck",
+ "cfg-if",
  "libm",
  "num-complex",
  "reborrow",

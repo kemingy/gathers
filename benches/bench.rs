@@ -2,7 +2,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use gathers::distance::{
     native_argmin, native_dot_produce, native_l2_norm, native_squared_euclidean,
 };
-use gathers::simd::{argmin, dot_product, l2_norm, l2_squared_distance};
+use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
+use pulp::x86::V3;
 use rand::{thread_rng, Rng};
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
@@ -18,6 +19,11 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
             b.iter(|| unsafe { l2_norm(&input) })
         });
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
+                b.iter(|| simd::pulp::l2_norm(simd, &input))
+            });
+        }
     }
     group.finish();
 }
@@ -35,6 +41,11 @@ pub fn argmin_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
             b.iter(|| unsafe { argmin(&input) })
         });
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
+                b.iter(|| simd::pulp::argmin(simd, &input))
+            });
+        }
     }
 }
 
@@ -54,6 +65,11 @@ pub fn l2_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
             b.iter(|| unsafe { l2_squared_distance(&input.0, &input.1) })
         });
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
+                b.iter(|| simd::pulp::l2_squared_distance(simd, &input.0, &input.1))
+            });
+        }
     }
     group.finish();
 }
@@ -74,6 +90,11 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
             b.iter(|| unsafe { dot_product(&input.0, &input.1) })
         });
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
+                b.iter(|| simd::pulp::dot_product(simd, &input.0, &input.1))
+            });
+        }
     }
     group.finish();
 }

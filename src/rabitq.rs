@@ -3,7 +3,6 @@
 use core::f32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use faer::row::from_slice as row_from_slice;
 use faer::{Col, Mat, MatRef, Row};
 use rand::distributions::Distribution;
 use rand_distr::StandardNormal;
@@ -74,11 +73,20 @@ pub fn vector_binarize_one(vec: &[f32]) -> Col<f32> {
 /// Project the vector to the orthogonal matrix.
 #[inline]
 pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            Col::from_fn(orthogonal.ncols(), |i| unsafe {
-                crate::simd::dot_product(
+    struct Impl<'a> {
+        vec: &'a [f32],
+        orthogonal: &'a MatRef<'a, f32>,
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = Col<f32>;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { vec, orthogonal } = self;
+            Col::from_fn(orthogonal.ncols(), |i| {
+                crate::simd::pulp::dot_product(
+                    simd,
                     vec,
                     orthogonal
                         .col(i)
@@ -86,48 +94,32 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
                         .expect("failed to get orthogonal slice"),
                 )
             })
-        } else {
-            (row_from_slice(vec) * orthogonal).transpose().to_owned()
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        (row_from_slice(vec) * orthogonal).transpose().to_owned()
-    }
-}
 
-// Get the min/max value of the residual of two vectors.
-#[inline]
-fn min_max_raw(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
-    let mut min = f32::MAX;
-    let mut max = f32::MIN;
-    for i in 0..res.len() {
-        res[i] = x[i] - y[i];
-        if res[i] < min {
-            min = res[i];
-        }
-        if res[i] > max {
-            max = res[i];
-        }
-    }
-    (min, max)
+    pulp::Arch::new().dispatch(Impl { vec, orthogonal })
 }
 
 /// Interface of `min_max_residual`: get the min/max value of the residual of two vectors.
 #[inline]
 pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx") {
-            unsafe { crate::simd::min_max_residual(res, x, y) }
-        } else {
-            min_max_raw(res, x, y)
+    struct Impl<'a> {
+        res: &'a mut [f32],
+        x: &'a [f32],
+        y: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = (f32, f32);
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { res, x, y } = self;
+            crate::simd::pulp::min_max_residual(simd, res, x, y)
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        min_max_raw(res, x, y)
-    }
+
+    pulp::Arch::new().dispatch(Impl { res, x, y })
 }
 
 // Quantize the query residual vector.
@@ -157,8 +149,8 @@ pub fn scalar_quantize(
 ) -> u32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { crate::simd::scalar_quantize(quantized, vec, lower_bound, multiplier) }
+        if crate::simd::Avx2::is_available() {
+            crate::simd::scalar_quantize(quantized, vec, lower_bound, multiplier)
         } else {
             scalar_quantize_raw(quantized, vec, lower_bound, multiplier)
         }
@@ -185,10 +177,8 @@ fn vector_binarize_query_raw(vec: &[u8], binary: &mut [u64]) {
 pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                crate::simd::vector_binarize_query(vec, binary);
-            }
+        if crate::simd::Avx2::is_available() {
+            crate::simd::vector_binarize_query(vec, binary);
         } else {
             vector_binarize_query_raw(vec, binary);
         }
@@ -221,8 +211,8 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
         res += {
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             {
-                if is_x86_feature_detected!("avx2") {
-                    unsafe { crate::simd::binary_dot_product(x, y_slice) << i }
+                if crate::simd::Avx2::is_available() {
+                    crate::simd::binary_dot_product(x, y_slice) << i
                 } else {
                     binary_dot_product(x, y_slice) << i
                 }

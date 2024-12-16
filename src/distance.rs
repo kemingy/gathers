@@ -20,18 +20,21 @@ pub fn native_l2_norm(vec: &[f32]) -> f32 {
 /// Compute the L2 norm of the vector.
 #[inline]
 pub fn l2_norm(vec: &[f32]) -> f32 {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { crate::simd::l2_norm(vec) }
-        } else {
-            native_l2_norm(vec)
+    struct Impl<'a> {
+        vec: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = f32;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { vec } = self;
+            crate::simd::pulp::l2_norm(simd, vec)
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        native_l2_norm(vec)
-    }
+
+    pulp::Arch::new().dispatch(Impl { vec })
 }
 
 /// Native implementation of squared euclidean distance.
@@ -46,18 +49,22 @@ pub fn native_squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
 /// Compute the squared Euclidean distance between two vectors.
 #[inline]
 pub fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { crate::simd::l2_squared_distance(lhs, rhs) }
-        } else {
-            native_squared_euclidean(lhs, rhs)
+    struct Impl<'a> {
+        lhs: &'a [f32],
+        rhs: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = f32;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { lhs, rhs } = self;
+            crate::simd::pulp::l2_squared_distance(simd, lhs, rhs)
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        native_squared_euclidean(lhs, rhs)
-    }
+
+    pulp::Arch::new().dispatch(Impl { lhs, rhs })
 }
 
 /// Native implementation of negative dot product.
@@ -72,18 +79,22 @@ pub fn native_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
 /// Compute the negative dot product between two vectors.
 #[inline]
 pub fn neg_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { -crate::simd::dot_product(lhs, rhs) }
-        } else {
-            -native_dot_produce(lhs, rhs)
+    struct Impl<'a> {
+        lhs: &'a [f32],
+        rhs: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = f32;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { lhs, rhs } = self;
+            -crate::simd::pulp::dot_product(simd, lhs, rhs)
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        -native_dot_produce(lhs, rhs)
-    }
+
+    pulp::Arch::new().dispatch(Impl { lhs, rhs })
 }
 
 /// Native implementation of argmin.
@@ -103,18 +114,21 @@ pub fn native_argmin(vec: &[f32]) -> usize {
 /// Find the index of the minimum value in the vector.
 #[inline]
 pub fn argmin(vec: &[f32]) -> usize {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if is_x86_feature_detected!("avx2") {
-            unsafe { crate::simd::argmin(vec) }
-        } else {
-            native_argmin(vec)
+    struct Impl<'a> {
+        vec: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = usize;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            let Self { vec } = self;
+            crate::simd::pulp::argmin(simd, vec)
         }
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        native_argmin(vec)
-    }
+
+    pulp::Arch::new().dispatch(Impl { vec })
 }
 
 #[cfg(test)]
