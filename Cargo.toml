@@ -10,6 +10,7 @@ description = "Clustering algorithms."
 documentation = "https://docs.rs/gathers"
 keywords = ["cluster", "kmeans", "rabitq", "machine-learning", "vector-search"]
 categories = ["algorithms", "science"]
+rust-version = "1.83"
 
 [dependencies]
 argh = "0.1.12"
