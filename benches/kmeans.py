@@ -5,6 +5,7 @@ from struct import unpack, pack
 from faiss import Kmeans
 from sklearn.cluster import MiniBatchKMeans
 import numpy as np
+from gathers import Gathers
 
 
 def build_arg_parser():
@@ -15,7 +16,11 @@ def build_arg_parser():
     parser.add_argument("--input", "-i", type=str, required=True)
     parser.add_argument("--output", "-o", type=str, required=True)
     parser.add_argument(
-        "--library", "-l", type=str, default="faiss", choices=["faiss", "sklearn"]
+        "--library",
+        "-l",
+        type=str,
+        default="faiss",
+        choices=["faiss", "sklearn", "gathers"],
     )
     return parser
 
@@ -73,10 +78,26 @@ def sklearn_cluster(args):
     write_vec(args.output, kmeans.cluster_centers_)
 
 
+def gathers_cluster(args):
+    vecs = read_vec(args.input)
+    gathers = Gathers(verbose=args.verbose)
+    t_start = perf_counter()
+    centroids = gathers.fit(
+        vecs=vecs, n_cluster=args.n_clusters, max_iter=args.max_iter
+    )
+    print(f"gathers k-means training time: {perf_counter() - t_start:.6f}s")
+    write_vec(args.output, centroids)
+
+
 if __name__ == "__main__":
     args = build_arg_parser().parse_args()
     print(args)
-    if args.library == "faiss":
-        faiss_cluster(args)
-    else:
-        sklearn_cluster(args)
+    match args.library:
+        case "faiss":
+            faiss_cluster(args)
+        case "sklearn":
+            sklearn_cluster(args)
+        case "gathers":
+            gathers_cluster(args)
+        case _:
+            raise ValueError(f"Invalid library name: {args.library}")
