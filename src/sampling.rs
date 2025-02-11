@@ -1,7 +1,7 @@
 //! Down sampling methods.
 
 use num_traits::Num;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 
 /// Subsample a given number of vectors from a list of vectors.
 pub fn subsample(n_sample: usize, vecs: &[f32], dim: usize) -> Vec<Vec<f32>> {
@@ -17,7 +17,7 @@ where
     T: Num + Copy,
 {
     let mut res = Vec::with_capacity(n_sample);
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     for _ in 0..n_sample {
         res.push(iteration.next().expect("iteration less than n_sample"));
@@ -25,7 +25,7 @@ where
 
     let mut i = n_sample;
     for vec in iteration.by_ref() {
-        let j = rng.gen_range(0..=i);
+        let j = rng.random_range(0..=i);
         if j < n_sample {
             res[j] = vec;
         }

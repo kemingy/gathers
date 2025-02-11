@@ -133,7 +133,7 @@ pub fn argmin(vec: &[f32]) -> usize {
 
 #[cfg(test)]
 mod test {
-    use rand::{thread_rng, Rng};
+    use rand::Rng;
 
     use super::{
         argmin, l2_norm, l2_norm_native, native_argmin, native_dot_produce,
@@ -142,11 +142,11 @@ mod test {
 
     #[test]
     fn test_l2_squared_distance() {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
 
         for dim in [4, 12, 64, 70, 78].into_iter() {
-            let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+            let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
             let diff = squared_euclidean(&lhs, &rhs) - native_squared_euclidean(&lhs, &rhs);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
@@ -154,11 +154,11 @@ mod test {
 
     #[test]
     fn test_dot_product_distance() {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
 
         for dim in [4, 12, 64, 70, 78].into_iter() {
-            let lhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let rhs = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+            let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
             let diff = neg_dot_product(&lhs, &rhs) + native_dot_produce(&lhs, &rhs);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
@@ -166,9 +166,9 @@ mod test {
 
     #[test]
     fn test_l2_norm() {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         for dim in [4, 12, 64, 70, 78].into_iter() {
-            let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
             let diff = l2_norm(&vec) - l2_norm_native(&vec);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
@@ -176,9 +176,9 @@ mod test {
 
     #[test]
     fn test_argmin() {
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         for dim in [12, 32, 128, 140].into_iter() {
-            let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
+            let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
             assert_eq!(argmin(&vec), native_argmin(&vec));
         }
     }

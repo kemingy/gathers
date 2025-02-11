@@ -155,11 +155,11 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
             // need to split another cluster to fill this empty cluster
             zero_count += 1;
             let mut target = 0;
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let base = 1.0 / (vecs.len() / dim - labels.len()) as f32;
             loop {
                 let p = (elements[target] - 1) as f32 * base;
-                if rng.gen::<f32>() < p {
+                if rng.random::<f32>() < p {
                     break;
                 }
                 target = (target + 1) % labels.len();

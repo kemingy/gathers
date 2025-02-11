@@ -5,14 +5,14 @@ use gathers::distance::{
 use gathers::rabitq::{binary_dot_product_native, min_max_residual, min_max_residual_native};
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 use pulp::x86::V3;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("norm");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let x: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(BenchmarkId::new("native", dim), &x, |b, input| {
             b.iter(|| l2_norm_native(&input))
@@ -30,12 +30,12 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
 }
 
 pub fn min_max_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("min_max");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
-        let y: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let x: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
+        let y: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
         let residual = vec![0.0; dim];
 
         group.bench_with_input(
@@ -72,11 +72,11 @@ pub fn min_max_benchmark(c: &mut Criterion) {
 }
 
 pub fn argmin_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("argmin");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let x: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(BenchmarkId::new("native", dim), &x, |b, input| {
             b.iter(|| native_argmin(&input))
@@ -93,12 +93,12 @@ pub fn argmin_benchmark(c: &mut Criterion) {
 }
 
 pub fn l2_distance_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("l2 distance");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let lhs: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
-        let rhs: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let lhs: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
+        let rhs: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(
             BenchmarkId::new("native", dim),
@@ -118,12 +118,12 @@ pub fn l2_distance_benchmark(c: &mut Criterion) {
 }
 
 pub fn ip_distance_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("dot product distance");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let lhs: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
-        let rhs: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let lhs: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
+        let rhs: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(
             BenchmarkId::new("native", dim),
@@ -143,12 +143,12 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
 }
 
 pub fn binary_ip_benchmark(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("binary dot product");
     for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
-        let lhs: Vec<u64> = (0..dim).map(|_| rng.gen::<u64>()).collect();
-        let rhs: Vec<u64> = (0..dim).map(|_| rng.gen::<u64>()).collect();
+        let lhs: Vec<u64> = (0..dim).map(|_| rng.random::<u64>()).collect();
+        let rhs: Vec<u64> = (0..dim).map(|_| rng.random::<u64>()).collect();
 
         group.bench_with_input(
             BenchmarkId::new("native", dim),
