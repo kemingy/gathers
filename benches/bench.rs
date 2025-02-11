@@ -1,7 +1,8 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use gathers::distance::{
-    native_argmin, native_dot_produce, native_l2_norm, native_squared_euclidean,
+    l2_norm_native, native_argmin, native_dot_produce, native_squared_euclidean,
 };
+use gathers::rabitq::{binary_dot_product_native, min_max_native, min_max_residual};
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 use pulp::x86::V3;
 use rand::{thread_rng, Rng};
@@ -14,7 +15,7 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
         let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
 
         group.bench_with_input(BenchmarkId::new("native", dim), &x, |b, input| {
-            b.iter(|| native_l2_norm(&input))
+            b.iter(|| l2_norm_native(&input))
         });
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
             b.iter(|| unsafe { l2_norm(&input) })
@@ -26,6 +27,48 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
         }
     }
     group.finish();
+}
+
+pub fn min_max_benchmark(c: &mut Criterion) {
+    let mut rng = thread_rng();
+
+    let mut group = c.benchmark_group("min_max");
+    for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
+        let x: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let y: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let residual = vec![0.0; dim];
+
+        group.bench_with_input(
+            BenchmarkId::new("native", dim),
+            &(&residual, &x, &y),
+            |b, input| {
+                b.iter(|| {
+                    let mut res = input.0.clone();
+                    min_max_native(&mut res, input.1, input.2)
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("simd", dim),
+            &(&residual, &x, &y),
+            |b, input| {
+                b.iter(|| {
+                    let mut res = input.0.clone();
+                    unsafe { simd::min_max_residual(&mut res, input.1, input.2) }
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("pulp", dim),
+            &(&residual, &x, &y),
+            |b, input| {
+                b.iter(|| {
+                    let mut res = input.0.clone();
+                    min_max_residual(&mut res, input.1, input.2)
+                });
+            },
+        );
+    }
 }
 
 pub fn argmin_benchmark(c: &mut Criterion) {
@@ -99,8 +142,41 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+pub fn binary_ip_benchmark(c: &mut Criterion) {
+    let mut rng = thread_rng();
+
+    let mut group = c.benchmark_group("binary dot product");
+    for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
+        let lhs: Vec<u64> = (0..dim).map(|_| rng.gen::<u64>()).collect();
+        let rhs: Vec<u64> = (0..dim).map(|_| rng.gen::<u64>()).collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("native", dim),
+            &(&lhs, &rhs),
+            |b, input| {
+                b.iter(|| binary_dot_product_native(&input.0, &input.1));
+            },
+        );
+        group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
+            b.iter(|| unsafe { simd::binary_dot_product_simd(&input.0, &input.1) });
+        });
+        group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
+            b.iter(|| simd::binary_dot_product(&input.0, &input.1));
+        });
+    }
+}
+
 criterion_group!(l2_benches, l2_distance_benchmark);
 criterion_group!(ip_benches, ip_distance_benchmark);
 criterion_group!(norm_benches, l2_norm_benchmark);
 criterion_group!(argmin_benches, argmin_benchmark);
-criterion_main!(l2_benches, ip_benches, norm_benches, argmin_benches);
+criterion_group!(min_max_benches, min_max_benchmark);
+criterion_group!(binary_ip_benches, binary_ip_benchmark);
+criterion_main!(
+    l2_benches,
+    ip_benches,
+    norm_benches,
+    argmin_benches,
+    min_max_benches,
+    binary_ip_benches,
+);
