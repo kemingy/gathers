@@ -4,7 +4,7 @@ use core::f32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
-use rand::distributions::Distribution;
+use rand::Rng;
 use rand_distr::StandardNormal;
 
 use crate::distance::squared_euclidean;
@@ -289,9 +289,8 @@ impl RaBitQ {
         let dim_sqrt = (dim_pad as f32).sqrt();
 
         // orthogonal matrix
-        let mut rng = rand::thread_rng();
-        let random: Mat<f32> =
-            Mat::from_fn(dim_pad, dim_pad, |_, _| StandardNormal.sample(&mut rng));
+        let mut rng = rand::rng();
+        let random: Mat<f32> = Mat::from_fn(dim_pad, dim_pad, |_, _| rng.sample(StandardNormal));
         let orthogonal = random.qr().compute_q();
 
         let projected = &centroids_mat * &orthogonal;
