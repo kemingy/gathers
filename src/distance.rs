@@ -13,7 +13,7 @@ pub enum Distance {
 }
 
 /// Native implementation of l2 norm.
-pub fn native_l2_norm(vec: &[f32]) -> f32 {
+pub fn l2_norm_native(vec: &[f32]) -> f32 {
     vec.iter().fold(0.0, |acc, &x| acc + x * x).sqrt()
 }
 
@@ -136,7 +136,7 @@ mod test {
     use rand::{thread_rng, Rng};
 
     use super::{
-        argmin, l2_norm, native_argmin, native_dot_produce, native_l2_norm,
+        argmin, l2_norm, l2_norm_native, native_argmin, native_dot_produce,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
 
@@ -169,7 +169,7 @@ mod test {
         let mut rng = thread_rng();
         for dim in [4, 12, 64, 70, 78].into_iter() {
             let vec = (0..dim).map(|_| rng.gen::<f32>()).collect::<Vec<f32>>();
-            let diff = l2_norm(&vec) - native_l2_norm(&vec);
+            let diff = l2_norm(&vec) - l2_norm_native(&vec);
             assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
         }
     }

@@ -18,19 +18,51 @@ const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 20;
 const RAYON_BLOCK_SIZE: usize = 64;
 
-/// Assign vectors to centroids.
-pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
+/// Assign vectors to centroids in single thread.
+pub fn base_assign(
+    vecs: &[f32],
+    centroids: &[f32],
+    dim: usize,
+    distance: Distance,
+    labels: &mut [u32],
+) {
     let mut distances = vec![f32::MAX; centroids.len() / dim];
-
     match distance {
         Distance::NegativeDotProduct => {
             for (i, vec) in vecs.chunks(dim).enumerate() {
                 for (j, centroid) in centroids.chunks(dim).enumerate() {
                     distances[j] = neg_dot_product(vec, centroid);
-                    if j == 0 || distances[j] < distances[labels[i] as usize] {
-                        labels[i] = j as u32;
-                    }
                 }
+                labels[i] = argmin(&distances) as u32;
+            }
+        }
+        Distance::SquaredEuclidean => {
+            for (i, vec) in vecs.chunks(dim).enumerate() {
+                for (j, centroid) in centroids.chunks(dim).enumerate() {
+                    distances[j] = squared_euclidean(vec, centroid);
+                }
+                labels[i] = argmin(&distances) as u32;
+            }
+        }
+    }
+}
+
+/// Assign vectors to centroids in multi-threads.
+pub fn base_assign_parallel(
+    vecs: &[f32],
+    centroids: &[f32],
+    dim: usize,
+    distance: Distance,
+    labels: &mut [u32],
+) {
+    match distance {
+        Distance::NegativeDotProduct => {
+            let mut distances = vec![f32::MAX; centroids.len() / dim];
+            for (i, vec) in vecs.chunks(dim).enumerate() {
+                for (j, centroid) in centroids.chunks(dim).enumerate() {
+                    distances[j] = neg_dot_product(vec, centroid);
+                }
+                labels[i] = argmin(&distances) as u32;
             }
         }
         Distance::SquaredEuclidean => {
@@ -58,10 +90,29 @@ pub fn assign(vecs: &[f32], centroids: &[f32], dim: usize, distance: Distance, l
     }
 }
 
-/// Assign vectors to centroids with RaBitQ.
+/// Assign vectors to centroids with RaBitQ in single thread.
+pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+    let start = Instant::now();
+    let rabitq = RaBitQ::new(centroids, dim);
+    debug!("RaBitQ: build takes {} s", start.elapsed().as_secs_f32());
+
+    for (i, vec) in vecs.chunks(dim).enumerate() {
+        labels[i] = rabitq.retrieve_top_one(vec) as u32;
+    }
+
+    let (rough, precise) = rabitq.get_metrics();
+    debug!(
+        "RaBitQ: rough_cmp({}), precise_cmp({}), ratio({})",
+        rough,
+        precise,
+        rough as f32 / precise as f32
+    )
+}
+
+/// Assign vectors to centroids with RaBitQ in multi-threads.
 ///
 /// TODO: support dot product distance
-pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
     let rabitq = RaBitQ::new(centroids, dim);
 
     labels.copy_from_slice(
@@ -77,7 +128,7 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
 
     let (rough, precise) = rabitq.get_metrics();
     debug!(
-        "RaBitQ: rough {}, precise {}, ratio: {}",
+        "RaBitQ: rough_cmp({}), precise_cmp({}), ratio({})",
         rough,
         precise,
         rough as f32 / precise as f32
@@ -248,9 +299,15 @@ impl KMeans {
             let start_time = Instant::now();
             if self.distance == Distance::NegativeDotProduct || num * dim <= LARGE_CLUSTER_THRESHOLD
             {
-                assign(&vecs, &centroids, dim, self.distance, &mut labels);
+                #[cfg(feature = "perf")]
+                base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
+                #[cfg(not(feature = "perf"))]
+                base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
             } else {
+                #[cfg(feature = "perf")]
                 rabitq_assign(&vecs, &centroids, dim, &mut labels);
+                #[cfg(not(feature = "perf"))]
+                rabitq_assign_parallel(&vecs, &centroids, dim, &mut labels);
             }
             let diff = update_centroids(&vecs, &mut centroids, dim, &labels);
             if self.distance == Distance::NegativeDotProduct {

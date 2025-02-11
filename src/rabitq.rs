@@ -100,6 +100,23 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
     pulp::Arch::new().dispatch(Impl { vec, orthogonal })
 }
 
+/// Get the min/max value of the residual of two vectors.
+#[inline]
+pub fn min_max_residual_native(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
+    let mut min = f32::MAX;
+    let mut max = f32::MIN;
+    for i in 0..res.len() {
+        res[i] = x[i] - y[i];
+        if res[i] < min {
+            min = res[i];
+        }
+        if res[i] > max {
+            max = res[i];
+        }
+    }
+    (min, max)
+}
+
 /// Interface of `min_max_residual`: get the min/max value of the residual of two vectors.
 #[inline]
 pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
@@ -124,7 +141,7 @@ pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
 
 // Quantize the query residual vector.
 #[inline]
-fn scalar_quantize_raw(
+fn scalar_quantize_native(
     quantized: &mut [u8],
     vec: &[f32],
     lower_bound: f32,
@@ -152,18 +169,18 @@ pub fn scalar_quantize(
         if crate::simd::Avx2::is_available() {
             crate::simd::scalar_quantize(quantized, vec, lower_bound, multiplier)
         } else {
-            scalar_quantize_raw(quantized, vec, lower_bound, multiplier)
+            scalar_quantize_native(quantized, vec, lower_bound, multiplier)
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
-        scalar_quantize_raw(quantized, vec, lower_bound, multiplier)
+        scalar_quantize_native(quantized, vec, lower_bound, multiplier)
     }
 }
 
 /// Convert the vector to binary format (one value to multiple bits) and store in a u64 vector.
 #[inline]
-fn vector_binarize_query_raw(vec: &[u8], binary: &mut [u64]) {
+fn vector_binarize_query_native(vec: &[u8], binary: &mut [u64]) {
     let length = vec.len();
     for j in 0..THETA_LOG_DIM {
         for i in 0..length {
@@ -180,18 +197,18 @@ pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
         if crate::simd::Avx2::is_available() {
             crate::simd::vector_binarize_query(vec, binary);
         } else {
-            vector_binarize_query_raw(vec, binary);
+            vector_binarize_query_native(vec, binary);
         }
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
     {
-        vector_binarize_query_raw(vec, binary);
+        vector_binarize_query_native(vec, binary);
     }
 }
 
 /// Calculate the dot product of two binary vectors.
 #[inline]
-fn binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
+pub fn binary_dot_product_native(x: &[u64], y: &[u64]) -> u32 {
     let mut res = 0;
     for i in 0..x.len() {
         res += (x[i] & y[i]).count_ones();
@@ -214,12 +231,12 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
                 if crate::simd::Avx2::is_available() {
                     crate::simd::binary_dot_product(x, y_slice) << i
                 } else {
-                    binary_dot_product(x, y_slice) << i
+                    binary_dot_product_native(x, y_slice) << i
                 }
             }
             #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
             {
-                binary_dot_product(x, y_slice) << i
+                binary_dot_product_native(x, y_slice) << i
             }
         };
         y_slice = &y_slice[length..];
@@ -276,7 +293,6 @@ impl RaBitQ {
         let random: Mat<f32> =
             Mat::from_fn(dim_pad, dim_pad, |_, _| StandardNormal.sample(&mut rng));
         let orthogonal = random.qr().compute_q();
-        // let orthogonal = Mat::identity(dim_pad, dim_pad);
 
         let projected = &centroids_mat * &orthogonal;
         let mut factors = vec![Factor::default(); num];

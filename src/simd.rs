@@ -537,3 +537,72 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
         },
     )
 }
+
+/// Compute the binary dot product of two vectors with SIMD.
+///
+/// Refer to: <https://github.com/komrad36/popcount>
+///
+/// # Safety
+///
+/// This function is marked unsafe because it requires the AVX2 intrinsics.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[target_feature(enable = "sse2,avx,avx2")]
+#[inline]
+pub unsafe fn binary_dot_product_simd(lhs: &[u64], rhs: &[u64]) -> u32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let mut sum = 0;
+    let length = lhs.len() / 4;
+    if length == 0 {
+        for i in 0..lhs.len() {
+            sum += (lhs[i] & rhs[i]).count_ones();
+        }
+        return sum;
+    }
+    let rest = lhs.len() & 0b11;
+    for i in 0..rest {
+        sum += (lhs[4 * length + i] & rhs[4 * length + i]).count_ones();
+    }
+
+    #[inline]
+    unsafe fn mm256_popcnt_epi64(x: __m256i) -> __m256i {
+        let lookup_table = _mm256_setr_epi8(
+            0, 1, 1, 2, 1, 2, 2, 3, // 0-7
+            1, 2, 2, 3, 2, 3, 3, 4, // 8-15
+            0, 1, 1, 2, 1, 2, 2, 3, // 16-23
+            1, 2, 2, 3, 2, 3, 3, 4, // 24-31
+        );
+        let mask = _mm256_set1_epi8(15);
+        let zero = _mm256_setzero_si256();
+        let mut low = _mm256_and_si256(x, mask);
+        let mut high = _mm256_and_si256(_mm256_srli_epi64(x, 4), mask);
+        low = _mm256_shuffle_epi8(lookup_table, low);
+        high = _mm256_shuffle_epi8(lookup_table, high);
+        _mm256_sad_epu8(_mm256_add_epi8(low, high), zero)
+    }
+
+    let mut sum256 = _mm256_setzero_si256();
+    let mut x_ptr = lhs.as_ptr() as *const __m256i;
+    let mut y_ptr = rhs.as_ptr() as *const __m256i;
+
+    for _ in 0..length {
+        let x256 = _mm256_loadu_si256(x_ptr);
+        let y256 = _mm256_loadu_si256(y_ptr);
+        let and = _mm256_and_si256(x256, y256);
+        sum256 = _mm256_add_epi64(sum256, mm256_popcnt_epi64(and));
+        x_ptr = x_ptr.add(1);
+        y_ptr = y_ptr.add(1);
+    }
+
+    let xa = _mm_add_epi64(
+        _mm256_castsi256_si128(sum256),
+        _mm256_extracti128_si256(sum256, 1),
+    );
+    // this assumes the sum is less than 2^31, which should be true for most cases
+    sum += _mm_cvtsi128_si32(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
+
+    sum
+}
