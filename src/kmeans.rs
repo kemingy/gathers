@@ -55,10 +55,9 @@ pub fn base_assign_parallel(
     distance: Distance,
     labels: &mut [u32],
 ) {
-    let mut distances = vec![f32::MAX; centroids.len() / dim];
-
     match distance {
         Distance::NegativeDotProduct => {
+            let mut distances = vec![f32::MAX; centroids.len() / dim];
             for (i, vec) in vecs.chunks(dim).enumerate() {
                 for (j, centroid) in centroids.chunks(dim).enumerate() {
                     distances[j] = neg_dot_product(vec, centroid);

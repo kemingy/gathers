@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use gathers::distance::{
     l2_norm_native, native_argmin, native_dot_produce, native_squared_euclidean,
 };
-use gathers::rabitq::{binary_dot_product_native, min_max_native, min_max_residual};
+use gathers::rabitq::{binary_dot_product_native, min_max_residual, min_max_residual_native};
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 use pulp::x86::V3;
 use rand::{thread_rng, Rng};
@@ -44,7 +44,7 @@ pub fn min_max_benchmark(c: &mut Criterion) {
             |b, input| {
                 b.iter(|| {
                     let mut res = input.0.clone();
-                    min_max_native(&mut res, input.1, input.2)
+                    min_max_residual_native(&mut res, input.1, input.2)
                 });
             },
         );

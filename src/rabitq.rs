@@ -102,7 +102,7 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
 
 /// Get the min/max value of the residual of two vectors.
 #[inline]
-pub fn min_max_native(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
+pub fn min_max_residual_native(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
     let mut min = f32::MAX;
     let mut max = f32::MIN;
     for i in 0..res.len() {
