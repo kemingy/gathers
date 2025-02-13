@@ -450,43 +450,94 @@ impl RaBitQ {
 mod test {
     use rand::Rng;
 
-    use super::{binary_dot_product_native, vector_binarize_query_native, THETA_LOG_DIM};
+    use super::{
+        binary_dot_product_native, min_max_residual, min_max_residual_native,
+        scalar_quantize_native, vector_binarize_query_native, SCALAR, THETA_LOG_DIM,
+    };
     use crate::simd;
 
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_binary_dot_product() {
-        if crate::simd::Avx2::is_available() {
+        if !crate::simd::Avx2::is_available() {
             return;
         }
         let mut rng = rand::rng();
 
-        for dim in [1, 2, 4, 8, 10].into_iter() {
-            let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
-            let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
+        for _ in 0..100 {
+            for dim in [1, 2, 4, 8, 10].into_iter() {
+                let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
+                let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
 
-            assert_eq!(
-                binary_dot_product_native(&x, &y),
-                simd::binary_dot_product(&x, &y),
-            )
+                assert_eq!(
+                    binary_dot_product_native(&x, &y),
+                    simd::binary_dot_product(&x, &y),
+                )
+            }
         }
     }
 
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_query_binarize() {
-        if crate::simd::Avx2::is_available() {
+        if !crate::simd::Avx2::is_available() {
             return;
         }
         let mut rng = rand::rng();
 
-        for dim in [64, 128, 256, 320, 1024].into_iter() {
-            let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
-            let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-            vector_binarize_query_native(&x, &mut binary);
-            let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-            simd::vector_binarize_query(&x, &mut binary_simd);
-            assert_eq!(binary, binary_simd);
+        for _ in 0..100 {
+            for dim in [64, 128, 256, 320, 1024].into_iter() {
+                let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
+                let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                vector_binarize_query_native(&x, &mut binary);
+                let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                simd::vector_binarize_query(&x, &mut binary_simd);
+                assert_eq!(binary, binary_simd);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    fn test_scalar_quantize() {
+        if !crate::simd::Avx2::is_available() {
+            return;
+        }
+        let mut rng = rand::rng();
+        for _ in 0..100 {
+            for dim in [64, 128, 256, 320, 1024].into_iter() {
+                let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let mut quantized = vec![0u8; dim];
+                let mut residual = vec![0.0; dim];
+                let (upper_bound, lower_bound) = min_max_residual_native(&mut residual, &x, &y);
+                let multiplier = ((upper_bound - lower_bound) * SCALAR).recip();
+                let sum =
+                    scalar_quantize_native(&mut quantized, &residual, lower_bound, multiplier);
+                let mut quantized_simd = vec![0u8; dim];
+                let sum_simd =
+                    simd::scalar_quantize(&mut quantized_simd, &residual, lower_bound, multiplier);
+                assert_eq!(quantized, quantized_simd);
+                assert_eq!(sum, sum_simd);
+            }
+        }
+    }
+
+    #[test]
+    fn test_min_max_residual() {
+        let mut rng = rand::rng();
+        for _ in 0..100 {
+            for dim in [32, 64, 124, 128, 132].into_iter() {
+                let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let mut res = vec![0.0; dim];
+                let (min, max) = min_max_residual_native(&mut res, &x, &y);
+                let mut res_simd = vec![0.0; dim];
+                let (min_simd, max_simd) = min_max_residual(&mut res_simd, &x, &y);
+                assert_eq!(min, min_simd);
+                assert_eq!(max, max_simd);
+                assert_eq!(res, res_simd);
+            }
         }
     }
 }
