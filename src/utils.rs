@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+use aligned_vec::{avec, AVec};
 use num_traits::{AsPrimitive, Float, FromBytes, FromPrimitive, Num, NumAssign, ToBytes};
 
 /// Calculate the centroid of a set of vectors and subtract it from each vector.
@@ -28,13 +29,18 @@ where
     }
 }
 
-/// Convert a 2-D `Vec<Vec<T>>` to a 1-D continuous vector.
+/// Convert a 2-D `Vec<Vec<T>>` to a 1-D continuous aligned vector.
 #[inline]
-pub fn as_continuous_vec<T>(mat: &[Vec<T>]) -> Vec<T>
+pub fn as_continuous_vec<T>(mat: &[Vec<T>]) -> AVec<T>
 where
     T: Num + Copy,
 {
-    mat.iter().flat_map(|v| v.iter().cloned()).collect()
+    let len = mat.iter().map(|v| v.len()).sum();
+    let mut vec = avec!(T::zero(); len);
+    for (i, v) in mat.iter().enumerate() {
+        vec[i * v.len()..(i + 1) * v.len()].copy_from_slice(v);
+    }
+    vec
 }
 
 /// Convert a 1-D continuous vector to a 2-D `Vec<Vec<T>>`.

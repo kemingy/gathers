@@ -4,7 +4,7 @@ use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 use gathers::distance::{Distance, argmin, squared_euclidean};
-use gathers::kmeans::{KMeans, rabitq_assign};
+use gathers::kmeans::{KMeans, rabitq_assign_parallel};
 use gathers::utils::as_matrix;
 
 /// assign the vector to the nearest centroid.
@@ -35,7 +35,7 @@ fn batch_assign<'py>(
 ) -> Vec<u32> {
     let vectors = vecs.as_array();
     let mut labels = vec![0; vectors.nrows()];
-    rabitq_assign(
+    rabitq_assign_parallel(
         vectors.as_slice().expect("failed to get the vecs slice"),
         centroids.as_array().as_slice().expect("failed to get the centroids slice"), vectors.ncols(), &mut labels);
     labels
