@@ -445,3 +445,40 @@ impl RaBitQ {
         self.metrics.fetch()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use rand::Rng;
+
+    use super::{binary_dot_product_native, vector_binarize_query_native, THETA_LOG_DIM};
+    use crate::simd;
+
+    #[test]
+    fn test_binary_dot_product() {
+        let mut rng = rand::rng();
+
+        for dim in [1, 2, 4, 8, 10].into_iter() {
+            let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
+            let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
+
+            assert_eq!(
+                binary_dot_product_native(&x, &y),
+                simd::binary_dot_product(&x, &y),
+            )
+        }
+    }
+
+    #[test]
+    fn test_query_binarize() {
+        let mut rng = rand::rng();
+
+        for dim in [64, 128, 256, 320, 1024].into_iter() {
+            let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
+            let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+            vector_binarize_query_native(&x, &mut binary);
+            let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+            simd::vector_binarize_query(&x, &mut binary_simd);
+            assert_eq!(binary, binary_simd);
+        }
+    }
+}

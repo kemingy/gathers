@@ -584,6 +584,7 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
                 avx._mm256_castsi256_si128(sum256),
                 avx2._mm256_extracti128_si256::<1>(sum256),
             );
+            // this assumes the sum is less than 2^31, which should be true for most cases
             let mut sum = sse2
                 ._mm_cvtsi128_si32(sse2._mm_add_epi64(xa, sse2._mm_shuffle_epi32::<78>(xa)))
                 as u32;
