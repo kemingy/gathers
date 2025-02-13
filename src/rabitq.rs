@@ -223,13 +223,15 @@ pub fn binary_dot_product_native(x: &[u64], y: &[u64]) -> u32 {
 pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
     let mut res = 0;
     let length = x.len();
-    let mut y_slice = y;
+    assert_eq!(y.len(), length * THETA_LOG_DIM);
     for i in 0..THETA_LOG_DIM {
+        let y_slice = &y[i * length..(i + 1) * length];
         res += {
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             {
                 if crate::simd::Avx2::is_available() {
-                    crate::simd::binary_dot_product(x, y_slice) << i
+                    unsafe { crate::simd::binary_dot_product_simd(x, y_slice) << i }
+                    // crate::simd::binary_dot_product(x, y_slice) << i
                 } else {
                     binary_dot_product_native(x, y_slice) << i
                 }
@@ -239,7 +241,6 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
                 binary_dot_product_native(x, y_slice) << i
             }
         };
-        y_slice = &y_slice[length..];
     }
     res
 }
@@ -472,7 +473,10 @@ mod test {
                 assert_eq!(
                     binary_dot_product_native(&x, &y),
                     simd::binary_dot_product(&x, &y),
-                )
+                );
+                assert_eq!(binary_dot_product_native(&x, &y), unsafe {
+                    simd::binary_dot_product_simd(&x, &y)
+                },);
             }
         }
     }

@@ -1,0 +1,21 @@
+# syntax=v1
+
+
+def rust():
+    """Install Rust."""
+    install.apt_packages(name=["build-essential"])
+    run(
+        [
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+        ]
+    )
+    runtime.environ(extra_path=["/home/envd/.cargo/bin"])
+
+
+def build():
+    base(dev=True)
+    install.conda(use_mamba=True)
+    install.python()
+    install.python_packages(name=["maturin"])
+    rust()
+    shell("fish")
