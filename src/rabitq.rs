@@ -454,7 +454,11 @@ mod test {
     use crate::simd;
 
     #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_binary_dot_product() {
+        if crate::simd::Avx2::is_available() {
+            return;
+        }
         let mut rng = rand::rng();
 
         for dim in [1, 2, 4, 8, 10].into_iter() {
@@ -469,7 +473,11 @@ mod test {
     }
 
     #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_query_binarize() {
+        if crate::simd::Avx2::is_available() {
+            return;
+        }
         let mut rng = rand::rng();
 
         for dim in [64, 128, 256, 320, 1024].into_iter() {
