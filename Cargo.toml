@@ -13,6 +13,7 @@ categories = ["algorithms", "science"]
 rust-version = "1.83"
 
 [dependencies]
+aligned-vec = "0.6.1"
 argh = "0.1.13"
 bytemuck = "1.21.0"
 env_logger = "0.11.5"

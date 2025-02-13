@@ -4,8 +4,8 @@ use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 use gathers::distance::{Distance, argmin, squared_euclidean};
-use gathers::kmeans::{KMeans, rabitq_assign};
-use gathers::utils::as_matrix;
+use gathers::kmeans::{KMeans, rabitq_assign_parallel};
+use gathers::utils::{as_matrix, as_continuous_vec};
 
 /// assign the vector to the nearest centroid.
 #[pyfunction]
@@ -35,7 +35,7 @@ fn batch_assign<'py>(
 ) -> Vec<u32> {
     let vectors = vecs.as_array();
     let mut labels = vec![0; vectors.nrows()];
-    rabitq_assign(
+    rabitq_assign_parallel(
         vectors.as_slice().expect("failed to get the vecs slice"),
         centroids.as_array().as_slice().expect("failed to get the centroids slice"), vectors.ncols(), &mut labels);
     labels
@@ -52,12 +52,7 @@ fn kmeans_fit<'py>(
     let vecs = source.as_array();
     let dim = vecs.ncols();
     let kmeans = KMeans::new(n_cluster, max_iter, 1e-4, Distance::SquaredEuclidean, false);
-    let centroids = kmeans.fit(
-        vecs.as_slice()
-            .expect("failed to get the inner array")
-            .to_owned(),
-        dim,
-    );
+    let centroids = kmeans.fit(as_continuous_vec(&as_matrix(vecs.as_slice().unwrap(), dim)), dim);
     let matrix = as_matrix(&centroids, dim);
     Ok(PyArray2::from_vec2(source.py(), &matrix)?)
 }

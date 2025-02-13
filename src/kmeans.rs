@@ -3,6 +3,7 @@
 use core::panic;
 use std::time::Instant;
 
+use aligned_vec::AVec;
 use log::debug;
 use rand::Rng;
 use rayon::prelude::*;
@@ -258,7 +259,7 @@ impl KMeans {
     }
 
     /// Fit the KMeans configurations to the given vectors and return the centroids.
-    pub fn fit(&self, mut vecs: Vec<f32>, dim: usize) -> Vec<f32> {
+    pub fn fit(&self, mut vecs: AVec<f32>, dim: usize) -> AVec<f32> {
         let num = vecs.len() / dim;
 
         // auto-config the `n_cluster` if it's initialized with `default()`
