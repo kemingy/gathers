@@ -458,86 +458,6 @@ pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
     )
 }
 
-/// Compute the binary dot product of two vectors.
-///
-/// Refer to: <https://github.com/komrad36/popcount>
-///
-/// # Panics
-///
-/// This function panics if the `sse2`, `avx` and `avx2` target features are not available.
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-#[inline]
-pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
-    #[cfg(target_arch = "x86")]
-    use std::arch::x86::*;
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
-
-    use ::pulp;
-    use pulp::cast;
-
-    let simd @ Avx2 { avx, avx2, sse2 } = Avx2::try_new().unwrap();
-
-    simd.vectorize(
-        #[inline(always)]
-        || {
-            let mut sum = 0;
-            let length = lhs.len() / 4;
-            if length == 0 {
-                for i in 0..lhs.len() {
-                    sum += (lhs[i] & rhs[i]).count_ones();
-                }
-                return sum;
-            }
-            let rest = lhs.len() & 0b11;
-            for i in 0..rest {
-                sum += (lhs[4 * length + i] & rhs[4 * length + i]).count_ones();
-            }
-
-            #[inline(always)]
-            fn mm256_popcnt_epi64(simd: Avx2, x: __m256i) -> __m256i {
-                let Avx2 { avx, avx2, .. } = simd;
-
-                let lookup_table = avx._mm256_setr_epi8(
-                    0, 1, 1, 2, 1, 2, 2, 3, // 0-7
-                    1, 2, 2, 3, 2, 3, 3, 4, // 8-15
-                    0, 1, 1, 2, 1, 2, 2, 3, // 16-23
-                    1, 2, 2, 3, 2, 3, 3, 4, // 24-31
-                );
-                let mask = avx._mm256_set1_epi8(15);
-                let zero = avx._mm256_setzero_si256();
-
-                let mut low = avx2._mm256_and_si256(x, mask);
-                let mut high = avx2._mm256_and_si256(avx2._mm256_srli_epi64::<4>(x), mask);
-                low = avx2._mm256_shuffle_epi8(lookup_table, low);
-                high = avx2._mm256_shuffle_epi8(lookup_table, high);
-                avx2._mm256_sad_epu8(avx2._mm256_add_epi8(low, high), zero)
-            }
-
-            let mut sum256 = avx._mm256_setzero_si256();
-            let x_ptr = pulp::as_arrays::<4, _>(lhs).0;
-            let y_ptr = pulp::as_arrays::<4, _>(rhs).0;
-
-            for (&x, &y) in iter::zip(x_ptr, y_ptr) {
-                let x256 = cast(x);
-                let y256 = cast(y);
-                let and = avx2._mm256_and_si256(x256, y256);
-                sum256 = avx2._mm256_add_epi64(sum256, mm256_popcnt_epi64(simd, and));
-            }
-
-            let xa = sse2._mm_add_epi64(
-                avx._mm256_castsi256_si128(sum256),
-                avx2._mm256_extracti128_si256::<1>(sum256),
-            );
-            // this assumes the sum is less than 2^31, which should be true for most cases
-            sum += sse2._mm_cvtsi128_si32(sse2._mm_add_epi64(xa, sse2._mm_shuffle_epi32::<78>(xa)))
-                as u32;
-
-            sum
-        },
-    )
-}
-
 /// Compute the binary dot product of two vectors with SIMD.
 ///
 /// Refer to: <https://github.com/komrad36/popcount>
@@ -605,4 +525,74 @@ pub unsafe fn binary_dot_product_simd(lhs: &[u64], rhs: &[u64]) -> u32 {
     sum += _mm_cvtsi128_si32(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
 
     sum
+}
+
+/// Compute the binary dot product of two vectors.
+///
+/// Refer to: <https://github.com/komrad36/popcount>
+///
+/// # Panics
+///
+/// This function panics if the `sse2`, `avx` and `avx2` target features are not available.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+#[inline]
+pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    use ::pulp;
+
+    let simd @ Avx2 { avx, avx2, sse2 } = Avx2::try_new().unwrap();
+
+    simd.vectorize(
+        #[inline(always)]
+        || {
+            let (lhs, lhs_tail) = pulp::as_arrays::<4, _>(lhs);
+            let (rhs, rhs_tail) = pulp::as_arrays::<4, _>(rhs);
+
+            let mut sum256 = avx._mm256_setzero_si256();
+
+            #[inline(always)]
+            fn mm256_popcnt_epi64(simd: Avx2, x: __m256i) -> __m256i {
+                let Avx2 { avx, avx2, .. } = simd;
+
+                let lookup_table = avx._mm256_setr_epi8(
+                    0, 1, 1, 2, 1, 2, 2, 3, // 0-7
+                    1, 2, 2, 3, 2, 3, 3, 4, // 8-15
+                    0, 1, 1, 2, 1, 2, 2, 3, // 16-23
+                    1, 2, 2, 3, 2, 3, 3, 4, // 24-31
+                );
+                let mask = avx._mm256_set1_epi8(15);
+                let zero = avx._mm256_setzero_si256();
+
+                let mut low = avx2._mm256_and_si256(x, mask);
+                let mut high = avx2._mm256_and_si256(avx2._mm256_srli_epi64::<4>(x), mask);
+                low = avx2._mm256_shuffle_epi8(lookup_table, low);
+                high = avx2._mm256_shuffle_epi8(lookup_table, high);
+                avx2._mm256_sad_epu8(avx2._mm256_add_epi8(low, high), zero)
+            }
+
+            for (&x, &y) in iter::zip(lhs, rhs) {
+                let x256 = pulp::cast(x);
+                let y256 = pulp::cast(y);
+                let and = avx2._mm256_and_si256(x256, y256);
+                sum256 = avx2._mm256_add_epi64(sum256, mm256_popcnt_epi64(simd, and));
+            }
+            let xa = sse2._mm_add_epi64(
+                avx._mm256_castsi256_si128(sum256),
+                avx2._mm256_extracti128_si256::<1>(sum256),
+            );
+            let mut sum = sse2
+                ._mm_cvtsi128_si32(sse2._mm_add_epi64(xa, sse2._mm_shuffle_epi32::<78>(xa)))
+                as u32;
+
+            for (&x, &y) in iter::zip(lhs_tail, rhs_tail) {
+                sum += (x & y).count_ones();
+            }
+
+            sum
+        },
+    )
 }

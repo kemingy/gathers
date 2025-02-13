@@ -146,23 +146,31 @@ pub fn binary_ip_benchmark(c: &mut Criterion) {
     let mut rng = rand::rng();
 
     let mut group = c.benchmark_group("binary dot product");
-    for dim in [64, 118, 124, 128, 512, 1024].into_iter() {
+    for dim in [1, 2, 4, 8, 16, 36].into_iter() {
         let lhs: Vec<u64> = (0..dim).map(|_| rng.random::<u64>()).collect();
         let rhs: Vec<u64> = (0..dim).map(|_| rng.random::<u64>()).collect();
 
         group.bench_with_input(
-            BenchmarkId::new("native", dim),
+            BenchmarkId::new("native", dim * 64),
             &(&lhs, &rhs),
             |b, input| {
                 b.iter(|| binary_dot_product_native(&input.0, &input.1));
             },
         );
-        group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| unsafe { simd::binary_dot_product_simd(&input.0, &input.1) });
-        });
-        group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| simd::binary_dot_product(&input.0, &input.1));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("simd", dim * 64),
+            &(&lhs, &rhs),
+            |b, input| {
+                b.iter(|| unsafe { simd::binary_dot_product_simd(&input.0, &input.1) });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("pulp", dim * 64),
+            &(&lhs, &rhs),
+            |b, input| {
+                b.iter(|| simd::binary_dot_product(&input.0, &input.1));
+            },
+        );
     }
 }
 
