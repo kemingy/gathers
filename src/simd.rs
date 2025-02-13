@@ -552,6 +552,14 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
             let (lhs, lhs_tail) = pulp::as_arrays::<4, _>(lhs);
             let (rhs, rhs_tail) = pulp::as_arrays::<4, _>(rhs);
 
+            let mut sum = 0;
+            for (&x, &y) in iter::zip(lhs_tail, rhs_tail) {
+                sum += (x & y).count_ones();
+            }
+            if lhs.is_empty() {
+                return sum;
+            }
+
             let mut sum256 = avx._mm256_setzero_si256();
 
             #[inline(always)]
@@ -585,13 +593,8 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
                 avx2._mm256_extracti128_si256::<1>(sum256),
             );
             // this assumes the sum is less than 2^31, which should be true for most cases
-            let mut sum = sse2
-                ._mm_cvtsi128_si32(sse2._mm_add_epi64(xa, sse2._mm_shuffle_epi32::<78>(xa)))
+            sum += sse2._mm_cvtsi128_si32(sse2._mm_add_epi64(xa, sse2._mm_shuffle_epi32::<78>(xa)))
                 as u32;
-
-            for (&x, &y) in iter::zip(lhs_tail, rhs_tail) {
-                sum += (x & y).count_ones();
-            }
 
             sum
         },
