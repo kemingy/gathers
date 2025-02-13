@@ -31,14 +31,14 @@ where
 
 /// Convert a 2-D `Vec<Vec<T>>` to a 1-D continuous aligned vector.
 #[inline]
-pub fn as_continuous_vec<T>(mat: &[Vec<T>]) -> AVec<T>
+pub fn as_continuous_vec<T>(mat: &[impl AsRef<[T]>]) -> AVec<T>
 where
     T: Num + Copy,
 {
-    let len = mat.iter().map(|v| v.len()).sum();
+    let len = mat.iter().map(|v| v.as_ref().len()).sum();
     let mut vec = avec!(T::zero(); len);
     for (i, v) in mat.iter().enumerate() {
-        vec[i * v.len()..(i + 1) * v.len()].copy_from_slice(v);
+        vec[i * v.as_ref().len()..(i + 1) * v.as_ref().len()].copy_from_slice(v.as_ref());
     }
     vec
 }

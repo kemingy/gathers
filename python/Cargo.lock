@@ -12,6 +12,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aligned-vec"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e0966165eaf052580bd70eb1b32cb3d6245774c0104d1b2793e9650bf83b52a"
+dependencies = [
+ "equator 0.2.2",
+]
+
+[[package]]
 name = "anstream"
 version = "0.6.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,6 +303,7 @@ dependencies = [
 name = "gathers"
 version = "0.3.1"
 dependencies = [
+ "aligned-vec",
  "argh",
  "bytemuck",
  "env_logger",

@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 use gathers::distance::{Distance, argmin, squared_euclidean};
 use gathers::kmeans::{KMeans, rabitq_assign_parallel};
-use gathers::utils::as_matrix;
+use gathers::utils::{as_matrix, as_continuous_vec};
 
 /// assign the vector to the nearest centroid.
 #[pyfunction]
@@ -52,12 +52,7 @@ fn kmeans_fit<'py>(
     let vecs = source.as_array();
     let dim = vecs.ncols();
     let kmeans = KMeans::new(n_cluster, max_iter, 1e-4, Distance::SquaredEuclidean, false);
-    let centroids = kmeans.fit(
-        vecs.as_slice()
-            .expect("failed to get the inner array")
-            .to_owned(),
-        dim,
-    );
+    let centroids = kmeans.fit(as_continuous_vec(&as_matrix(vecs.as_slice().unwrap(), dim)), dim);
     let matrix = as_matrix(&centroids, dim);
     Ok(PyArray2::from_vec2(source.py(), &matrix)?)
 }
