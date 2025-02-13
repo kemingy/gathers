@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use gathers::distance::{
-    l2_norm_native, native_argmin, native_dot_produce, native_squared_euclidean,
+    l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
 };
 use gathers::rabitq::{binary_dot_product_native, min_max_residual, min_max_residual_native};
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
@@ -128,7 +128,7 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("native", dim),
             &(&lhs, &rhs),
-            |b, input| b.iter(|| native_dot_produce(&input.0, &input.1)),
+            |b, input| b.iter(|| native_dot_product(&input.0, &input.1)),
         );
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
             b.iter(|| unsafe { dot_product(&input.0, &input.1) })

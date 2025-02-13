@@ -69,7 +69,7 @@ pub fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
 
 /// Native implementation of negative dot product.
 #[inline]
-pub fn native_dot_produce(lhs: &[f32], rhs: &[f32]) -> f32 {
+pub fn native_dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter()
         .zip(rhs.iter())
         .map(|(&l, &r)| l * r)
@@ -136,7 +136,7 @@ mod test {
     use rand::Rng;
 
     use super::{
-        argmin, l2_norm, l2_norm_native, native_argmin, native_dot_produce,
+        argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
 
@@ -160,7 +160,7 @@ mod test {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                let diff = neg_dot_product(&lhs, &rhs) + native_dot_produce(&lhs, &rhs);
+                let diff = neg_dot_product(&lhs, &rhs) + native_dot_product(&lhs, &rhs);
                 assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
             }
         }

@@ -487,7 +487,7 @@ pub unsafe fn binary_dot_product_simd(lhs: &[u64], rhs: &[u64]) -> u32 {
         sum += (lhs[4 * length + i] & rhs[4 * length + i]).count_ones();
     }
 
-    #[inline]
+    #[inline(always)]
     unsafe fn mm256_popcnt_epi64(x: __m256i) -> __m256i {
         let lookup_table = _mm256_setr_epi8(
             0, 1, 1, 2, 1, 2, 2, 3, // 0-7
