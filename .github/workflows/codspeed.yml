@@ -18,6 +18,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: replace the benchmark tool
+        run: |
+          cargo remove --dev criterion
+          cargo add --dev codspeed-criterion-compat --rename criterion
+
       - uses: cargo-bins/cargo-binstall@main
       - name: Add cargo-codspeed binary
         run: cargo binstall cargo-codspeed
