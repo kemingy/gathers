@@ -1,0 +1,45 @@
+name: CodSpeed
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'benches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: replace the benchmark tool
+        run: |
+          cargo remove --dev criterion
+          cargo add --dev codspeed-criterion-compat --rename criterion
+
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Add cargo-codspeed binary
+        run: cargo binstall cargo-codspeed
+
+      - name: Build the benchmark target(s)
+        run: cargo codspeed build
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v3
+        with:
+          run: cargo codspeed run
+          token: ${{ secrets.CODSPEED_TOKEN }}
