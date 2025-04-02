@@ -2,7 +2,7 @@
 
 use core::iter;
 
-use pulp::{as_arrays, as_arrays_mut, Simd};
+use pulp::{Simd, as_arrays, as_arrays_mut};
 
 #[inline(always)]
 fn abs2_add<S: Simd>(simd: S, x: S::f32s, acc: S::f32s) -> S::f32s {

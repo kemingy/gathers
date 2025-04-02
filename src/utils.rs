@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use aligned_vec::{avec, AVec};
+use aligned_vec::{AVec, avec};
 use num_traits::{AsPrimitive, Float, FromBytes, FromPrimitive, Num, NumAssign, ToBytes};
 
 /// Calculate the centroid of a set of vectors and subtract it from each vector.

@@ -8,7 +8,7 @@ use log::debug;
 use rand::Rng;
 use rayon::prelude::*;
 
-use crate::distance::{argmin, neg_dot_product, squared_euclidean, Distance};
+use crate::distance::{Distance, argmin, neg_dot_product, squared_euclidean};
 use crate::rabitq::RaBitQ;
 use crate::sampling::subsample;
 use crate::utils::{as_continuous_vec, centroid_residual, normalize};

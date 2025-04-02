@@ -16,8 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
       - name: Publish Crates
         env:
           CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}

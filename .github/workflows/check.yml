@@ -37,12 +37,10 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    - uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: nightly
+    - uses: dtolnay/rust-toolchain@nightly
     - name: Install lint tools
       run: |
-        rustup component add rustfmt clippy
+        rustup component add --toolchain nightly rustfmt clippy
         pip install ruff
     - name: Lint
       run: |
@@ -63,7 +61,5 @@ jobs:
       run: |
         pip install pytest
     - uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
     - name: Test
       run: make test

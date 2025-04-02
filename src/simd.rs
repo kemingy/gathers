@@ -36,55 +36,60 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     let mut lhs_ptr = lhs.as_ptr();
     let mut rhs_ptr = rhs.as_ptr();
     let (mut diff, mut vx, mut vy): (__m256, __m256, __m256);
-    let mut sum = _mm256_setzero_ps();
+    let mut sum = unsafe { _mm256_setzero_ps() };
+    unsafe {
+        for _ in 0..(lhs.len() / 16) {
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            diff = _mm256_sub_ps(vx, vy);
+            sum = _mm256_fmadd_ps(diff, diff, sum);
 
-    for _ in 0..(lhs.len() / 16) {
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        diff = _mm256_sub_ps(vx, vy);
-        sum = _mm256_fmadd_ps(diff, diff, sum);
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            diff = _mm256_sub_ps(vx, vy);
+            sum = _mm256_fmadd_ps(diff, diff, sum);
+        }
 
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        diff = _mm256_sub_ps(vx, vy);
-        sum = _mm256_fmadd_ps(diff, diff, sum);
-    }
-
-    for _ in 0..(lhs.len() & 0b1111) / 8 {
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        diff = _mm256_sub_ps(vx, vy);
-        sum = _mm256_fmadd_ps(diff, diff, sum);
+        for _ in 0..(lhs.len() & 0b1111) / 8 {
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            diff = _mm256_sub_ps(vx, vy);
+            sum = _mm256_fmadd_ps(diff, diff, sum);
+        }
     }
 
     #[inline(always)]
     unsafe fn reduce_f32_256(accumulate: __m256) -> f32 {
-        // add [4..7] to [0..3]
-        let mut combined = _mm256_add_ps(
-            accumulate,
-            _mm256_permute2f128_ps(accumulate, accumulate, 1),
-        );
-        // add [0..3] to [0..1]
-        combined = _mm256_hadd_ps(combined, combined);
-        // add [0..1] to [0]
-        combined = _mm256_hadd_ps(combined, combined);
-        _mm256_cvtss_f32(combined)
+        unsafe {
+            // add [4..7] to [0..3]
+            let mut combined = _mm256_add_ps(
+                accumulate,
+                _mm256_permute2f128_ps(accumulate, accumulate, 1),
+            );
+            // add [0..3] to [0..1]
+            combined = _mm256_hadd_ps(combined, combined);
+            // add [0..1] to [0]
+            combined = _mm256_hadd_ps(combined, combined);
+            _mm256_cvtss_f32(combined)
+        }
     }
 
-    let mut res = reduce_f32_256(sum);
-    for _ in 0..(lhs.len() & 0b111) {
-        let residual = *lhs_ptr - *rhs_ptr;
-        res += residual * residual;
-        lhs_ptr = lhs_ptr.add(1);
-        rhs_ptr = rhs_ptr.add(1);
+    unsafe {
+        let mut res = reduce_f32_256(sum);
+        for _ in 0..(lhs.len() & 0b111) {
+            let residual = *lhs_ptr - *rhs_ptr;
+            res += residual * residual;
+            lhs_ptr = lhs_ptr.add(1);
+            rhs_ptr = rhs_ptr.add(1);
+        }
+        res
     }
-    res
 }
 
 /// Compute the negative dot product distance between two vectors.
@@ -104,53 +109,58 @@ pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     assert_eq!(lhs.len(), rhs.len());
     let mut lhs_ptr = lhs.as_ptr();
     let mut rhs_ptr = rhs.as_ptr();
-    let mut sum = _mm256_setzero_ps();
     let (mut vx, mut vy): (__m256, __m256);
+    let mut sum = unsafe { _mm256_setzero_ps() };
 
-    for _ in 0..(lhs.len() / 16) {
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        sum = _mm256_fmadd_ps(vx, vy, sum);
+    unsafe {
+        for _ in 0..(lhs.len() / 16) {
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            sum = _mm256_fmadd_ps(vx, vy, sum);
 
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        sum = _mm256_fmadd_ps(vx, vy, sum);
-    }
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            sum = _mm256_fmadd_ps(vx, vy, sum);
+        }
 
-    for _ in 0..(lhs.len() & 0b1111) / 8 {
-        vx = _mm256_loadu_ps(lhs_ptr);
-        vy = _mm256_loadu_ps(rhs_ptr);
-        lhs_ptr = lhs_ptr.add(8);
-        rhs_ptr = rhs_ptr.add(8);
-        sum = _mm256_fmadd_ps(vx, vy, sum);
+        for _ in 0..(lhs.len() & 0b1111) / 8 {
+            vx = _mm256_loadu_ps(lhs_ptr);
+            vy = _mm256_loadu_ps(rhs_ptr);
+            lhs_ptr = lhs_ptr.add(8);
+            rhs_ptr = rhs_ptr.add(8);
+            sum = _mm256_fmadd_ps(vx, vy, sum);
+        }
     }
 
     #[inline(always)]
     unsafe fn reduce_f32_256(accumulate: __m256) -> f32 {
-        // add [4..7] to [0..3]
-        let mut combined = _mm256_add_ps(
-            accumulate,
-            _mm256_permute2f128_ps(accumulate, accumulate, 1),
-        );
-        // add [0..3] to [0..1]
-        combined = _mm256_hadd_ps(combined, combined);
-        // add [0..1] to [0]
-        combined = _mm256_hadd_ps(combined, combined);
-        _mm256_cvtss_f32(combined)
+        unsafe {
+            // add [4..7] to [0..3]
+            let mut combined = _mm256_add_ps(
+                accumulate,
+                _mm256_permute2f128_ps(accumulate, accumulate, 1),
+            );
+            // add [0..3] to [0..1]
+            combined = _mm256_hadd_ps(combined, combined);
+            // add [0..1] to [0]
+            combined = _mm256_hadd_ps(combined, combined);
+            _mm256_cvtss_f32(combined)
+        }
     }
 
-    let mut res = reduce_f32_256(sum);
-    for _ in 0..(lhs.len() & 0b111) {
-        res += *lhs_ptr * *rhs_ptr;
-        lhs_ptr = lhs_ptr.add(1);
-        rhs_ptr = rhs_ptr.add(1);
+    unsafe {
+        let mut res = reduce_f32_256(sum);
+        for _ in 0..(lhs.len() & 0b111) {
+            res += *lhs_ptr * *rhs_ptr;
+            lhs_ptr = lhs_ptr.add(1);
+            rhs_ptr = rhs_ptr.add(1);
+        }
+        res
     }
-
-    res
 }
 
 /// Compute the L2 norm of the vector.
@@ -169,45 +179,50 @@ pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
 
     let mut vec_ptr = vec.as_ptr();
     let mut f32x8: __m256;
-    let mut sum = _mm256_setzero_ps();
+    let mut sum = unsafe { _mm256_setzero_ps() };
 
-    for _ in 0..(vec.len() / 16) {
-        f32x8 = _mm256_loadu_ps(vec_ptr);
-        vec_ptr = vec_ptr.add(8);
-        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+    unsafe {
+        for _ in 0..(vec.len() / 16) {
+            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vec_ptr = vec_ptr.add(8);
+            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
 
-        f32x8 = _mm256_loadu_ps(vec_ptr);
-        vec_ptr = vec_ptr.add(8);
-        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
-    }
+            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vec_ptr = vec_ptr.add(8);
+            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+        }
 
-    for _ in 0..(vec.len() & 0b1111) / 8 {
-        f32x8 = _mm256_loadu_ps(vec_ptr);
-        vec_ptr = vec_ptr.add(8);
-        sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+        for _ in 0..(vec.len() & 0b1111) / 8 {
+            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vec_ptr = vec_ptr.add(8);
+            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+        }
     }
 
     #[inline(always)]
     unsafe fn reduce_f32_256(accumulate: __m256) -> f32 {
-        // add [4..7] to [0..3]
-        let mut combined = _mm256_add_ps(
-            accumulate,
-            _mm256_permute2f128_ps(accumulate, accumulate, 1),
-        );
-        // add [0..3] to [0..1]
-        combined = _mm256_hadd_ps(combined, combined);
-        // add [0..1] to [0]
-        combined = _mm256_hadd_ps(combined, combined);
-        _mm256_cvtss_f32(combined)
+        unsafe {
+            // add [4..7] to [0..3]
+            let mut combined = _mm256_add_ps(
+                accumulate,
+                _mm256_permute2f128_ps(accumulate, accumulate, 1),
+            );
+            // add [0..3] to [0..1]
+            combined = _mm256_hadd_ps(combined, combined);
+            // add [0..1] to [0]
+            combined = _mm256_hadd_ps(combined, combined);
+            _mm256_cvtss_f32(combined)
+        }
     }
 
-    let mut res = reduce_f32_256(sum);
-    for _ in 0..(vec.len() & 0b111) {
-        res += *vec_ptr * *vec_ptr;
-        vec_ptr = vec_ptr.add(1);
+    unsafe {
+        let mut res = reduce_f32_256(sum);
+        for _ in 0..(vec.len() & 0b111) {
+            res += *vec_ptr * *vec_ptr;
+            vec_ptr = vec_ptr.add(1);
+        }
+        res.sqrt()
     }
-
-    res.sqrt()
 }
 
 /// Find the index of the minimum value in the vector.
@@ -226,32 +241,34 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
 
     let mut index = 0;
     let mut minimal = f32::MAX;
-    let mut comp = _mm256_set1_ps(minimal);
+    let mut comp = unsafe { _mm256_set1_ps(minimal) };
     let mut vec_ptr = vec.as_ptr();
     let (mut y1, mut y2, mut y3, mut y4, mut mask): (__m256, __m256, __m256, __m256, __m256);
     let mut i = 0;
 
-    for _ in 0..(vec.len() / 32) {
-        y1 = _mm256_loadu_ps(vec_ptr);
-        y2 = _mm256_loadu_ps(vec_ptr.add(8));
-        y3 = _mm256_loadu_ps(vec_ptr.add(16));
-        y4 = _mm256_loadu_ps(vec_ptr.add(24));
-        vec_ptr = vec_ptr.add(32);
+    unsafe {
+        for _ in 0..(vec.len() / 32) {
+            y1 = _mm256_loadu_ps(vec_ptr);
+            y2 = _mm256_loadu_ps(vec_ptr.add(8));
+            y3 = _mm256_loadu_ps(vec_ptr.add(16));
+            y4 = _mm256_loadu_ps(vec_ptr.add(24));
+            vec_ptr = vec_ptr.add(32);
 
-        y1 = _mm256_min_ps(y1, y2);
-        y3 = _mm256_min_ps(y3, y4);
-        y1 = _mm256_min_ps(y1, y3);
-        mask = _mm256_cmp_ps(comp, y1, _CMP_GT_OS);
-        if 0 == _mm256_testz_ps(mask, mask) {
-            for (j, &val) in vec.iter().enumerate().skip(i).take(32) {
-                if minimal > val {
-                    minimal = val;
-                    index = j;
+            y1 = _mm256_min_ps(y1, y2);
+            y3 = _mm256_min_ps(y3, y4);
+            y1 = _mm256_min_ps(y1, y3);
+            mask = _mm256_cmp_ps(comp, y1, _CMP_GT_OS);
+            if 0 == _mm256_testz_ps(mask, mask) {
+                for (j, &val) in vec.iter().enumerate().skip(i).take(32) {
+                    if minimal > val {
+                        minimal = val;
+                        index = j;
+                    }
                 }
+                comp = _mm256_set1_ps(minimal);
             }
-            comp = _mm256_set1_ps(minimal);
+            i += 32;
         }
-        i += 32;
     }
 
     for (j, &val) in vec.iter().enumerate().skip(i) {
@@ -278,8 +295,8 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
-    let mut min_32x8 = _mm256_set1_ps(f32::MAX);
-    let mut max_32x8 = _mm256_set1_ps(f32::MIN);
+    let mut min_32x8 = unsafe { _mm256_set1_ps(f32::MAX) };
+    let mut max_32x8 = unsafe { _mm256_set1_ps(f32::MIN) };
     let mut x_ptr = x.as_ptr();
     let mut y_ptr = y.as_ptr();
     let mut res_ptr = res.as_mut_ptr();
@@ -290,41 +307,49 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
     let rest = length & 0b111;
     let (mut x256, mut y256, mut res256);
 
-    for _ in 0..(length / 8) {
-        x256 = _mm256_loadu_ps(x_ptr);
-        y256 = _mm256_loadu_ps(y_ptr);
-        res256 = _mm256_sub_ps(x256, y256);
-        _mm256_storeu_ps(res_ptr, res256);
-        x_ptr = x_ptr.add(8);
-        y_ptr = y_ptr.add(8);
-        res_ptr = res_ptr.add(8);
-        min_32x8 = _mm256_min_ps(min_32x8, res256);
-        max_32x8 = _mm256_max_ps(max_32x8, res256);
+    unsafe {
+        for _ in 0..(length / 8) {
+            x256 = _mm256_loadu_ps(x_ptr);
+            y256 = _mm256_loadu_ps(y_ptr);
+            res256 = _mm256_sub_ps(x256, y256);
+            _mm256_storeu_ps(res_ptr, res256);
+            x_ptr = x_ptr.add(8);
+            y_ptr = y_ptr.add(8);
+            res_ptr = res_ptr.add(8);
+            min_32x8 = _mm256_min_ps(min_32x8, res256);
+            max_32x8 = _mm256_max_ps(max_32x8, res256);
+        }
     }
-    _mm256_storeu_ps(f32x8.as_mut_ptr(), min_32x8);
+    unsafe {
+        _mm256_storeu_ps(f32x8.as_mut_ptr(), min_32x8);
+    }
     for &x in f32x8.iter() {
         if x < min {
             min = x;
         }
     }
-    _mm256_storeu_ps(f32x8.as_mut_ptr(), max_32x8);
+    unsafe {
+        _mm256_storeu_ps(f32x8.as_mut_ptr(), max_32x8);
+    }
     for &x in f32x8.iter() {
         if x > max {
             max = x;
         }
     }
 
-    for _ in 0..rest {
-        *res_ptr = *x_ptr - *y_ptr;
-        if *res_ptr < min {
-            min = *res_ptr;
+    unsafe {
+        for _ in 0..rest {
+            *res_ptr = *x_ptr - *y_ptr;
+            if *res_ptr < min {
+                min = *res_ptr;
+            }
+            if *res_ptr > max {
+                max = *res_ptr;
+            }
+            res_ptr = res_ptr.add(1);
+            x_ptr = x_ptr.add(1);
+            y_ptr = y_ptr.add(1);
         }
-        if *res_ptr > max {
-            max = *res_ptr;
-        }
-        res_ptr = res_ptr.add(1);
-        x_ptr = x_ptr.add(1);
-        y_ptr = y_ptr.add(1);
     }
 
     (min, max)
@@ -489,40 +514,44 @@ pub unsafe fn binary_dot_product_simd(lhs: &[u64], rhs: &[u64]) -> u32 {
 
     #[inline(always)]
     unsafe fn mm256_popcnt_epi64(x: __m256i) -> __m256i {
-        let lookup_table = _mm256_setr_epi8(
-            0, 1, 1, 2, 1, 2, 2, 3, // 0-7
-            1, 2, 2, 3, 2, 3, 3, 4, // 8-15
-            0, 1, 1, 2, 1, 2, 2, 3, // 16-23
-            1, 2, 2, 3, 2, 3, 3, 4, // 24-31
+        unsafe {
+            let lookup_table = _mm256_setr_epi8(
+                0, 1, 1, 2, 1, 2, 2, 3, // 0-7
+                1, 2, 2, 3, 2, 3, 3, 4, // 8-15
+                0, 1, 1, 2, 1, 2, 2, 3, // 16-23
+                1, 2, 2, 3, 2, 3, 3, 4, // 24-31
+            );
+            let mask = _mm256_set1_epi8(15);
+            let zero = _mm256_setzero_si256();
+            let mut low = _mm256_and_si256(x, mask);
+            let mut high = _mm256_and_si256(_mm256_srli_epi64(x, 4), mask);
+            low = _mm256_shuffle_epi8(lookup_table, low);
+            high = _mm256_shuffle_epi8(lookup_table, high);
+            _mm256_sad_epu8(_mm256_add_epi8(low, high), zero)
+        }
+    }
+
+    unsafe {
+        let mut sum256 = _mm256_setzero_si256();
+        let mut x_ptr = lhs.as_ptr() as *const __m256i;
+        let mut y_ptr = rhs.as_ptr() as *const __m256i;
+
+        for _ in 0..length {
+            let x256 = _mm256_loadu_si256(x_ptr);
+            let y256 = _mm256_loadu_si256(y_ptr);
+            let and = _mm256_and_si256(x256, y256);
+            sum256 = _mm256_add_epi64(sum256, mm256_popcnt_epi64(and));
+            x_ptr = x_ptr.add(1);
+            y_ptr = y_ptr.add(1);
+        }
+
+        let xa = _mm_add_epi64(
+            _mm256_castsi256_si128(sum256),
+            _mm256_extracti128_si256(sum256, 1),
         );
-        let mask = _mm256_set1_epi8(15);
-        let zero = _mm256_setzero_si256();
-        let mut low = _mm256_and_si256(x, mask);
-        let mut high = _mm256_and_si256(_mm256_srli_epi64(x, 4), mask);
-        low = _mm256_shuffle_epi8(lookup_table, low);
-        high = _mm256_shuffle_epi8(lookup_table, high);
-        _mm256_sad_epu8(_mm256_add_epi8(low, high), zero)
+        // this assumes the sum is less than 2^31, which should be true for most cases
+        sum += _mm_cvtsi128_si32(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
     }
-
-    let mut sum256 = _mm256_setzero_si256();
-    let mut x_ptr = lhs.as_ptr() as *const __m256i;
-    let mut y_ptr = rhs.as_ptr() as *const __m256i;
-
-    for _ in 0..length {
-        let x256 = _mm256_loadu_si256(x_ptr);
-        let y256 = _mm256_loadu_si256(y_ptr);
-        let and = _mm256_and_si256(x256, y256);
-        sum256 = _mm256_add_epi64(sum256, mm256_popcnt_epi64(and));
-        x_ptr = x_ptr.add(1);
-        y_ptr = y_ptr.add(1);
-    }
-
-    let xa = _mm_add_epi64(
-        _mm256_castsi256_si128(sum256),
-        _mm256_extracti128_si256(sum256, 1),
-    );
-    // this assumes the sum is less than 2^31, which should be true for most cases
-    sum += _mm_cvtsi128_si32(_mm_add_epi64(xa, _mm_shuffle_epi32(xa, 78))) as u32;
 
     sum
 }
