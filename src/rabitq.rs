@@ -452,8 +452,8 @@ mod test {
     use rand::Rng;
 
     use super::{
-        binary_dot_product_native, min_max_residual, min_max_residual_native,
-        scalar_quantize_native, vector_binarize_query_native, SCALAR, THETA_LOG_DIM,
+        SCALAR, THETA_LOG_DIM, binary_dot_product_native, min_max_residual,
+        min_max_residual_native, scalar_quantize_native, vector_binarize_query_native,
     };
     use crate::simd;
 

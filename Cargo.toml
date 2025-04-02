@@ -1,7 +1,7 @@
 [package]
 name = "gathers"
 version = "0.3.1"
-edition = "2021"
+edition = "2024"
 authors = ["Keming <kemingy94@gmail.com>"]
 license = "Apache-2.0"
 readme = "README.md"
@@ -10,7 +10,7 @@ description = "Clustering algorithms."
 documentation = "https://docs.rs/gathers"
 keywords = ["cluster", "kmeans", "rabitq", "machine-learning", "vector-search"]
 categories = ["algorithms", "science"]
-rust-version = "1.83"
+rust-version = "1.85"
 
 [dependencies]
 aligned-vec = "0.6.1"

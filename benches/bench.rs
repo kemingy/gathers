@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use gathers::distance::{
     l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
 };
