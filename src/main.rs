@@ -1,11 +1,12 @@
 use std::path::Path;
 
 use argh::FromArgs;
-use env_logger::Env;
 use gathers::distance::Distance;
 use gathers::kmeans::KMeans;
 use gathers::utils::{as_continuous_vec, as_matrix, read_vecs, write_vecs};
 use log::debug;
+use logforth::append;
+use logforth::filter::EnvFilter;
 
 #[derive(FromArgs, Debug)]
 /// gathers CLI args
@@ -27,8 +28,10 @@ struct Args {
 fn main() {
     let args: Args = argh::from_env();
 
-    let env = Env::default().filter_or("GATHERS_LOG", "debug");
-    env_logger::init_from_env(env);
+    let env_filter = EnvFilter::from_env_or("GATHERS_LOG", "DEBUG");
+    logforth::builder()
+        .dispatch(|d| d.filter(env_filter).append(append::Stderr::default()))
+        .apply();
     debug!("{:?}", args);
 
     let vecs = read_vecs::<f32>(Path::new(&args.input)).expect("failed to read vecs");

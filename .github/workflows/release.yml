@@ -9,6 +9,11 @@ concurrency:
   group: ${{ github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
 jobs:
   publish:
     name: "Publish Rust Package"
@@ -16,6 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Publish Crates
         env:
           CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
