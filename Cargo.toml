@@ -20,7 +20,7 @@ faer = { version = "0.22.4", default-features = false, features = ["rand", "lina
 log = "0.4.27"
 logforth = "0.24.0"
 num-traits = "0.2.19"
-pulp = "0.21.4"
+pulp = "0.21.5"
 rand = "0.9.0"
 rand_distr = "0.5.0"
 rayon = "1.10.0"

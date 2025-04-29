@@ -293,7 +293,7 @@ impl RaBitQ {
         // orthogonal matrix
         let mut rng = rand::rng();
         let random: Mat<f32> = Mat::from_fn(dim_pad, dim_pad, |_, _| rng.sample(StandardNormal));
-        let orthogonal = random.qr().Q_basis().to_owned();
+        let orthogonal = random.qr().compute_Q();
 
         let projected = &centroids_mat * &orthogonal;
         let mut factors = vec![Factor::default(); num];
