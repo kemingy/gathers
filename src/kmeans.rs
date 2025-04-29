@@ -336,7 +336,7 @@ mod test {
     #[test]
     fn test_kmeans() {
         let mut rng = rand::rng();
-        let dim = 48;
+        let dim = 32;
         let n = 1000;
         let km = KMeans::default();
         let rabitq_match_rate = 0.99;
@@ -372,7 +372,6 @@ mod test {
             // check the rabitq assignment
             let mut rabitq_labels = vec![0; n];
             rabitq_assign(&continue_vecs, &centroids, dim, &mut rabitq_labels);
-            dbg!(&labels[..10], &rabitq_labels[..10]);
             let mut match_count = 0;
             for i in 0..n {
                 if labels[i] == rabitq_labels[i] {

@@ -317,20 +317,19 @@ impl RaBitQ {
             signed_vec.push(vector_binarize_one(xc_slice));
             let norm = xc_distances[i] * dim_sqrt;
             x_dot_product[i] = match norm.is_normal() {
-                true => &xc * &signed_vec[i] / norm,
+                true => (&xc * &signed_vec[i]) / norm,
                 false => DEFAULT_X_DOT_PRODUCT,
             };
         }
 
         let error_base = 2.0 * EPSILON / (dim_pad as f32 - 1.0).sqrt();
-        let one_vec: Row<f32> = Row::ones(dim_pad);
         for i in 0..num {
             let xc_over_ip = xc_distances[i] / x_dot_product[i];
             let factor = &mut factors[i];
             factor.error_bound =
                 error_base * (xc_over_ip * xc_over_ip - factor.center_distance_square).sqrt();
             factor.factor_ip = -2.0 / dim_sqrt * xc_over_ip;
-            factor.factor_ppc = factor.factor_ip * (&one_vec * &signed_vec[i]);
+            factor.factor_ppc = factor.factor_ip * signed_vec[i].sum();
         }
 
         // sort by distances
@@ -364,7 +363,7 @@ impl RaBitQ {
         }
 
         let projected = project(&query_pad, &self.orthogonal.as_ref());
-        let mut rough_distances = Vec::with_capacity(self.centroids.nrows());
+        let mut rough_distances = Vec::with_capacity(self.idx.len());
         let mut quantized = vec![0u8; self.dim];
         let mut binary = vec![0u64; (self.dim * THETA_LOG_DIM).div_ceil(64)];
         let mut residual = vec![0.0; self.dim];
