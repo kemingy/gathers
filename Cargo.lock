@@ -159,12 +159,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
-name = "coe-rs"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8f1e641542c07631228b1e0dc04b69ae3c1d58ef65d5691a439711d805c698"
-
-[[package]]
 name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,21 +224,6 @@ name = "crunchy"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43da5946c66ffcc7745f48db692ffbb10a83bfe0afd96235c5c2a4fb23994929"
-
-[[package]]
-name = "dbgf"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6ca96b45ca70b8045e0462f191bd209fcb3c3bfe8dbfb1257ada54c4dd59169"
-
-[[package]]
-name = "dyn-stack"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf6fa63092e3ca9f602f6500fddd05502412b748c4c4682938565b44eb9e0066"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "dyn-stack"
@@ -313,38 +292,48 @@ dependencies = [
 
 [[package]]
 name = "faer"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2b19b8c3570ea226e507fe3dbae2aa9d7e0f16676abd35ea3adeeb9f90f7b5d"
+version = "0.22.4"
+source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
 dependencies = [
  "bytemuck",
- "coe-rs",
- "dbgf",
- "dyn-stack 0.11.0",
+ "dyn-stack",
  "equator 0.4.2",
- "faer-entity",
+ "faer-macros",
+ "faer-traits",
  "gemm",
  "generativity",
  "libm",
  "nano-gemm",
  "num-complex",
  "num-traits",
- "paste",
+ "pulp",
  "reborrow",
 ]
 
 [[package]]
-name = "faer-entity"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "072f96f1bc8b2b30dfc26c086baeadb63aae08019b1ed84721809b9fd2006685"
+name = "faer-macros"
+version = "0.21.0"
+source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "faer-traits"
+version = "0.22.0"
+source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
 dependencies = [
  "bytemuck",
- "coe-rs",
+ "dyn-stack",
+ "faer-macros",
+ "generativity",
  "libm",
  "num-complex",
  "num-traits",
- "pulp 0.18.22",
+ "pulp",
+ "qd",
  "reborrow",
 ]
 
@@ -360,7 +349,7 @@ dependencies = [
  "log",
  "logforth",
  "num-traits",
- "pulp 0.21.4",
+ "pulp",
  "rand",
  "rand_distr",
  "rayon",
@@ -372,7 +361,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab96b703d31950f1aeddded248bc95543c9efc7ac9c4a21fda8703a83ee35451"
 dependencies = [
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "gemm-c32",
  "gemm-c64",
  "gemm-common",
@@ -391,7 +380,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6db9fd9f40421d00eea9dd0770045a5603b8d684654816637732463f4073847"
 dependencies = [
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "gemm-common",
  "num-complex",
  "num-traits",
@@ -406,7 +395,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfcad8a3d35a43758330b635d02edad980c1e143dc2f21e6fd25f9e4eada8edf"
 dependencies = [
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "gemm-common",
  "num-complex",
  "num-traits",
@@ -422,13 +411,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a352d4a69cbe938b9e2a9cb7a3a63b7e72f9349174a2752a558a8a563510d0f3"
 dependencies = [
  "bytemuck",
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "libm",
  "num-complex",
  "num-traits",
  "once_cell",
  "paste",
- "pulp 0.21.4",
+ "pulp",
  "raw-cpuid",
  "seq-macro",
 ]
@@ -439,7 +428,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc8d3d4385393304f407392f754cd2dc4b315d05063f62cf09f47b58de276864"
 dependencies = [
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "gemm-common",
  "num-complex",
  "num-traits",
@@ -454,7 +443,7 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35b2a4f76ce4b8b16eadc11ccf2e083252d8237c1b589558a49b0183545015bd"
 dependencies = [
- "dyn-stack 0.13.0",
+ "dyn-stack",
  "gemm-common",
  "num-complex",
  "num-traits",
@@ -781,21 +770,9 @@ dependencies = [
 
 [[package]]
 name = "pulp"
-version = "0.18.22"
+version = "0.21.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a01a0dc67cf4558d279f0c25b0962bd08fc6dec0137699eae304103e882fe6"
-dependencies = [
- "bytemuck",
- "libm",
- "num-complex",
- "reborrow",
-]
-
-[[package]]
-name = "pulp"
-version = "0.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95fb7a99b37aaef4c7dd2fd15a819eb8010bfc7a2c2155230d51f497316cad6d"
+checksum = "96b86df24f0a7ddd5e4b95c94fc9ed8a98f1ca94d3b01bdce2824097e7835907"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -803,6 +780,18 @@ dependencies = [
  "num-complex",
  "reborrow",
  "version_check",
+]
+
+[[package]]
+name = "qd"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4f5e6e5312f7415999bb62c0891fb286a06b6dfaef820c1ab45ff448a9b8fef"
+dependencies = [
+ "bytemuck",
+ "libm",
+ "num-traits",
+ "pulp",
 ]
 
 [[package]]

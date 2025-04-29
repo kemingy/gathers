@@ -90,8 +90,9 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
                     vec,
                     orthogonal
                         .col(i)
-                        .try_as_slice()
-                        .expect("failed to get orthogonal slice"),
+                        .try_as_col_major()
+                        .expect("col major")
+                        .as_slice(),
                 )
             })
         }
@@ -292,7 +293,7 @@ impl RaBitQ {
         // orthogonal matrix
         let mut rng = rand::rng();
         let random: Mat<f32> = Mat::from_fn(dim_pad, dim_pad, |_, _| rng.sample(StandardNormal));
-        let orthogonal = random.qr().compute_q();
+        let orthogonal = random.qr().compute_Q();
 
         let projected = &centroids_mat * &orthogonal;
         let mut factors = vec![Factor::default(); num];
@@ -311,24 +312,24 @@ impl RaBitQ {
             let xc = p - &mean;
             xc_distances[i] = xc.norm_l2();
             factors[i].center_distance_square = xc_distances[i].powi(2);
-            binary_vec.push(vector_binarize_u64(xc.as_slice()));
-            signed_vec.push(vector_binarize_one(xc.as_slice()));
+            let xc_slice = xc.try_as_row_major().expect("row major").as_slice();
+            binary_vec.push(vector_binarize_u64(xc_slice));
+            signed_vec.push(vector_binarize_one(xc_slice));
             let norm = xc_distances[i] * dim_sqrt;
             x_dot_product[i] = match norm.is_normal() {
-                true => &xc * &signed_vec[i] / norm,
+                true => (&xc * &signed_vec[i]) / norm,
                 false => DEFAULT_X_DOT_PRODUCT,
             };
         }
 
         let error_base = 2.0 * EPSILON / (dim_pad as f32 - 1.0).sqrt();
-        let one_vec: Row<f32> = Row::ones(dim_pad);
         for i in 0..num {
             let xc_over_ip = xc_distances[i] / x_dot_product[i];
             let factor = &mut factors[i];
             factor.error_bound =
                 error_base * (xc_over_ip * xc_over_ip - factor.center_distance_square).sqrt();
             factor.factor_ip = -2.0 / dim_sqrt * xc_over_ip;
-            factor.factor_ppc = factor.factor_ip * (&one_vec * &signed_vec[i]);
+            factor.factor_ppc = factor.factor_ip * signed_vec[i].sum();
         }
 
         // sort by distances
@@ -337,7 +338,7 @@ impl RaBitQ {
         let idx = idx.into_iter().map(|(i, _)| i).collect::<Vec<_>>();
         let binary_vec = idx.iter().flat_map(|&i| binary_vec[i].clone()).collect();
         let factors: Vec<Factor> = idx.iter().map(|&i| factors[i]).collect();
-        let centroids_col_based = Mat::from_fn(num, dim_pad, |i, j| centroids_mat.read(idx[i], j))
+        let centroids_col_based = Mat::from_fn(num, dim_pad, |i, j| *centroids_mat.get(idx[i], j))
             .transpose()
             .to_owned();
 
@@ -362,14 +363,16 @@ impl RaBitQ {
         }
 
         let projected = project(&query_pad, &self.orthogonal.as_ref());
-        let mut rough_distances = Vec::with_capacity(self.centroids.nrows());
+        let mut rough_distances = Vec::with_capacity(self.idx.len());
         let mut quantized = vec![0u8; self.dim];
         let mut binary = vec![0u64; (self.dim * THETA_LOG_DIM).div_ceil(64)];
         let mut residual = vec![0.0; self.dim];
-        let yc_distance = squared_euclidean(projected.as_slice(), self.mean.as_slice());
+        let projected_slice = projected.try_as_col_major().expect("col major").as_slice();
+        let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
+        let yc_distance = squared_euclidean(projected_slice, mean_slice);
 
         let (lower_bound, upper_bound) =
-            min_max_residual(&mut residual, projected.as_slice(), self.mean.as_slice());
+            min_max_residual(&mut residual, projected_slice, mean_slice);
         let delta = (upper_bound - lower_bound) * SCALAR;
         let one_over_delta = delta.recip();
         let scalar_sum = scalar_quantize(&mut quantized, &residual, lower_bound, one_over_delta);
@@ -426,8 +429,9 @@ impl RaBitQ {
                 let accurate = squared_euclidean(
                     self.centroids
                         .col(i)
-                        .try_as_slice()
-                        .expect("failed to get centroids slice"),
+                        .try_as_col_major()
+                        .expect("col major")
+                        .as_slice(),
                     query,
                 );
                 if accurate < threshold {
