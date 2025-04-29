@@ -4,7 +4,7 @@ from gathers import Gathers
 
 NUM = 1000
 CLUSTER = 10
-DIM = 64
+DIM = 48
 RABITQ_MATCH_RATE = 0.99
 
 

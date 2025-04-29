@@ -336,7 +336,7 @@ mod test {
     #[test]
     fn test_kmeans() {
         let mut rng = rand::rng();
-        let dim = 64;
+        let dim = 48;
         let n = 1000;
         let km = KMeans::default();
         let rabitq_match_rate = 0.99;

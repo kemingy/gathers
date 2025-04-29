@@ -16,7 +16,7 @@ rust-version = "1.85"
 aligned-vec = "0.6.4"
 argh = "0.1.13"
 bytemuck = "1.22.0"
-faer = { version = "0.22.4", default-features = false, features = ["rand", "linalg"]}
+faer = { version = "0.22.4", default-features = false, features = ["linalg"]}
 log = "0.4.27"
 logforth = "0.24.0"
 num-traits = "0.2.19"
