@@ -26,6 +26,7 @@ rayon = "1.10.0"
 
 [dependencies.faer]
 git = "https://github.com/sarah-quinones/faer-rs.git"
+# wait for the next release to fix the Row Sub op
 rev = "fd0c2def53078dbf8a41a83d00909e0061ed30b8"
 default-features = false
 features = ["linalg"]
