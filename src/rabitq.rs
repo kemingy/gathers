@@ -541,19 +541,25 @@ mod test {
                 let mut res = vec![0.0; dim];
                 let (min, max) = min_max_residual_native(&mut res, &x, &y);
 
-                let mut res_simd = vec![0.0; dim];
-                let (min_simd, max_simd) = unsafe { simd::min_max_residual(&mut res_simd, &x, &y) };
-
-                assert_eq!(min, min_simd);
-                assert_eq!(max, max_simd);
-                assert_eq!(res, res_simd);
-
                 let mut res_pulp = vec![0.0; dim];
                 let (min_pulp, max_pulp) = min_max_residual(&mut res_pulp, &x, &y);
 
                 assert_eq!(min, min_pulp);
                 assert_eq!(max, max_pulp);
                 assert_eq!(res, res_pulp);
+
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    let mut res_simd = vec![0.0; dim];
+                    let (min_simd, max_simd) = unsafe { simd::min_max_residual(&mut res_simd, &x, &y) };
+    
+                    assert_eq!(min, min_simd);
+                    assert_eq!(max, max_simd);
+                    assert_eq!(res, res_simd);
+                }
             }
         }
     }
