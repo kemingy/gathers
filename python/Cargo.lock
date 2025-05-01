@@ -174,8 +174,9 @@ dependencies = [
 
 [[package]]
 name = "faer"
-version = "0.22.4"
-source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49fce40ad65c366fbc6cd70a99d09d1008f075280bf2455e558e163c82913a9f"
 dependencies = [
  "bytemuck",
  "dyn-stack",
@@ -195,7 +196,8 @@ dependencies = [
 [[package]]
 name = "faer-macros"
 version = "0.21.0"
-source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d0a255d1442b5825c61812a7eafda9034ec53d969c98555251085e148428e6a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -204,8 +206,9 @@ dependencies = [
 
 [[package]]
 name = "faer-traits"
-version = "0.22.0"
-source = "git+https://github.com/sarah-quinones/faer-rs.git?rev=fd0c2def53078dbf8a41a83d00909e0061ed30b8#fd0c2def53078dbf8a41a83d00909e0061ed30b8"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54febfcbb90edaab562d85447a94d500f1601f11db0b30d27da87ed6542c8f91"
 dependencies = [
  "bytemuck",
  "dyn-stack",
