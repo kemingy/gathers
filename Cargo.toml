@@ -16,6 +16,7 @@ rust-version = "1.85"
 aligned-vec = "0.6.4"
 argh = "0.1.13"
 bytemuck = "1.22.0"
+faer = { version = "0.22.6", default-features = false, features = ["linalg"] }
 log = "0.4.27"
 logforth = "0.24.0"
 num-traits = "0.2.19"
@@ -23,13 +24,6 @@ pulp = "0.21.5"
 rand = "0.9.0"
 rand_distr = "0.5.0"
 rayon = "1.10.0"
-
-[dependencies.faer]
-git = "https://github.com/sarah-quinones/faer-rs.git"
-# wait for the next release to fix the Row Sub op
-rev = "fd0c2def53078dbf8a41a83d00909e0061ed30b8"
-default-features = false
-features = ["linalg"]
 
 [profile.dev.package.faer]
 opt-level = 3

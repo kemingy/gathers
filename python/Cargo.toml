@@ -11,5 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.24.1", features = ["abi3-py39", "extension-module"] }
-gathers = { path = "../" }
+# https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#multiple-locations
+gathers = { path = "../", version = "0.3.1"}
 numpy = "0.24.0"
