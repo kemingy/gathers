@@ -179,24 +179,24 @@ pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
     use std::arch::x86_64::*;
 
     let mut vec_ptr = vec.as_ptr();
-    let mut f32x8: __m256;
-    let mut sum = unsafe { _mm256_setzero_ps() };
+    let (mut vx, mut vy): (__m256, __m256);
+    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
 
     unsafe {
         for _ in 0..(vec.len() / 16) {
-            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vx = _mm256_loadu_ps(vec_ptr);
             vec_ptr = vec_ptr.add(8);
-            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+            sum0 = _mm256_fmadd_ps(vx, vx, sum0);
 
-            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vy = _mm256_loadu_ps(vec_ptr);
             vec_ptr = vec_ptr.add(8);
-            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+            sum1 = _mm256_fmadd_ps(vy, vy, sum1);
         }
 
         for _ in 0..(vec.len() & 0b1111) / 8 {
-            f32x8 = _mm256_loadu_ps(vec_ptr);
+            vx = _mm256_loadu_ps(vec_ptr);
             vec_ptr = vec_ptr.add(8);
-            sum = _mm256_fmadd_ps(f32x8, f32x8, sum);
+            sum0 = _mm256_fmadd_ps(vx, vx, sum0);
         }
     }
 
@@ -217,7 +217,7 @@ pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
     }
 
     unsafe {
-        let mut res = reduce_f32_256(sum);
+        let mut res = reduce_f32_256(_mm256_add_ps(sum0, sum1));
         for _ in 0..(vec.len() & 0b111) {
             res += *vec_ptr * *vec_ptr;
             vec_ptr = vec_ptr.add(1);
@@ -296,8 +296,8 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
-    let mut min_32x8 = unsafe { _mm256_set1_ps(f32::MAX) };
-    let mut max_32x8 = unsafe { _mm256_set1_ps(f32::MIN) };
+    let (mut min0, mut min1) = unsafe { (_mm256_set1_ps(f32::MAX), _mm256_set1_ps(f32::MAX)) };
+    let (mut max0, mut max1) = unsafe { (_mm256_set1_ps(f32::MIN), _mm256_set1_ps(f32::MIN)) };
     let mut x_ptr = x.as_ptr();
     let mut y_ptr = y.as_ptr();
     let mut res_ptr = res.as_mut_ptr();
@@ -306,23 +306,45 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
     let mut max = f32::MIN;
     let length = res.len();
     let rest = length & 0b111;
-    let (mut x256, mut y256, mut res256);
+    let (mut vx0, mut vx1, mut vy0, mut vy1, mut res0, mut res1);
 
     unsafe {
-        for _ in 0..(length / 8) {
-            x256 = _mm256_loadu_ps(x_ptr);
-            y256 = _mm256_loadu_ps(y_ptr);
-            res256 = _mm256_sub_ps(x256, y256);
-            _mm256_storeu_ps(res_ptr, res256);
+        for _ in 0..(length / 16) {
+            vx0 = _mm256_loadu_ps(x_ptr);
+            vy0 = _mm256_loadu_ps(y_ptr);
+            res0 = _mm256_sub_ps(vx0, vy0);
+            _mm256_storeu_ps(res_ptr, res0);
             x_ptr = x_ptr.add(8);
             y_ptr = y_ptr.add(8);
             res_ptr = res_ptr.add(8);
-            min_32x8 = _mm256_min_ps(min_32x8, res256);
-            max_32x8 = _mm256_max_ps(max_32x8, res256);
+            min0 = _mm256_min_ps(min0, res0);
+            max0 = _mm256_max_ps(max0, res0);
+
+            vx1 = _mm256_loadu_ps(x_ptr);
+            vy1 = _mm256_loadu_ps(y_ptr);
+            res1 = _mm256_sub_ps(vx1, vy1);
+            _mm256_storeu_ps(res_ptr, res1);
+            x_ptr = x_ptr.add(8);
+            y_ptr = y_ptr.add(8);
+            res_ptr = res_ptr.add(8);
+            min1 = _mm256_min_ps(min1, res1);
+            max1 = _mm256_max_ps(max1, res1);
+        }
+
+        for _ in 0..(length & 0b1111) / 8 {
+            vx0 = _mm256_loadu_ps(x_ptr);
+            vy0 = _mm256_loadu_ps(y_ptr);
+            res0 = _mm256_sub_ps(vx0, vy0);
+            _mm256_storeu_ps(res_ptr, res0);
+            x_ptr = x_ptr.add(8);
+            y_ptr = y_ptr.add(8);
+            res_ptr = res_ptr.add(8);
+            min0 = _mm256_min_ps(min0, res0);
+            max0 = _mm256_max_ps(max0, res0);
         }
     }
     unsafe {
-        _mm256_storeu_ps(f32x8.as_mut_ptr(), min_32x8);
+        _mm256_storeu_ps(f32x8.as_mut_ptr(), _mm256_min_ps(min0, min1));
     }
     for &x in f32x8.iter() {
         if x < min {
@@ -330,7 +352,7 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
         }
     }
     unsafe {
-        _mm256_storeu_ps(f32x8.as_mut_ptr(), max_32x8);
+        _mm256_storeu_ps(f32x8.as_mut_ptr(), _mm256_max_ps(max0, max1));
     }
     for &x in f32x8.iter() {
         if x > max {
