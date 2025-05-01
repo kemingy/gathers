@@ -554,8 +554,9 @@ mod test {
                         continue;
                     }
                     let mut res_simd = vec![0.0; dim];
-                    let (min_simd, max_simd) = unsafe { simd::min_max_residual(&mut res_simd, &x, &y) };
-    
+                    let (min_simd, max_simd) =
+                        unsafe { simd::min_max_residual(&mut res_simd, &x, &y) };
+
                     assert_eq!(min, min_simd);
                     assert_eq!(max, max_simd);
                     assert_eq!(res, res_simd);
