@@ -35,32 +35,33 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     assert_eq!(lhs.len(), rhs.len());
     let mut lhs_ptr = lhs.as_ptr();
     let mut rhs_ptr = rhs.as_ptr();
-    let (mut diff, mut vx, mut vy): (__m256, __m256, __m256);
-    let mut sum = unsafe { _mm256_setzero_ps() };
+    let (mut diff0, mut vx0, mut vy0): (__m256, __m256, __m256);
+    let (mut diff1, mut vx1, mut vy1): (__m256, __m256, __m256);
+    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
     unsafe {
         for _ in 0..(lhs.len() / 16) {
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx0 = _mm256_loadu_ps(lhs_ptr);
+            vy0 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            diff = _mm256_sub_ps(vx, vy);
-            sum = _mm256_fmadd_ps(diff, diff, sum);
+            diff0 = _mm256_sub_ps(vx0, vy0);
+            sum0 = _mm256_fmadd_ps(diff0, diff0, sum0);
 
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx1 = _mm256_loadu_ps(lhs_ptr);
+            vy1 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            diff = _mm256_sub_ps(vx, vy);
-            sum = _mm256_fmadd_ps(diff, diff, sum);
+            diff1 = _mm256_sub_ps(vx1, vy1);
+            sum1 = _mm256_fmadd_ps(diff1, diff1, sum1);
         }
 
         for _ in 0..(lhs.len() & 0b1111) / 8 {
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx0 = _mm256_loadu_ps(lhs_ptr);
+            vy0 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            diff = _mm256_sub_ps(vx, vy);
-            sum = _mm256_fmadd_ps(diff, diff, sum);
+            diff0 = _mm256_sub_ps(vx0, vy0);
+            sum0 = _mm256_fmadd_ps(diff0, diff0, sum0);
         }
     }
 
@@ -81,7 +82,7 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
 
     unsafe {
-        let mut res = reduce_f32_256(sum);
+        let mut res = reduce_f32_256(_mm256_add_ps(sum0, sum1));
         for _ in 0..(lhs.len() & 0b111) {
             let residual = *lhs_ptr - *rhs_ptr;
             res += residual * residual;
@@ -109,30 +110,30 @@ pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     assert_eq!(lhs.len(), rhs.len());
     let mut lhs_ptr = lhs.as_ptr();
     let mut rhs_ptr = rhs.as_ptr();
-    let (mut vx, mut vy): (__m256, __m256);
-    let mut sum = unsafe { _mm256_setzero_ps() };
+    let (mut vx0, mut vy0, mut vx1, mut vy1): (__m256, __m256, __m256, __m256);
+    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
 
     unsafe {
         for _ in 0..(lhs.len() / 16) {
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx0 = _mm256_loadu_ps(lhs_ptr);
+            vy0 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            sum = _mm256_fmadd_ps(vx, vy, sum);
+            sum0 = _mm256_fmadd_ps(vx0, vy0, sum0);
 
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx1 = _mm256_loadu_ps(lhs_ptr);
+            vy1 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            sum = _mm256_fmadd_ps(vx, vy, sum);
+            sum1 = _mm256_fmadd_ps(vx1, vy1, sum1);
         }
 
         for _ in 0..(lhs.len() & 0b1111) / 8 {
-            vx = _mm256_loadu_ps(lhs_ptr);
-            vy = _mm256_loadu_ps(rhs_ptr);
+            vx0 = _mm256_loadu_ps(lhs_ptr);
+            vy0 = _mm256_loadu_ps(rhs_ptr);
             lhs_ptr = lhs_ptr.add(8);
             rhs_ptr = rhs_ptr.add(8);
-            sum = _mm256_fmadd_ps(vx, vy, sum);
+            sum0 = _mm256_fmadd_ps(vx0, vy0, sum0);
         }
     }
 
@@ -153,7 +154,7 @@ pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
 
     unsafe {
-        let mut res = reduce_f32_256(sum);
+        let mut res = reduce_f32_256(_mm256_add_ps(sum0, sum1));
         for _ in 0..(lhs.len() & 0b111) {
             res += *lhs_ptr * *rhs_ptr;
             lhs_ptr = lhs_ptr.add(1);
