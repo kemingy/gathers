@@ -242,10 +242,9 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
 
     let mut index = 0;
     let mut minimal = f32::MAX;
-    let (mut comp0, mut comp1) = unsafe { (_mm256_set1_ps(minimal), _mm256_set1_ps(minimal)) };
+    let mut comp0 = unsafe { _mm256_set1_ps(minimal) };
     let mut vec_ptr = vec.as_ptr();
     let (mut x1, mut x2, mut x3, mut x4, mut mask0): (__m256, __m256, __m256, __m256, __m256);
-    let (mut y1, mut y2, mut y3, mut y4, mut mask1): (__m256, __m256, __m256, __m256, __m256);
     let mut i = 0;
 
     unsafe {
@@ -254,12 +253,6 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
             x2 = _mm256_loadu_ps(vec_ptr.add(8));
             x3 = _mm256_loadu_ps(vec_ptr.add(16));
             x4 = _mm256_loadu_ps(vec_ptr.add(24));
-            vec_ptr = vec_ptr.add(32);
-
-            y1 = _mm256_loadu_ps(vec_ptr);
-            y2 = _mm256_loadu_ps(vec_ptr.add(8));
-            y3 = _mm256_loadu_ps(vec_ptr.add(16));
-            y4 = _mm256_loadu_ps(vec_ptr.add(24));
             vec_ptr = vec_ptr.add(32);
 
             x1 = _mm256_min_ps(x1, x2);
@@ -275,21 +268,7 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
                 }
                 comp0 = _mm256_set1_ps(minimal);
             }
-
-            y1 = _mm256_min_ps(y1, y2);
-            y3 = _mm256_min_ps(y3, y4);
-            y1 = _mm256_min_ps(y1, y3);
-            mask1 = _mm256_cmp_ps(comp1, y1, _CMP_GT_OS);
-            if 0 == _mm256_testz_ps(mask1, mask1) {
-                for (j, &val) in vec.iter().enumerate().skip(i + 32).take(32) {
-                    if minimal > val {
-                        minimal = val;
-                        index = j;
-                    }
-                }
-                comp1 = _mm256_set1_ps(minimal);
-            }
-            i += 64;
+            i += 32;
         }
     }
 
