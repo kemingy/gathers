@@ -281,7 +281,7 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
             y1 = _mm256_min_ps(y1, y3);
             mask1 = _mm256_cmp_ps(comp1, y1, _CMP_GT_OS);
             if 0 == _mm256_testz_ps(mask1, mask1) {
-                for (j, &val) in vec.iter().enumerate().skip(i).take(32) {
+                for (j, &val) in vec.iter().enumerate().skip(i + 32).take(32) {
                     if minimal > val {
                         minimal = val;
                         index = j;
@@ -289,7 +289,7 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
                 }
                 comp1 = _mm256_set1_ps(minimal);
             }
-            i += 32;
+            i += 64;
         }
     }
 
