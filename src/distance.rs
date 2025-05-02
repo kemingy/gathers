@@ -147,8 +147,19 @@ mod test {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+
                 let diff = squared_euclidean(&lhs, &rhs) - native_squared_euclidean(&lhs, &rhs);
-                assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    let diff = unsafe { crate::simd::l2_squared_distance(&lhs, &rhs) }
+                        - native_squared_euclidean(&lhs, &rhs);
+                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                }
             }
         }
     }
@@ -160,8 +171,19 @@ mod test {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+
                 let diff = neg_dot_product(&lhs, &rhs) + native_dot_product(&lhs, &rhs);
-                assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    let diff = unsafe { crate::simd::dot_product(&lhs, &rhs) }
+                        - native_dot_product(&lhs, &rhs);
+                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                }
             }
         }
     }
@@ -172,8 +194,18 @@ mod test {
         for _ in 0..100 {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+
                 let diff = l2_norm(&vec) - l2_norm_native(&vec);
-                assert!(diff.abs() < 1e-5, "diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    let diff = unsafe { crate::simd::l2_norm(&vec) } - l2_norm_native(&vec);
+                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                }
             }
         }
     }
@@ -185,6 +217,14 @@ mod test {
             for dim in [12, 32, 128, 140].into_iter() {
                 let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 assert_eq!(argmin(&vec), native_argmin(&vec));
+
+                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    assert_eq!(argmin(&vec), unsafe { crate::simd::argmin(&vec) });
+                }
             }
         }
     }
