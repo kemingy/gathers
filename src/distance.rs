@@ -149,7 +149,7 @@ mod test {
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
 
                 let diff = squared_euclidean(&lhs, &rhs) - native_squared_euclidean(&lhs, &rhs);
-                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {diff} for dim: {dim}");
 
                 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                 {
@@ -158,7 +158,7 @@ mod test {
                     }
                     let diff = unsafe { crate::simd::l2_squared_distance(&lhs, &rhs) }
                         - native_squared_euclidean(&lhs, &rhs);
-                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
                 }
             }
         }
@@ -173,7 +173,7 @@ mod test {
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
 
                 let diff = neg_dot_product(&lhs, &rhs) + native_dot_product(&lhs, &rhs);
-                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {diff} for dim: {dim}");
 
                 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                 {
@@ -182,7 +182,7 @@ mod test {
                     }
                     let diff = unsafe { crate::simd::dot_product(&lhs, &rhs) }
                         - native_dot_product(&lhs, &rhs);
-                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
                 }
             }
         }
@@ -196,7 +196,7 @@ mod test {
                 let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
 
                 let diff = l2_norm(&vec) - l2_norm_native(&vec);
-                assert!(diff.abs() < 1e-5, "pulp diff: {} for dim: {}", diff, dim);
+                assert!(diff.abs() < 1e-5, "pulp diff: {diff} for dim: {dim}");
 
                 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                 {
@@ -204,7 +204,7 @@ mod test {
                         continue;
                     }
                     let diff = unsafe { crate::simd::l2_norm(&vec) } - l2_norm_native(&vec);
-                    assert!(diff.abs() < 1e-5, "simd diff: {} for dim: {}", diff, dim);
+                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
                 }
             }
         }
