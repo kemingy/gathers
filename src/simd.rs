@@ -180,7 +180,7 @@ pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
 
     let mut vec_ptr = vec.as_ptr();
     let (mut vx, mut vy): (__m256, __m256);
-    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
+    let (mut sum0, mut sum1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
 
     unsafe {
         for _ in 0..(vec.len() / 16) {
@@ -242,7 +242,7 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
 
     let mut index = 0;
     let mut minimal = f32::MAX;
-    let mut comp0 = unsafe { _mm256_set1_ps(minimal) };
+    let mut comp0 = _mm256_set1_ps(minimal);
     let mut vec_ptr = vec.as_ptr();
     let (mut x1, mut x2, mut x3, mut x4, mut mask0): (__m256, __m256, __m256, __m256, __m256);
     let mut i = 0;
@@ -296,8 +296,8 @@ pub unsafe fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
 
-    let (mut min0, mut min1) = unsafe { (_mm256_set1_ps(f32::MAX), _mm256_set1_ps(f32::MAX)) };
-    let (mut max0, mut max1) = unsafe { (_mm256_set1_ps(f32::MIN), _mm256_set1_ps(f32::MIN)) };
+    let (mut min0, mut min1) = (_mm256_set1_ps(f32::MAX), _mm256_set1_ps(f32::MAX));
+    let (mut max0, mut max1) = (_mm256_set1_ps(f32::MIN), _mm256_set1_ps(f32::MIN));
     let mut x_ptr = x.as_ptr();
     let mut y_ptr = y.as_ptr();
     let mut res_ptr = res.as_mut_ptr();
