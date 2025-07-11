@@ -165,7 +165,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
                 }
                 target = (target + 1) % labels.len();
             }
-            debug!("split cluster {} to fill empty cluster {}", target, i);
+            debug!("split cluster {target} to fill empty cluster {i}");
             if i < target {
                 let (left, right) = centroids.split_at_mut(target * dim);
                 left[i * dim..(i + 1) * dim].copy_from_slice(&right[..dim]);
@@ -193,7 +193,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
         }
     }
     if zero_count != 0 {
-        debug!("fixed {} empty clusters", zero_count);
+        debug!("fixed {zero_count} empty clusters");
     }
     diff
 }
@@ -267,7 +267,7 @@ impl KMeans {
             true => (((num as f32).sqrt() as u32) * 4).min((num / MIN_POINTS_PER_CENTROID) as u32),
             false => self.n_cluster,
         };
-        debug!("num of points: {}, num of clusters: {}", num, n_cluster);
+        debug!("num of points: {num}, num of clusters: {n_cluster}");
 
         if num < n_cluster as usize {
             panic!("number of samples must be greater than n_cluster");
@@ -285,7 +285,7 @@ impl KMeans {
         // subsample
         if num > MAX_POINTS_PER_CENTROID * n_cluster as usize {
             let n_sample = MAX_POINTS_PER_CENTROID * n_cluster as usize;
-            debug!("subsample to {} points", n_sample);
+            debug!("subsample to {n_sample} points");
             vecs = as_continuous_vec(&subsample(n_sample, &vecs, dim));
         }
 
@@ -316,7 +316,7 @@ impl KMeans {
             }
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
             if diff < self.tolerance {
-                debug!("converged at iter {}", i);
+                debug!("converged at iter {i}");
                 break;
             }
         }
@@ -381,9 +381,7 @@ mod test {
             let match_rate = match_count as f32 / n as f32;
             assert!(
                 match_rate >= rabitq_match_rate,
-                "round: {}, match rate: {}",
-                r,
-                match_rate
+                "round: {r}, match rate: {match_rate}"
             );
         }
     }

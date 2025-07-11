@@ -32,7 +32,7 @@ fn main() {
     logforth::builder()
         .dispatch(|d| d.filter(env_filter).append(append::Stderr::default()))
         .apply();
-    debug!("{:?}", args);
+    debug!("{args:?}");
 
     let vecs = read_vecs::<f32>(Path::new(&args.input)).expect("failed to read vecs");
     let dim = vecs[0].len();

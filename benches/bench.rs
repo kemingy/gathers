@@ -15,14 +15,14 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
         let x: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(BenchmarkId::new("native", dim), &x, |b, input| {
-            b.iter(|| l2_norm_native(&input))
+            b.iter(|| l2_norm_native(input))
         });
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
-            b.iter(|| unsafe { l2_norm(&input) })
+            b.iter(|| unsafe { l2_norm(input) })
         });
         if let Some(simd) = V3::try_new() {
             group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
-                b.iter(|| simd::pulp::l2_norm(simd, &input))
+                b.iter(|| simd::pulp::l2_norm(simd, input))
             });
         }
     }
@@ -79,14 +79,14 @@ pub fn argmin_benchmark(c: &mut Criterion) {
         let x: Vec<f32> = (0..dim).map(|_| rng.random::<f32>()).collect();
 
         group.bench_with_input(BenchmarkId::new("native", dim), &x, |b, input| {
-            b.iter(|| native_argmin(&input))
+            b.iter(|| native_argmin(input))
         });
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
-            b.iter(|| unsafe { argmin(&input) })
+            b.iter(|| unsafe { argmin(input) })
         });
         if let Some(simd) = V3::try_new() {
             group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
-                b.iter(|| simd::pulp::argmin(simd, &input))
+                b.iter(|| simd::pulp::argmin(simd, input))
             });
         }
     }
@@ -103,14 +103,14 @@ pub fn l2_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("native", dim),
             &(&lhs, &rhs),
-            |b, input| b.iter(|| native_squared_euclidean(&input.0, &input.1)),
+            |b, input| b.iter(|| native_squared_euclidean(input.0, input.1)),
         );
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| unsafe { l2_squared_distance(&input.0, &input.1) })
+            b.iter(|| unsafe { l2_squared_distance(input.0, input.1) })
         });
         if let Some(simd) = V3::try_new() {
             group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
-                b.iter(|| simd::pulp::l2_squared_distance(simd, &input.0, &input.1))
+                b.iter(|| simd::pulp::l2_squared_distance(simd, input.0, input.1))
             });
         }
     }
@@ -128,14 +128,14 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("native", dim),
             &(&lhs, &rhs),
-            |b, input| b.iter(|| native_dot_product(&input.0, &input.1)),
+            |b, input| b.iter(|| native_dot_product(input.0, input.1)),
         );
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| unsafe { dot_product(&input.0, &input.1) })
+            b.iter(|| unsafe { dot_product(input.0, input.1) })
         });
         if let Some(simd) = V3::try_new() {
             group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
-                b.iter(|| simd::pulp::dot_product(simd, &input.0, &input.1))
+                b.iter(|| simd::pulp::dot_product(simd, input.0, input.1))
             });
         }
     }
@@ -154,21 +154,21 @@ pub fn binary_ip_benchmark(c: &mut Criterion) {
             BenchmarkId::new("native", dim * 64),
             &(&lhs, &rhs),
             |b, input| {
-                b.iter(|| binary_dot_product_native(&input.0, &input.1));
+                b.iter(|| binary_dot_product_native(input.0, input.1));
             },
         );
         group.bench_with_input(
             BenchmarkId::new("simd", dim * 64),
             &(&lhs, &rhs),
             |b, input| {
-                b.iter(|| unsafe { simd::binary_dot_product_simd(&input.0, &input.1) });
+                b.iter(|| unsafe { simd::binary_dot_product_simd(input.0, input.1) });
             },
         );
         group.bench_with_input(
             BenchmarkId::new("pulp", dim * 64),
             &(&lhs, &rhs),
             |b, input| {
-                b.iter(|| simd::binary_dot_product(&input.0, &input.1));
+                b.iter(|| simd::binary_dot_product(input.0, input.1));
             },
         );
     }

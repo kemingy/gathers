@@ -37,7 +37,7 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     let mut rhs_ptr = rhs.as_ptr();
     let (mut diff0, mut vx0, mut vy0): (__m256, __m256, __m256);
     let (mut diff1, mut vx1, mut vy1): (__m256, __m256, __m256);
-    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
+    let (mut sum0, mut sum1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
     unsafe {
         for _ in 0..(lhs.len() / 16) {
             vx0 = _mm256_loadu_ps(lhs_ptr);
@@ -111,7 +111,7 @@ pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     let mut lhs_ptr = lhs.as_ptr();
     let mut rhs_ptr = rhs.as_ptr();
     let (mut vx0, mut vy0, mut vx1, mut vy1): (__m256, __m256, __m256, __m256);
-    let (mut sum0, mut sum1) = unsafe { (_mm256_setzero_ps(), _mm256_setzero_ps()) };
+    let (mut sum0, mut sum1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
 
     unsafe {
         for _ in 0..(lhs.len() / 16) {
