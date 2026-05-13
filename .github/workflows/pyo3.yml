@@ -37,13 +37,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: 'true'
+          sccache: "true"
           manylinux: auto
           working-directory: ${{ env.PYTHON_DIR }}
       - name: Upload wheels
@@ -75,7 +75,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: 'true'
+          sccache: "true"
           manylinux: musllinux_1_2
           working-directory: ${{ env.PYTHON_DIR }}
       - name: Upload wheels
@@ -89,22 +89,22 @@ jobs:
     strategy:
       matrix:
         platform:
-          - runner: windows-latest
+          - runner: windows-2025-vs2026
             target: x64
-          - runner: windows-latest
+          - runner: windows-2025-vs2026
             target: x86
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
           architecture: ${{ matrix.platform.target }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: 'true'
+          sccache: "true"
           working-directory: ${{ env.PYTHON_DIR }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -125,13 +125,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
-          sccache: 'true'
+          sccache: "true"
           working-directory: ${{ env.PYTHON_DIR }}
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
@@ -175,7 +175,7 @@ jobs:
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: 'wheels-*/*'
+          subject-path: "wheels-*/*"
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
