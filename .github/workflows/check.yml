@@ -2,25 +2,25 @@ name: Check
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
-      - '.github/workflows/check.yml'
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'python/src/**'
-      - 'python/Cargo.toml'
-      - 'python/Cargo.lock'
+      - ".github/workflows/check.yml"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "python/src/**"
+      - "python/Cargo.toml"
+      - "python/Cargo.lock"
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
-      - '.github/workflows/check.yml'
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'python/src/**'
-      - 'python/Cargo.toml'
-      - 'python/Cargo.lock'
+      - ".github/workflows/check.yml"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "python/src/**"
+      - "python/Cargo.toml"
+      - "python/Cargo.lock"
   merge_group:
   workflow_dispatch:
 
@@ -31,41 +31,45 @@ env:
 
 jobs:
   lint:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - uses: dtolnay/rust-toolchain@nightly
-    - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.9
-    - name: Install lint tools
-      run: |
-        rustup component add --toolchain nightly rustfmt clippy
-        pip install ruff
-    - name: Lint
-      run: |
-        make lint
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Install lint tools
+        run: |
+          rustup component add --toolchain nightly rustfmt clippy
+          pip install ruff
+      - name: Lint
+        run: |
+          make lint
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15, windows-latest]
+        os:
+          - ubuntu-24.04,
+          - ubuntu-24.04-arm,
+          - macos-15-intel,
+          - macos-15,
+          - windows-2025-vs2026,
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - name: Install dependencies
-      run: |
-        pip install pytest
-    - uses: dtolnay/rust-toolchain@stable
-    - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.9
-    - name: Test
-      run: make test
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install pytest
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Test
+        run: make test
