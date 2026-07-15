@@ -491,7 +491,9 @@ impl KMeans {
 mod test {
     use rand::Rng;
 
-    use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign};
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use super::base_assign_parallel;
+    use super::{KMeans, base_assign, rabitq_assign};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
 
