@@ -49,3 +49,7 @@ criterion = "0.5.1"
 [[bench]]
 name = "bench"
 harness = false
+
+[[bench]]
+name = "kmeans"
+harness = false

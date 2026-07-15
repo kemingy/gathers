@@ -39,7 +39,7 @@ the central estimates from the two measurements.
 Reproduction command:
 
 ```shell
-cargo bench --locked --bench bench kmeans -- \
+cargo bench --locked --bench kmeans kmeans -- \
   --warm-up-time 3 --measurement-time 10 --noplot
 ```
 
