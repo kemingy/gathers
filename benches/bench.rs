@@ -1,12 +1,18 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gathers::distance::{
-    Distance, l2_norm, l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
-    neg_dot_product, squared_euclidean,
+    Distance, l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
+};
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+use gathers::distance::{
+    l2_norm as dispatched_l2_norm, neg_dot_product as dispatched_neg_dot_product,
+    squared_euclidean as dispatched_squared_euclidean,
 };
 use gathers::kmeans::{KMeans, base_assign_parallel};
 use gathers::rabitq::{binary_dot_product_native, min_max_residual, min_max_residual_native};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use gathers::simd::{self, argmin, dot_product, l2_norm as simd_l2_norm, l2_squared_distance};
+use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use pulp::x86::V3;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -22,10 +28,17 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
         });
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
-            b.iter(|| unsafe { simd_l2_norm(input) })
+            b.iter(|| unsafe { l2_norm(input) })
         });
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
+                b.iter(|| simd::pulp::l2_norm(simd, input))
+            });
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
-            b.iter(|| l2_norm(input))
+            b.iter(|| dispatched_l2_norm(input))
         });
     }
     group.finish();
@@ -88,6 +101,13 @@ pub fn argmin_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &x, |b, input| {
             b.iter(|| unsafe { argmin(input) })
         });
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
+                b.iter(|| simd::pulp::argmin(simd, input))
+            });
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         group.bench_with_input(BenchmarkId::new("pulp", dim), &x, |b, input| {
             b.iter(|| gathers::distance::argmin(input))
         });
@@ -111,8 +131,15 @@ pub fn l2_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
             b.iter(|| unsafe { l2_squared_distance(input.0, input.1) })
         });
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
+                b.iter(|| simd::pulp::l2_squared_distance(simd, input.0, input.1))
+            });
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| squared_euclidean(input.0, input.1))
+            b.iter(|| dispatched_squared_euclidean(input.0, input.1))
         });
     }
     group.finish();
@@ -135,8 +162,15 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("simd", dim), &(&lhs, &rhs), |b, input| {
             b.iter(|| unsafe { dot_product(input.0, input.1) })
         });
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if let Some(simd) = V3::try_new() {
+            group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
+                b.iter(|| simd::pulp::dot_product(simd, input.0, input.1))
+            });
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         group.bench_with_input(BenchmarkId::new("pulp", dim), &(&lhs, &rhs), |b, input| {
-            b.iter(|| neg_dot_product(input.0, input.1))
+            b.iter(|| dispatched_neg_dot_product(input.0, input.1))
         });
     }
     group.finish();
