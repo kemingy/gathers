@@ -4,9 +4,9 @@ use core::panic;
 use std::time::Instant;
 
 use aligned_vec::AVec;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 use faer::linalg::matmul::matmul;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 use faer::{Accum, MatMut, MatRef, Par};
 use log::debug;
 use rand::Rng;
@@ -22,19 +22,19 @@ const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 18;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 const MAX_MATRIX_ASSIGNMENT_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 struct MatrixAssignmentWorkspace {
     vector_norms: Vec<f32>,
     centroid_norms: Vec<f32>,
     dot_products: Vec<f32>,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 impl MatrixAssignmentWorkspace {
     fn try_new(vecs: &[f32], num_centroids: usize, dim: usize, distance: Distance) -> Option<Self> {
         let num_vectors = vecs.len() / dim;
@@ -198,7 +198,7 @@ pub fn base_assign_parallel(
     distance: Distance,
     labels: &mut [u32],
 ) {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(target_os = "macos")]
     if let Some(mut workspace) =
         MatrixAssignmentWorkspace::try_new(vecs, centroids.len() / dim, dim, distance)
     {
@@ -445,7 +445,7 @@ impl KMeans {
         }
 
         let mut labels: Vec<u32> = vec![0; num];
-        #[cfg(all(not(feature = "perf"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(not(feature = "perf"), target_os = "macos"))]
         let mut matrix_workspace =
             MatrixAssignmentWorkspace::try_new(&vecs, centroids.len() / dim, dim, self.distance);
         debug!("start training");
@@ -455,16 +455,13 @@ impl KMeans {
             {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
-                #[cfg(all(not(feature = "perf"), target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(not(feature = "perf"), target_os = "macos"))]
                 if let Some(workspace) = &mut matrix_workspace {
                     workspace.assign(&vecs, &centroids, dim, &mut labels);
                 } else {
                     base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
                 }
-                #[cfg(all(
-                    not(feature = "perf"),
-                    not(all(target_os = "macos", target_arch = "aarch64"))
-                ))]
+                #[cfg(all(not(feature = "perf"), not(target_os = "macos")))]
                 base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
             } else {
                 #[cfg(feature = "perf")]
@@ -491,7 +488,7 @@ impl KMeans {
 mod test {
     use rand::Rng;
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(target_os = "macos")]
     use super::base_assign_parallel;
     use super::{KMeans, base_assign, rabitq_assign};
     use crate::distance::{Distance, argmin, squared_euclidean};
@@ -551,7 +548,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(target_os = "macos")]
     fn test_matrix_assignment_matches_direct_assignment() {
         let mut rng = rand::rng();
         let dim = 32;
@@ -585,7 +582,7 @@ mod test {
     }
 
     #[test]
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(target_os = "macos")]
     fn test_matrix_assignment_handles_large_common_offset() {
         let dim = 32;
         let num_vectors = 4096;

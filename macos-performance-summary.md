@@ -1,63 +1,78 @@
-# Apple Silicon K-Means Performance Optimization Summary
+# macOS K-Means Performance Optimization Summary
 
 Date: July 15, 2026
 
 ## Conclusion
 
-This optimization reduced the mean execution time of the fixed Apple Silicon
-K-Means benchmark from `27.821 ms` to `12.904 ms`. The optimized implementation
-is `2.16x` as fast, representing a `53.6%` reduction in execution time.
+The matrix-assignment optimization benefits both macOS architectures tested:
 
-The optimized code is isolated at compile time with
-`cfg(all(target_os = "macos", target_arch = "aarch64"))`. x86 and x86_64 builds
-neither compile nor call the new matrix assignment path and continue to use the
-original `base_assign_parallel` implementation. Therefore, this production-code
-optimization does not change the x86 execution path.
+| Target | Baseline mean | Optimized mean | Speedup | Time reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Apple Silicon arm64 | `27.821 ms` | `12.904 ms` | `2.16x` | `53.6%` |
+| Intel macOS x86_64 under Rosetta | `1.0963 s` | `60.882 ms` | `18.0x` | `94.4%` |
+
+The x86_64 result was measured before and after changing only the macOS compile
+gate for the matrix path. It shows that the algorithmic changes and Faer's x86
+GEMM backend are also effective for Intel macOS. The optimized production path
+therefore compiles on both `aarch64-apple-darwin` and
+`x86_64-apple-darwin`. Other operating systems retain the original assignment
+implementation.
 
 ## Measurement Method and Results
 
-Test environment:
+Common setup:
 
-- System: macOS Darwin 25.5.0 on Apple Silicon arm64
+- Host: macOS Darwin 25.5.0 on Apple Silicon
 - Rust: `rustc 1.93.1 (01f6ddf75 2026-02-11)`
 - Benchmark framework: Criterion using the release benchmark profile
 - Workload: 10,240 vectors with 128 dimensions, 256 centroids, and 5 iterations
 - Random seed: 43, ensuring identical input before and after the optimization
-- Baseline revision: `3507c09`
+- Apple Silicon baseline revision: `3507c09`
+- x86_64 baseline: `c8fa604`, where the matrix path was compile-time disabled
+  for x86_64 and the production assignment path still matched `3507c09`
 
-Results:
+Detailed Criterion results:
 
-| Version | Criterion time interval | Mean time | Relative speed |
+| Target and version | Criterion time interval | Mean time | Relative speed |
 | --- | ---: | ---: | ---: |
-| Baseline | `26.959–28.642 ms` | `27.821 ms` | `1.00x` |
-| Optimized | `11.883–14.323 ms` | `12.904 ms` | `2.16x` |
+| arm64 baseline | `26.959–28.642 ms` | `27.821 ms` | `1.00x` |
+| arm64 optimized | `11.883–14.323 ms` | `12.904 ms` | `2.16x` |
+| x86_64 baseline under Rosetta | `1.0854–1.1062 s` | `1.0963 s` | `1.00x` |
+| x86_64 optimized under Rosetta | `59.196–63.179 ms` | `60.882 ms` | `18.0x` |
 
-The relative speed is calculated as `27.821 / 12.904 = 2.16`. Criterion intervals
-vary with machine temperature and background load, so the reported speedup uses
-the central estimates from the two measurements.
+The relative speeds use the central estimates. Criterion intervals vary with
+machine temperature and background load. Rosetta results should not be treated
+as absolute native Intel timings, but the before/after comparison uses the same
+host, x86_64 target, toolchain, input, and benchmark parameters, making it strong
+evidence for enabling the path on Intel macOS.
 
-Reproduction command:
+Reproduction commands:
 
 ```shell
+# Native Apple Silicon
 cargo bench --locked --bench kmeans kmeans -- \
+  --warm-up-time 3 --measurement-time 10 --noplot
+
+# x86_64 under Rosetta
+rustup target add x86_64-apple-darwin --toolchain stable-aarch64-apple-darwin
+cargo bench --locked --target x86_64-apple-darwin --bench kmeans kmeans -- \
   --warm-up-time 3 --measurement-time 10 --noplot
 ```
 
 ## Implementation Overview
 
 The main hotspot was assigning every vector to its nearest centroid during each
-iteration. On Apple Silicon, the optimized path uses the identity
+iteration. On macOS, the optimized path uses the identity
 
 `||x-c||^2 = ||x||^2 + ||c||^2 - 2 x·c`
 
 to replace a large number of pairwise distance calculations with blocked matrix
-multiplication. The implementation also includes the following safeguards and
+multiplication. The implementation includes the following safeguards and
 optimizations:
 
 - Vector norms, centroid norms, and the dot-product workspace are reused to avoid
   reallocating large buffers on every iteration.
-- Matrix multiplication is processed in parallel blocks of 256 rows to make
-  better use of Apple Silicon.
+- Matrix multiplication is processed in parallel blocks of 256 rows.
 - The workspace is limited to 128 MiB. Oversized or small workloads automatically
   fall back to the original implementation.
 - Only squared Euclidean distance uses the optimized path. Other distance types
@@ -65,37 +80,23 @@ optimizations:
 - Candidates affected by possible floating-point cancellation are verified with
   the original direct distance formula.
 - Tests with random inputs and large common offsets verify that assignments match
-  direct distance calculation.
+  direct distance calculation on both macOS architectures.
 
-## x86 Performance Isolation
+## Platform Scope and Benchmark Isolation
 
-The optimization uses compile-time isolation at both the source and dependency
-levels rather than a runtime branch:
+The optimization uses compile-time isolation rather than adding a runtime
+platform branch:
 
-1. The matrix workspace, Faer matrix multiplication, thresholds, and new tests
-   compile only for `macOS + aarch64`.
-2. On x86 and x86_64, `base_assign` is identical to the baseline implementation.
-   The original body of `base_assign_parallel` is unchanged, and the new entry
-   path is removed during conditional compilation.
-3. On targets other than `macOS + aarch64`, the K-Means training loop continues
-   to call the original `base_assign_parallel` directly.
-4. The `faer/std` feature is enabled only for `aarch64-apple-darwin`. Target-aware
-   dependency resolution produced the following feature sets:
-
-```text
-x86_64-apple-darwin: faer features = [linalg]
-aarch64-apple-darwin: faer features = [linalg, std]
-```
-
-The architecture conditions in `benches/bench.rs`, `src/simd.rs`, and
-`src/rabitq.rs` only allow benchmarks and tests to compile on ARM. They do not
-modify any x86 production function.
-
-The current machine does not have the Rust `x86_64-apple-darwin` standard library
-installed, so a dynamic x86 benchmark under Rosetta was not executed. The
-no-regression conclusion for x86 is instead based on stronger compile-time path
-isolation and target-aware dependency resolution: none of the new optimized code
-is included in an x86 binary.
+1. The matrix workspace, Faer matrix multiplication, thresholds, and correctness
+   tests compile for `target_os = "macos"`, covering arm64 and x86_64.
+2. Linux, Windows, and other operating systems continue to call the original
+   `base_assign_parallel` implementation.
+3. The `faer/std` feature is enabled only for macOS targets; other targets retain
+   the original dependency feature set.
+4. Existing x86 microbenchmarks keep their original direct SIMD and
+   `pulp::x86::V3` calls. The new assignment and K-Means cases live in the
+   separate `kmeans` benchmark target so they do not perturb the old benchmark
+   binary.
 
 Dependency verification commands:
 
@@ -106,7 +107,7 @@ cargo tree --locked --target aarch64-apple-darwin -e features -i faer
 
 ## Correctness and Engineering Validation
 
-The final changes passed the following checks:
+Native Apple Silicon validation:
 
 ```shell
 cargo +nightly fmt --all -- --check
@@ -116,3 +117,17 @@ cargo test --all-targets --locked
 cargo check --locked --manifest-path python/Cargo.toml
 git diff --check
 ```
+
+x86_64 macOS validation:
+
+```shell
+cargo check --all-targets --locked --target x86_64-apple-darwin
+cargo clippy --all-targets --locked --target x86_64-apple-darwin -- -D warnings
+cargo test --locked --target x86_64-apple-darwin --lib --bins
+```
+
+The x86_64 library suite passed all 12 tests under Rosetta, including both
+matrix-assignment correctness tests. Running every legacy benchmark as a test
+under Rosetta is not supported because the existing binary-dot-product benchmark
+assumes AVX availability; native Intel CI remains the authoritative check for
+that pre-existing benchmark path.
