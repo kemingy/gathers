@@ -25,6 +25,9 @@ rand = "0.9.3"
 rand_distr = "0.5.0"
 rayon = "1.10.0"
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+faer = { version = "0.22.6", default-features = false, features = ["linalg", "std"] }
+
 [profile.dev.package.faer]
 opt-level = 3
 

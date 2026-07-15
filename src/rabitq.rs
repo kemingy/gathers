@@ -455,10 +455,13 @@ impl RaBitQ {
 mod test {
     use rand::Rng;
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::{
-        SCALAR, THETA_LOG_DIM, binary_dot_product_native, min_max_residual,
-        min_max_residual_native, scalar_quantize_native, vector_binarize_query_native,
+        SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
+        vector_binarize_query_native,
     };
+    use super::{min_max_residual, min_max_residual_native};
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
 
     #[test]

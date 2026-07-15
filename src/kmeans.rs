@@ -4,6 +4,10 @@ use core::panic;
 use std::time::Instant;
 
 use aligned_vec::AVec;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use faer::linalg::matmul::matmul;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use faer::{Accum, MatMut, MatRef, Par};
 use log::debug;
 use rand::Rng;
 use rayon::prelude::*;
@@ -18,6 +22,144 @@ const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 18;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const MAX_MATRIX_ASSIGNMENT_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct MatrixAssignmentWorkspace {
+    vector_norms: Vec<f32>,
+    centroid_norms: Vec<f32>,
+    dot_products: Vec<f32>,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl MatrixAssignmentWorkspace {
+    fn try_new(vecs: &[f32], num_centroids: usize, dim: usize, distance: Distance) -> Option<Self> {
+        let num_vectors = vecs.len() / dim;
+        let comparison_count = num_vectors.checked_mul(num_centroids)?;
+        if distance != Distance::SquaredEuclidean
+            || dim < 32
+            || num_centroids < 2
+            || !(MATRIX_ASSIGNMENT_THRESHOLD..=MAX_MATRIX_ASSIGNMENT_ELEMENTS)
+                .contains(&comparison_count)
+        {
+            return None;
+        }
+
+        let vector_norms = vecs
+            .par_chunks_exact(dim)
+            .map(|vector| vector.iter().map(|value| value * value).sum())
+            .collect();
+        Some(Self {
+            vector_norms,
+            centroid_norms: vec![0.0; num_centroids],
+            dot_products: vec![0.0; comparison_count],
+        })
+    }
+
+    fn assign(&mut self, vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+        let num_vectors = vecs.len() / dim;
+        let num_centroids = centroids.len() / dim;
+        debug_assert_eq!(self.vector_norms.len(), num_vectors);
+        debug_assert_eq!(self.centroid_norms.len(), num_centroids);
+        debug_assert_eq!(self.dot_products.len(), num_vectors * num_centroids);
+
+        const MATMUL_BLOCK_SIZE: usize = 256;
+        self.dot_products
+            .par_chunks_mut(MATMUL_BLOCK_SIZE * num_centroids)
+            .zip(vecs.par_chunks(MATMUL_BLOCK_SIZE * dim))
+            .for_each(|(dot_products, vectors)| {
+                let block_rows = vectors.len() / dim;
+                let vectors = MatRef::from_row_major_slice(vectors, block_rows, dim);
+                let centroids = MatRef::from_row_major_slice(centroids, num_centroids, dim);
+                let scores =
+                    MatMut::from_row_major_slice_mut(dot_products, block_rows, num_centroids);
+                matmul(
+                    scores,
+                    Accum::Replace,
+                    vectors,
+                    centroids.transpose(),
+                    -2.0,
+                    Par::Seq,
+                );
+            });
+
+        self.centroid_norms
+            .par_iter_mut()
+            .zip(centroids.par_chunks_exact(dim))
+            .for_each(|(norm, centroid)| {
+                *norm = centroid.iter().map(|value| value * value).sum();
+            });
+        let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
+        let dimension_error = dim as f32 * f32::EPSILON;
+        let gamma = dimension_error / (1.0 - dimension_error);
+
+        labels
+            .par_iter_mut()
+            .zip(&self.vector_norms)
+            .zip(vecs.par_chunks_exact(dim))
+            .zip(self.dot_products.par_chunks_exact(num_centroids))
+            .for_each(|(((label, &vector_norm), vector), scores)| {
+                let mut best_distance = f32::MAX;
+                let mut second_best_distance = f32::MAX;
+                let mut best_index = 0;
+                for (index, (&score, &centroid_norm)) in
+                    scores.iter().zip(&self.centroid_norms).enumerate()
+                {
+                    let distance = score + vector_norm + centroid_norm;
+                    if distance < best_distance {
+                        second_best_distance = best_distance;
+                        best_distance = distance;
+                        best_index = index;
+                    } else if distance < second_best_distance {
+                        second_best_distance = distance;
+                    }
+                }
+
+                // The matrix identity can lose precision when large, nearly equal values
+                // cancel. Only trust it when the best two candidates are separated by
+                // more than a conservative floating-point error bound.
+                let uncertainty = 8.0 * gamma * (vector_norm.abs() + max_centroid_norm.abs());
+                if !best_distance.is_finite() {
+                    let mut exact_label = [0];
+                    base_assign(
+                        vector,
+                        centroids,
+                        dim,
+                        Distance::SquaredEuclidean,
+                        &mut exact_label,
+                    );
+                    *label = exact_label[0];
+                } else if best_distance < 0.0
+                    || second_best_distance - best_distance <= 2.0 * uncertainty
+                {
+                    let cutoff = best_distance + 2.0 * uncertainty;
+                    let mut exact_best_distance = f32::MAX;
+                    let mut exact_best_index = best_index;
+                    for (index, ((&score, &centroid_norm), centroid)) in scores
+                        .iter()
+                        .zip(&self.centroid_norms)
+                        .zip(centroids.chunks_exact(dim))
+                        .enumerate()
+                    {
+                        let approximate_distance = score + vector_norm + centroid_norm;
+                        if approximate_distance <= cutoff {
+                            let exact_distance = squared_euclidean(vector, centroid);
+                            if exact_distance < exact_best_distance {
+                                exact_best_distance = exact_distance;
+                                exact_best_index = index;
+                            }
+                        }
+                    }
+                    *label = exact_best_index as u32;
+                } else {
+                    *label = best_index as u32;
+                }
+            });
+    }
+}
 
 /// Assign vectors to centroids in single thread.
 pub fn base_assign(
@@ -56,6 +198,14 @@ pub fn base_assign_parallel(
     distance: Distance,
     labels: &mut [u32],
 ) {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if let Some(mut workspace) =
+        MatrixAssignmentWorkspace::try_new(vecs, centroids.len() / dim, dim, distance)
+    {
+        workspace.assign(vecs, centroids, dim, labels);
+        return;
+    }
+
     match distance {
         Distance::NegativeDotProduct => {
             let mut distances = vec![f32::MAX; centroids.len() / dim];
@@ -295,6 +445,9 @@ impl KMeans {
         }
 
         let mut labels: Vec<u32> = vec![0; num];
+        #[cfg(all(not(feature = "perf"), target_os = "macos", target_arch = "aarch64"))]
+        let mut matrix_workspace =
+            MatrixAssignmentWorkspace::try_new(&vecs, centroids.len() / dim, dim, self.distance);
         debug!("start training");
         for i in 0..self.max_iter {
             let start_time = Instant::now();
@@ -302,7 +455,16 @@ impl KMeans {
             {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
-                #[cfg(not(feature = "perf"))]
+                #[cfg(all(not(feature = "perf"), target_os = "macos", target_arch = "aarch64"))]
+                if let Some(workspace) = &mut matrix_workspace {
+                    workspace.assign(&vecs, &centroids, dim, &mut labels);
+                } else {
+                    base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
+                }
+                #[cfg(all(
+                    not(feature = "perf"),
+                    not(all(target_os = "macos", target_arch = "aarch64"))
+                ))]
                 base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
             } else {
                 #[cfg(feature = "perf")]
@@ -329,7 +491,7 @@ impl KMeans {
 mod test {
     use rand::Rng;
 
-    use super::{KMeans, base_assign, rabitq_assign};
+    use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
 
@@ -383,6 +545,71 @@ mod test {
                 match_rate >= rabitq_match_rate,
                 "round: {r}, match rate: {match_rate}"
             );
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn test_matrix_assignment_matches_direct_assignment() {
+        let mut rng = rand::rng();
+        let dim = 32;
+        let num_vectors = 4096;
+        let num_centroids = 64;
+        let vecs = (0..num_vectors * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let centroids = (0..num_centroids * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let mut expected = vec![0; num_vectors];
+        let mut actual = vec![0; num_vectors];
+
+        base_assign(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        base_assign_parallel(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut actual,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn test_matrix_assignment_handles_large_common_offset() {
+        let dim = 32;
+        let num_vectors = 4096;
+        let num_centroids = 64;
+        let mut centroids = vec![1_000_000.0; num_centroids * dim];
+        for (index, centroid) in centroids.chunks_exact_mut(dim).enumerate() {
+            centroid[0] += index as f32 * 2.0;
+        }
+        let mut vecs = Vec::with_capacity(num_vectors * dim);
+        for index in 0..num_vectors {
+            let centroid = &centroids[(index % num_centroids) * dim..][..dim];
+            vecs.extend_from_slice(centroid);
+            *vecs.last_mut().unwrap() += 0.125;
+        }
+        let mut labels = vec![0; num_vectors];
+
+        base_assign_parallel(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut labels,
+        );
+
+        for (index, &label) in labels.iter().enumerate() {
+            assert_eq!(label as usize, index % num_centroids);
         }
     }
 }
