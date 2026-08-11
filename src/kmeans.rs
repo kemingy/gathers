@@ -25,7 +25,7 @@ const RAYON_BLOCK_SIZE: usize = 64;
 #[cfg(target_os = "macos")]
 const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 18;
 #[cfg(target_os = "macos")]
-const MAX_MATRIX_ASSIGNMENT_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
+const MAX_MATRIX_ASSIGNMENT_ELEMENTS: usize = (128 << 20) / std::mem::size_of::<f32>();
 
 #[cfg(target_os = "macos")]
 struct MatrixAssignmentWorkspace {
@@ -39,11 +39,14 @@ impl MatrixAssignmentWorkspace {
     fn try_new(vecs: &[f32], num_centroids: usize, dim: usize, distance: Distance) -> Option<Self> {
         let num_vectors = vecs.len() / dim;
         let comparison_count = num_vectors.checked_mul(num_centroids)?;
+        let workspace_elements = comparison_count
+            .checked_add(num_vectors)?
+            .checked_add(num_centroids)?;
         if distance != Distance::SquaredEuclidean
             || dim < 32
             || num_centroids < 2
-            || !(MATRIX_ASSIGNMENT_THRESHOLD..=MAX_MATRIX_ASSIGNMENT_ELEMENTS)
-                .contains(&comparison_count)
+            || comparison_count < MATRIX_ASSIGNMENT_THRESHOLD
+            || workspace_elements > MAX_MATRIX_ASSIGNMENT_ELEMENTS
         {
             return None;
         }
@@ -65,6 +68,7 @@ impl MatrixAssignmentWorkspace {
         debug_assert_eq!(self.vector_norms.len(), num_vectors);
         debug_assert_eq!(self.centroid_norms.len(), num_centroids);
         debug_assert_eq!(self.dot_products.len(), num_vectors * num_centroids);
+        debug_assert_eq!(labels.len(), num_vectors);
 
         const MATMUL_BLOCK_SIZE: usize = 256;
         self.dot_products
