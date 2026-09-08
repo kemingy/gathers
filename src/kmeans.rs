@@ -62,9 +62,13 @@ impl pulp::WithSimd for AssignBlock<'_> {
     }
 }
 
-fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, labels: &[u32]) {
+fn validate_vectors(vecs: &[f32], dim: usize) {
     assert!(dim > 0, "dimension must be greater than zero");
     assert_eq!(vecs.len() % dim, 0, "vectors must be complete");
+}
+
+fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, labels: &[u32]) {
+    validate_vectors(vecs, dim);
     assert_eq!(centroids.len() % dim, 0, "centroids must be complete");
     assert_eq!(
         labels.len(),
@@ -308,6 +312,9 @@ impl KMeans {
 
     /// Fit the KMeans configurations to the given vectors and return the centroids.
     pub fn fit(&self, mut vecs: AVec<f32>, dim: usize) -> AVec<f32> {
+        validate_vectors(&vecs, dim);
+        assert!(!vecs.is_empty(), "at least one vector is required");
+
         let num_vectors = vecs.len() / dim;
 
         // auto-config `num_clusters` when initialized with `default()`
@@ -383,6 +390,25 @@ mod test {
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    #[should_panic(expected = "dimension must be greater than zero")]
+    fn test_fit_rejects_zero_dimension() {
+        KMeans::default().fit(as_continuous_vec(&[vec![1.0]]), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectors must be complete")]
+    fn test_fit_rejects_incomplete_vectors() {
+        KMeans::default().fit(as_continuous_vec(&[vec![1.0, 2.0, 3.0]]), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one vector is required")]
+    fn test_fit_rejects_empty_input() {
+        let vecs: Vec<Vec<f32>> = Vec::new();
+        KMeans::default().fit(as_continuous_vec(&vecs), 1);
+    }
 
     #[test]
     fn test_kmeans() {
