@@ -1,7 +1,8 @@
 use core::f32;
 
 use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
-use pyo3::prelude::*;
+use pyo3::types::{PyModule, PyModuleMethods};
+use pyo3::{Bound, PyResult, pyfunction, pymodule, wrap_pyfunction};
 
 use gathers::distance::{Distance, argmin, squared_euclidean};
 use gathers::kmeans::{KMeans, rabitq_assign_parallel};

@@ -4,7 +4,9 @@ use gathers::kmeans::{base_assign, base_assign_parallel, rabitq_assign_parallel}
 use gathers::rabitq::RaBitQ;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rayon::prelude::*;
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
+};
 
 fn assignment_benchmark(c: &mut Criterion) {
     const NUM_VECTORS: usize = 4096;

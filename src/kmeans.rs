@@ -6,7 +6,7 @@ use std::time::Instant;
 use aligned_vec::AVec;
 use log::debug;
 use rand::Rng;
-use rayon::prelude::*;
+use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};

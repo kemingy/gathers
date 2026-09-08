@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use faer::{Col, Mat, MatRef, Row};
 use rand::Rng;
 use rand_distr::StandardNormal;
-use rayon::prelude::*;
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
+};
 
 use crate::distance::squared_euclidean;
 
