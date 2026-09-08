@@ -117,6 +117,8 @@ pub fn base_assign_parallel(
 
 /// Assign vectors to centroids with RaBitQ in single thread.
 pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+
     let start = Instant::now();
     let rabitq = RaBitQ::new(centroids, dim);
     debug!("RaBitQ: build takes {} s", start.elapsed().as_secs_f32());
@@ -128,7 +130,11 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
         *label = index as u32;
         precise += count;
     }
-    rabitq.update_metrics((labels.len() * rabitq.len()) as u64, precise);
+    let rough = u64::try_from(labels.len())
+        .expect("label count exceeds u64")
+        .checked_mul(u64::try_from(rabitq.len()).expect("centroid count exceeds u64"))
+        .expect("comparison count exceeds u64");
+    rabitq.update_metrics(rough, precise);
 
     let (rough, precise) = rabitq.get_metrics();
     debug!(
@@ -143,6 +149,8 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
 ///
 /// TODO: support dot product distance
 pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+
     let rabitq = RaBitQ::new(centroids, dim);
     rabitq.retrieve_top_one_batch(vecs, dim, labels);
 
@@ -432,6 +440,13 @@ mod test {
             base_assign_parallel(&vecs, &centroids, dim, distance, &mut actual);
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "vectors must be complete")]
+    fn test_rabitq_assignment_rejects_incomplete_vectors() {
+        let mut labels = [0];
+        rabitq_assign(&[0.0, 1.0, 2.0], &[0.0, 1.0], 2, &mut labels);
     }
 
     #[test]

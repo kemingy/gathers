@@ -353,6 +353,10 @@ impl RaBitQ {
 
     /// Create a new RaBitQ instance.
     pub fn new(centroids: &[f32], dim: usize) -> Self {
+        assert!(dim > 0, "dimension must be greater than zero");
+        assert_eq!(centroids.len() % dim, 0, "centroids must be complete");
+        assert!(!centroids.is_empty(), "at least one centroid is required");
+
         // init
         let num = centroids.len() / dim;
         let dim_pad = dim.div_ceil(64) * 64;
@@ -561,6 +565,12 @@ mod test {
     use crate::distance::squared_euclidean;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
+
+    #[test]
+    #[should_panic(expected = "centroids must be complete")]
+    fn test_new_rejects_incomplete_centroids() {
+        RaBitQ::new(&[0.0, 1.0, 2.0], 2);
+    }
 
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
