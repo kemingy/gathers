@@ -337,6 +337,7 @@ pub struct RaBitQ {
     factors: Vec<Factor>,
     binary_vec: Vec<u64>,
     idx: Vec<usize>,
+    input_dim: usize,
     dim: usize,
     metrics: Metrics,
 }
@@ -420,6 +421,7 @@ impl RaBitQ {
             binary_vec,
             factors,
             idx,
+            input_dim: dim,
             dim: dim_pad,
             metrics: Metrics::default(),
         }
@@ -439,6 +441,10 @@ impl RaBitQ {
     /// processes its queries.
     pub fn retrieve_top_one_batch(&self, queries: &[f32], dim: usize, labels: &mut [u32]) {
         assert!(dim > 0, "dimension must be greater than zero");
+        assert_eq!(
+            dim, self.input_dim,
+            "query dimension must match the vector dimension"
+        );
         assert_eq!(queries.len() % dim, 0, "queries must be complete");
         assert_eq!(labels.len(), queries.len() / dim);
 
@@ -465,7 +471,11 @@ impl RaBitQ {
         query: &[f32],
         workspace: &mut RaBitQWorkspace,
     ) -> (usize, u64) {
-        assert_eq!(self.dim, query.len().div_ceil(64) * 64);
+        assert_eq!(
+            query.len(),
+            self.input_dim,
+            "query dimension must match the vector dimension"
+        );
         workspace.query.fill(0.0);
         workspace.query[..query.len()].copy_from_slice(query);
         workspace.binary.fill(0);
@@ -495,14 +505,14 @@ impl RaBitQ {
         let mut precise = 0;
         let dist_sqrt = yc_distance.sqrt();
         let offset = workspace.binary.len() / THETA_LOG_DIM;
-        for &i in self.idx.iter() {
-            let factor = &self.factors[i];
+        for (position, &original_index) in self.idx.iter().enumerate() {
+            let factor = &self.factors[position];
             let rough = factor.center_distance_square
                 + yc_distance
                 + lower_bound * factor.factor_ppc
                 + (2.0
                     * asymmetric_binary_dot_product(
-                        &self.binary_vec[i * offset..(i + 1) * offset],
+                        &self.binary_vec[position * offset..(position + 1) * offset],
                         &workspace.binary,
                     ) as f32
                     - scalar_sum as f32)
@@ -513,7 +523,7 @@ impl RaBitQ {
                 precise += 1;
                 let accurate = squared_euclidean(
                     self.centroids
-                        .col(i)
+                        .col(position)
                         .try_as_col_major()
                         .expect("col major")
                         .as_slice(),
@@ -521,7 +531,7 @@ impl RaBitQ {
                 );
                 if accurate < threshold {
                     threshold = accurate;
-                    min_index = self.idx[i];
+                    min_index = original_index;
                 }
             }
         }
@@ -548,6 +558,7 @@ mod test {
         SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
         vector_binarize_query_native,
     };
+    use crate::distance::squared_euclidean;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
 
@@ -675,5 +686,29 @@ mod test {
         rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_retrieval_matches_brute_force_after_centroid_sorting() {
+        let dim = 64;
+        let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
+        let mut centroids = vec![0.0; values.len() * dim];
+        for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
+            centroid[0] = value;
+        }
+        let rabitq = RaBitQ::new(&centroids, dim);
+
+        assert_ne!(rabitq.idx, (0..values.len()).collect::<Vec<_>>());
+        for query in centroids.chunks_exact(dim) {
+            let expected = centroids
+                .chunks_exact(dim)
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
+                })
+                .map(|(index, _)| index)
+                .unwrap();
+            assert_eq!(rabitq.retrieve_top_one(query), expected);
+        }
     }
 }
