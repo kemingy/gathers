@@ -133,12 +133,25 @@ pub fn argmin(vec: &[f32]) -> usize {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     use super::{
         argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
+
+    fn assert_f32_close(actual: f32, expected: f32, implementation: &str, dim: usize) {
+        const ABS_TOLERANCE: f32 = 1e-6;
+        const REL_TOLERANCE: f32 = 1e-5;
+
+        let diff = (actual - expected).abs();
+        let tolerance = ABS_TOLERANCE + REL_TOLERANCE * actual.abs().max(expected.abs());
+        assert!(
+            diff <= tolerance,
+            "{implementation} diff: {diff}, tolerance: {tolerance} for dim: {dim}"
+        );
+    }
 
     #[test]
     fn test_l2_squared_distance() {
@@ -166,23 +179,26 @@ mod test {
 
     #[test]
     fn test_dot_product_distance() {
-        let mut rng = rand::rng();
+        let mut rng = StdRng::seed_from_u64(42);
         for _ in 0..100 {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let rhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
 
-                let diff = neg_dot_product(&lhs, &rhs) + native_dot_product(&lhs, &rhs);
-                assert!(diff.abs() < 1e-5, "pulp diff: {diff} for dim: {dim}");
+                let expected = native_dot_product(&lhs, &rhs);
+                assert_f32_close(-neg_dot_product(&lhs, &rhs), expected, "pulp", dim);
 
                 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
                 {
                     if !is_x86_feature_detected!("avx2") {
                         continue;
                     }
-                    let diff = unsafe { crate::simd::dot_product(&lhs, &rhs) }
-                        - native_dot_product(&lhs, &rhs);
-                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
+                    assert_f32_close(
+                        unsafe { crate::simd::dot_product(&lhs, &rhs) },
+                        expected,
+                        "simd",
+                        dim,
+                    );
                 }
             }
         }

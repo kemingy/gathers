@@ -6,10 +6,10 @@ use std::time::Instant;
 use aligned_vec::AVec;
 use log::debug;
 use rand::Rng;
-use rayon::prelude::*;
+use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 
-use crate::distance::{Distance, argmin, neg_dot_product, squared_euclidean};
-use crate::rabitq::RaBitQ;
+use crate::distance::{Distance, squared_euclidean};
+use crate::rabitq::{RaBitQ, RaBitQWorkspace};
 use crate::sampling::subsample;
 use crate::utils::{as_continuous_vec, centroid_residual, normalize};
 
@@ -19,6 +19,65 @@ const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
 
+struct AssignBlock<'a> {
+    vecs: &'a [f32],
+    centroids: &'a [f32],
+    dim: usize,
+    distance: Distance,
+    labels: &'a mut [u32],
+}
+
+impl pulp::WithSimd for AssignBlock<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: pulp::Simd>(self, simd: S) {
+        let Self {
+            vecs,
+            centroids,
+            dim,
+            distance,
+            labels,
+        } = self;
+
+        for (label, vector) in labels.iter_mut().zip(vecs.chunks_exact(dim)) {
+            let mut best_distance = f32::MAX;
+            let mut best_index = 0;
+            for (index, centroid) in centroids.chunks_exact(dim).enumerate() {
+                let candidate = match distance {
+                    Distance::SquaredEuclidean => {
+                        crate::simd::pulp::l2_squared_distance(simd, vector, centroid)
+                    }
+                    Distance::NegativeDotProduct => {
+                        -crate::simd::pulp::dot_product(simd, vector, centroid)
+                    }
+                };
+                if candidate < best_distance {
+                    best_distance = candidate;
+                    best_index = index;
+                }
+            }
+            *label = best_index as u32;
+        }
+    }
+}
+
+fn validate_vectors(vecs: &[f32], dim: usize) {
+    assert!(dim > 0, "dimension must be greater than zero");
+    assert_eq!(vecs.len() % dim, 0, "vectors must be complete");
+}
+
+fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, labels: &[u32]) {
+    validate_vectors(vecs, dim);
+    assert_eq!(centroids.len() % dim, 0, "centroids must be complete");
+    assert_eq!(
+        labels.len(),
+        vecs.len() / dim,
+        "one label is required per vector"
+    );
+    assert!(!centroids.is_empty(), "at least one centroid is required");
+}
+
 /// Assign vectors to centroids in single thread.
 pub fn base_assign(
     vecs: &[f32],
@@ -27,25 +86,14 @@ pub fn base_assign(
     distance: Distance,
     labels: &mut [u32],
 ) {
-    let mut distances = vec![f32::MAX; centroids.len() / dim];
-    match distance {
-        Distance::NegativeDotProduct => {
-            for (i, vec) in vecs.chunks(dim).enumerate() {
-                for (j, centroid) in centroids.chunks(dim).enumerate() {
-                    distances[j] = neg_dot_product(vec, centroid);
-                }
-                labels[i] = argmin(&distances) as u32;
-            }
-        }
-        Distance::SquaredEuclidean => {
-            for (i, vec) in vecs.chunks(dim).enumerate() {
-                for (j, centroid) in centroids.chunks(dim).enumerate() {
-                    distances[j] = squared_euclidean(vec, centroid);
-                }
-                labels[i] = argmin(&distances) as u32;
-            }
-        }
-    }
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+    pulp::Arch::new().dispatch(AssignBlock {
+        vecs,
+        centroids,
+        dim,
+        distance,
+        labels,
+    });
 }
 
 /// Assign vectors to centroids in multi-threads.
@@ -56,50 +104,41 @@ pub fn base_assign_parallel(
     distance: Distance,
     labels: &mut [u32],
 ) {
-    match distance {
-        Distance::NegativeDotProduct => {
-            let mut distances = vec![f32::MAX; centroids.len() / dim];
-            for (i, vec) in vecs.chunks(dim).enumerate() {
-                for (j, centroid) in centroids.chunks(dim).enumerate() {
-                    distances[j] = neg_dot_product(vec, centroid);
-                }
-                labels[i] = argmin(&distances) as u32;
-            }
-        }
-        Distance::SquaredEuclidean => {
-            // pre-compute the x**2 & y**2 for L2 distance
-            // let squared_x: Vec<f32> = vecs.chunks(dim).map(l2_norm).collect();
-            // let squared_y: Vec<f32> = centroids.chunks(dim).map(l2_norm).collect();
-
-            labels.copy_from_slice(
-                &vecs
-                    .par_chunks(dim * RAYON_BLOCK_SIZE)
-                    .flat_map(|vec| {
-                        let mut par_labels = vec![0; vec.len() / dim];
-                        let mut par_distances = vec![f32::MAX; centroids.len() / dim];
-                        for (i, v) in vec.chunks(dim).enumerate() {
-                            for (j, centroid) in centroids.chunks(dim).enumerate() {
-                                par_distances[j] = squared_euclidean(v, centroid);
-                            }
-                            par_labels[i] = argmin(&par_distances) as u32;
-                        }
-                        par_labels
-                    })
-                    .collect::<Vec<_>>(),
-            );
-        }
-    }
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+    labels
+        .par_chunks_mut(RAYON_BLOCK_SIZE)
+        .zip(vecs.par_chunks(dim * RAYON_BLOCK_SIZE))
+        .for_each(|(labels, vecs)| {
+            pulp::Arch::new().dispatch(AssignBlock {
+                vecs,
+                centroids,
+                dim,
+                distance,
+                labels,
+            });
+        });
 }
 
 /// Assign vectors to centroids with RaBitQ in single thread.
 pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+
     let start = Instant::now();
     let rabitq = RaBitQ::new(centroids, dim);
     debug!("RaBitQ: build takes {} s", start.elapsed().as_secs_f32());
 
-    for (i, vec) in vecs.chunks(dim).enumerate() {
-        labels[i] = rabitq.retrieve_top_one(vec) as u32;
+    let mut workspace = RaBitQWorkspace::new(rabitq.dim());
+    let mut precise = 0;
+    for (label, vector) in labels.iter_mut().zip(vecs.chunks_exact(dim)) {
+        let (index, count) = rabitq.retrieve_top_one_with_workspace(vector, &mut workspace);
+        *label = index as u32;
+        precise += count;
     }
+    let rough = u64::try_from(labels.len())
+        .expect("label count exceeds u64")
+        .checked_mul(u64::try_from(rabitq.len()).expect("centroid count exceeds u64"))
+        .expect("comparison count exceeds u64");
+    rabitq.update_metrics(rough, precise);
 
     let (rough, precise) = rabitq.get_metrics();
     debug!(
@@ -114,18 +153,10 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
 ///
 /// TODO: support dot product distance
 pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
-    let rabitq = RaBitQ::new(centroids, dim);
+    validate_assignment_inputs(vecs, centroids, dim, labels);
 
-    labels.copy_from_slice(
-        &vecs
-            .par_chunks(dim * RAYON_BLOCK_SIZE)
-            .flat_map(|vec| {
-                vec.chunks(dim)
-                    .map(|v| rabitq.retrieve_top_one(v) as u32)
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>(),
-    );
+    let rabitq = RaBitQ::new(centroids, dim);
+    rabitq.retrieve_top_one_batch(vecs, dim, labels);
 
     let (rough, precise) = rabitq.get_metrics();
     debug!(
@@ -138,62 +169,83 @@ pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, label
 
 /// Update centroids to the mean of assigned vectors.
 pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
+    validate_assignment_inputs(vecs, centroids, dim, labels);
+    let num_centroids = centroids.len() / dim;
+    assert!(
+        labels.len() >= num_centroids,
+        "number of vectors must be at least the number of centroids"
+    );
+    assert!(
+        labels.iter().all(|&label| (label as usize) < num_centroids),
+        "labels must reference an existing centroid"
+    );
+
     let mut means = vec![0.0; centroids.len()];
-    let mut elements = vec![0; centroids.len() / dim];
+    let mut cluster_sizes = vec![0usize; num_centroids];
     for (i, vec) in vecs.chunks(dim).enumerate() {
         let label = labels[i] as usize;
-        elements[label] += 1;
+        cluster_sizes[label] += 1;
         means[label * dim..(label + 1) * dim]
             .iter_mut()
             .zip(vec.iter())
             .for_each(|(m, &v)| *m += v);
     }
-    let diff = squared_euclidean(centroids, &means);
+    let mut empty_cluster_count = 0;
+    for i in 0..cluster_sizes.len() {
+        if cluster_sizes[i] != 0 {
+            let divider = (cluster_sizes[i] as f32).recip();
+            means[i * dim..(i + 1) * dim]
+                .iter_mut()
+                .for_each(|value| *value *= divider);
+        }
+    }
 
-    let mut zero_count = 0;
-    for i in 0..elements.len() {
-        if elements[i] == 0 {
+    for empty_cluster in 0..cluster_sizes.len() {
+        if cluster_sizes[empty_cluster] == 0 {
             // need to split another cluster to fill this empty cluster
-            zero_count += 1;
-            let mut target = 0;
+            empty_cluster_count += 1;
             let mut rng = rand::rng();
-            let base = 1.0 / (vecs.len() / dim - labels.len()) as f32;
-            loop {
-                let p = (elements[target] - 1) as f32 * base;
-                if rng.random::<f32>() < p {
+            let total_weight: usize = cluster_sizes
+                .iter()
+                .map(|&size| size.saturating_sub(1))
+                .sum();
+            let mut donor_sample = rng.random_range(0..total_weight);
+            let mut donor_cluster = 0;
+            for (candidate, &size) in cluster_sizes.iter().enumerate() {
+                let donor_weight = size.saturating_sub(1);
+                if donor_sample < donor_weight {
+                    donor_cluster = candidate;
                     break;
                 }
-                target = (target + 1) % labels.len();
+                donor_sample -= donor_weight;
             }
-            debug!("split cluster {target} to fill empty cluster {i}");
-            if i < target {
-                let (left, right) = centroids.split_at_mut(target * dim);
-                left[i * dim..(i + 1) * dim].copy_from_slice(&right[..dim]);
+            debug!("split cluster {donor_cluster} to fill empty cluster {empty_cluster}");
+            if empty_cluster < donor_cluster {
+                let (left, right) = means.split_at_mut(donor_cluster * dim);
+                left[empty_cluster * dim..(empty_cluster + 1) * dim].copy_from_slice(&right[..dim]);
             } else {
-                let (left, right) = centroids.split_at_mut(i * dim);
-                right[..dim].copy_from_slice(&left[target * dim..(target + 1) * dim]);
+                let (left, right) = means.split_at_mut(empty_cluster * dim);
+                right[..dim].copy_from_slice(&left[donor_cluster * dim..(donor_cluster + 1) * dim]);
             }
             // small symmetric perturbation
             for j in 0..dim {
                 if j % 2 == 0 {
-                    centroids[i * dim + j] *= 1.0 + EPS;
-                    centroids[target * dim + j] *= 1.0 - EPS;
+                    means[empty_cluster * dim + j] *= 1.0 + EPS;
+                    means[donor_cluster * dim + j] *= 1.0 - EPS;
                 } else {
-                    centroids[i * dim + j] *= 1.0 - EPS;
-                    centroids[target * dim + j] *= 1.0 + EPS;
+                    means[empty_cluster * dim + j] *= 1.0 - EPS;
+                    means[donor_cluster * dim + j] *= 1.0 + EPS;
                 }
             }
-            // update elements
-            elements[i] = elements[target] / 2;
-            elements[target] -= elements[i];
-        }
-        let divider = (elements[i] as f32).recip();
-        for j in i * dim..(i + 1) * dim {
-            centroids[j] = means[j] * divider;
+            // update cluster sizes
+            cluster_sizes[empty_cluster] = cluster_sizes[donor_cluster] / 2;
+            cluster_sizes[donor_cluster] -= cluster_sizes[empty_cluster];
         }
     }
-    if zero_count != 0 {
-        debug!("fixed {zero_count} empty clusters");
+    let diff = squared_euclidean(centroids, &means);
+    centroids.copy_from_slice(&means);
+    if empty_cluster_count != 0 {
+        debug!("fixed {empty_cluster_count} empty clusters");
     }
     diff
 }
@@ -201,7 +253,7 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
 /// K-means clustering algorithm.
 #[derive(Debug)]
 pub struct KMeans {
-    n_cluster: u32,
+    num_clusters: u32,
     max_iter: u32,
     tolerance: f32,
     distance: Distance,
@@ -212,7 +264,7 @@ pub struct KMeans {
 impl Default for KMeans {
     fn default() -> Self {
         Self {
-            n_cluster: 8,
+            num_clusters: 8,
             max_iter: 25,
             tolerance: 1e-4,
             distance: Distance::default(),
@@ -227,20 +279,20 @@ impl KMeans {
     ///
     /// # Arguments
     ///
-    /// * `n_cluster` - number of clusters, recommend to be a number in [sqrt(n) * 4, sqrt(n) * 8]
+    /// * `num_clusters` - number of clusters, recommend to be a number in [sqrt(n) * 4, sqrt(n) * 8]
     /// * `max_iter` - max number of iterations
     /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
     /// * `distance` - distance metric
     /// * `use_residual` - use residual for more accurate L2 distance computations, only work for L2
     pub fn new(
-        n_cluster: u32,
+        num_clusters: u32,
         max_iter: u32,
         tolerance: f32,
         distance: Distance,
         use_residual: bool,
     ) -> Self {
-        if n_cluster < 1 {
-            panic!("n_cluster must be greater than 0");
+        if num_clusters < 1 {
+            panic!("num_clusters must be greater than 0");
         }
         if max_iter < 1 {
             panic!("max_iter must be greater than 0");
@@ -249,7 +301,7 @@ impl KMeans {
             panic!("tolerance must be greater than 0.0");
         }
         Self {
-            n_cluster,
+            num_clusters,
             max_iter,
             tolerance,
             distance,
@@ -260,20 +312,24 @@ impl KMeans {
 
     /// Fit the KMeans configurations to the given vectors and return the centroids.
     pub fn fit(&self, mut vecs: AVec<f32>, dim: usize) -> AVec<f32> {
-        let num = vecs.len() / dim;
+        validate_vectors(&vecs, dim);
+        assert!(!vecs.is_empty(), "at least one vector is required");
 
-        // auto-config the `n_cluster` if it's initialized with `default()`
-        let n_cluster = match self.use_default_config {
-            true => (((num as f32).sqrt() as u32) * 4).min((num / MIN_POINTS_PER_CENTROID) as u32),
-            false => self.n_cluster,
+        let num_vectors = vecs.len() / dim;
+
+        // auto-config `num_clusters` when initialized with `default()`
+        let num_clusters = match self.use_default_config {
+            true => (((num_vectors as f32).sqrt() as u32) * 4)
+                .min((num_vectors / MIN_POINTS_PER_CENTROID) as u32),
+            false => self.num_clusters,
         };
-        debug!("num of points: {num}, num of clusters: {n_cluster}");
+        debug!("num of points: {num_vectors}, num of clusters: {num_clusters}");
 
-        if num < n_cluster as usize {
-            panic!("number of samples must be greater than n_cluster");
+        if num_vectors < num_clusters as usize {
+            panic!("number of samples must be greater than num_clusters");
         }
-        if num < n_cluster as usize * MIN_POINTS_PER_CENTROID {
-            panic!("too few samples for n_cluster");
+        if num_vectors < num_clusters as usize * MIN_POINTS_PER_CENTROID {
+            panic!("too few samples for num_clusters");
         }
 
         // use residual for more accurate L2 distance computations
@@ -283,22 +339,24 @@ impl KMeans {
         }
 
         // subsample
-        if num > MAX_POINTS_PER_CENTROID * n_cluster as usize {
-            let n_sample = MAX_POINTS_PER_CENTROID * n_cluster as usize;
+        if num_vectors > MAX_POINTS_PER_CENTROID * num_clusters as usize {
+            let n_sample = MAX_POINTS_PER_CENTROID * num_clusters as usize;
             debug!("subsample to {n_sample} points");
             vecs = as_continuous_vec(&subsample(n_sample, &vecs, dim));
         }
 
-        let mut centroids = as_continuous_vec(&subsample(n_cluster as usize, &vecs, dim));
+        let mut centroids = as_continuous_vec(&subsample(num_clusters as usize, &vecs, dim));
         if self.distance == Distance::NegativeDotProduct {
             centroids.chunks_mut(dim).for_each(normalize);
         }
 
-        let mut labels: Vec<u32> = vec![0; num];
+        let training_num = vecs.len() / dim;
+        let mut labels: Vec<u32> = vec![0; training_num];
         debug!("start training");
         for i in 0..self.max_iter {
             let start_time = Instant::now();
-            if self.distance == Distance::NegativeDotProduct || num * dim <= LARGE_CLUSTER_THRESHOLD
+            if self.distance == Distance::NegativeDotProduct
+                || training_num * dim <= LARGE_CLUSTER_THRESHOLD
             {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
@@ -329,9 +387,28 @@ impl KMeans {
 mod test {
     use rand::Rng;
 
-    use super::{KMeans, base_assign, rabitq_assign};
+    use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    #[should_panic(expected = "dimension must be greater than zero")]
+    fn test_fit_rejects_zero_dimension() {
+        KMeans::default().fit(as_continuous_vec(&[vec![1.0]]), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "vectors must be complete")]
+    fn test_fit_rejects_incomplete_vectors() {
+        KMeans::default().fit(as_continuous_vec(&[vec![1.0, 2.0, 3.0]]), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one vector is required")]
+    fn test_fit_rejects_empty_input() {
+        let vecs: Vec<Vec<f32>> = Vec::new();
+        KMeans::default().fit(as_continuous_vec(&vecs), 1);
+    }
 
     #[test]
     fn test_kmeans() {
@@ -356,12 +433,12 @@ mod test {
                 labels[i] = argmin(&distances) as u32;
             }
 
-            let continue_vecs = as_continuous_vec(&vecs);
+            let flattened_vecs = as_continuous_vec(&vecs);
 
             // check the base assignment
             let mut base_labels = vec![0; n];
             base_assign(
-                &continue_vecs,
+                &flattened_vecs,
                 &centroids,
                 dim,
                 Distance::SquaredEuclidean,
@@ -371,7 +448,7 @@ mod test {
 
             // check the rabitq assignment
             let mut rabitq_labels = vec![0; n];
-            rabitq_assign(&continue_vecs, &centroids, dim, &mut rabitq_labels);
+            rabitq_assign(&flattened_vecs, &centroids, dim, &mut rabitq_labels);
             let mut match_count = 0;
             for i in 0..n {
                 if labels[i] == rabitq_labels[i] {
@@ -384,5 +461,64 @@ mod test {
                 "round: {r}, match rate: {match_rate}"
             );
         }
+    }
+
+    #[test]
+    fn test_parallel_assignment_matches_single_thread() {
+        let mut rng = rand::rng();
+        let dim = 32;
+        let vecs = (0..257 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let centroids = (0..17 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+
+        for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+            let mut expected = vec![0; 257];
+            let mut actual = vec![0; 257];
+            base_assign(&vecs, &centroids, dim, distance, &mut expected);
+            base_assign_parallel(&vecs, &centroids, dim, distance, &mut actual);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "vectors must be complete")]
+    fn test_rabitq_assignment_rejects_incomplete_vectors() {
+        let mut labels = [0];
+        rabitq_assign(&[0.0, 1.0, 2.0], &[0.0, 1.0], 2, &mut labels);
+    }
+
+    #[test]
+    fn test_update_centroids_returns_distance_to_new_means() {
+        let vecs = vec![0.0, 0.0, 2.0, 2.0];
+        let labels = vec![0, 0, 1, 1];
+        let mut centroids = vec![0.0, 4.0];
+
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+
+        assert_eq!(centroids, vec![0.0, 2.0]);
+        assert_eq!(diff, 4.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "number of vectors must be at least the number of centroids")]
+    fn test_update_centroids_rejects_more_centroids_than_vectors() {
+        let mut centroids = vec![0.0, 1.0];
+        update_centroids(&[0.0], &mut centroids, 1, &[0]);
+    }
+
+    #[test]
+    fn test_update_centroids_repairs_empty_cluster() {
+        let vecs = vec![2.0, 2.0, 2.0, 2.0];
+        let labels = vec![0, 0, 0, 0];
+        let mut centroids = vec![0.0, 10.0];
+
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+
+        assert!(diff.is_finite());
+        assert!(centroids.iter().all(|value| (*value - 2.0).abs() < 0.01));
+        assert_ne!(centroids[0], centroids[1]);
     }
 }

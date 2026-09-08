@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use faer::{Col, Mat, MatRef, Row};
 use rand::Rng;
 use rand_distr::StandardNormal;
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
+};
 
 use crate::distance::squared_euclidean;
 
@@ -99,6 +102,46 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
     }
 
     pulp::Arch::new().dispatch(Impl { vec, orthogonal })
+}
+
+#[inline]
+fn project_into(vec: &[f32], orthogonal: &MatRef<f32>, output: &mut [f32]) {
+    struct Impl<'a, 'b> {
+        vec: &'a [f32],
+        orthogonal: &'a MatRef<'b, f32>,
+        output: &'a mut [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_, '_> {
+        type Output = ();
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) {
+            let Self {
+                vec,
+                orthogonal,
+                output,
+            } = self;
+            for (i, value) in output.iter_mut().enumerate() {
+                *value = crate::simd::pulp::dot_product(
+                    simd,
+                    vec,
+                    orthogonal
+                        .col(i)
+                        .try_as_col_major()
+                        .expect("col major")
+                        .as_slice(),
+                );
+            }
+        }
+    }
+
+    assert_eq!(output.len(), orthogonal.ncols());
+    pulp::Arch::new().dispatch(Impl {
+        vec,
+        orthogonal,
+        output,
+    });
 }
 
 /// Get the min/max value of the residual of two vectors.
@@ -252,6 +295,26 @@ struct Metrics {
     pub precise: AtomicU64,
 }
 
+pub(crate) struct RaBitQWorkspace {
+    query: Vec<f32>,
+    projected: Vec<f32>,
+    quantized: Vec<u8>,
+    binary: Vec<u64>,
+    residual: Vec<f32>,
+}
+
+impl RaBitQWorkspace {
+    pub(crate) fn new(dim: usize) -> Self {
+        Self {
+            query: vec![0.0; dim],
+            projected: vec![0.0; dim],
+            quantized: vec![0; dim],
+            binary: vec![0; (dim * THETA_LOG_DIM).div_ceil(64)],
+            residual: vec![0.0; dim],
+        }
+    }
+}
+
 impl Metrics {
     pub fn update(&self, rough: u64, precise: u64) {
         self.rough.fetch_add(rough, Ordering::Relaxed);
@@ -273,18 +336,31 @@ pub struct RaBitQ {
     orthogonal: Mat<f32>,
     factors: Vec<Factor>,
     binary_vec: Vec<u64>,
-    idx: Vec<usize>,
+    sorted_to_original: Vec<usize>,
+    input_dim: usize,
     dim: usize,
     metrics: Metrics,
 }
 
 impl RaBitQ {
+    pub(crate) fn dim(&self) -> usize {
+        self.dim
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.sorted_to_original.len()
+    }
+
     /// Create a new RaBitQ instance.
     pub fn new(centroids: &[f32], dim: usize) -> Self {
+        assert!(dim > 0, "dimension must be greater than zero");
+        assert_eq!(centroids.len() % dim, 0, "centroids must be complete");
+        assert!(!centroids.is_empty(), "at least one centroid is required");
+
         // init
-        let num = centroids.len() / dim;
+        let num_centroids = centroids.len() / dim;
         let dim_pad = dim.div_ceil(64) * 64;
-        let centroids_mat = Mat::from_fn(num, dim_pad, |i, j| match j < dim {
+        let centroids_mat = Mat::from_fn(num_centroids, dim_pad, |i, j| match j < dim {
             true => centroids[i * dim + j],
             false => 0.0,
         });
@@ -296,16 +372,16 @@ impl RaBitQ {
         let orthogonal = random.qr().compute_Q();
 
         let projected = &centroids_mat * &orthogonal;
-        let mut factors = vec![Factor::default(); num];
-        let mut xc_distances = vec![0.0; num];
-        let mut x_dot_product = vec![0.0; num];
-        let mut binary_vec = Vec::with_capacity(num);
-        let mut signed_vec = Vec::with_capacity(num);
+        let mut factors = vec![Factor::default(); num_centroids];
+        let mut xc_distances = vec![0.0; num_centroids];
+        let mut x_dot_product = vec![0.0; num_centroids];
+        let mut binary_vec = Vec::with_capacity(num_centroids);
+        let mut signed_vec = Vec::with_capacity(num_centroids);
         let mut mean = Row::zeros(dim_pad);
         for v in projected.row_iter() {
             mean += v;
         }
-        mean.iter_mut().for_each(|v| *v /= num as f32);
+        mean.iter_mut().for_each(|v| *v /= num_centroids as f32);
 
         // factors
         for (i, p) in projected.row_iter().enumerate() {
@@ -323,7 +399,7 @@ impl RaBitQ {
         }
 
         let error_base = 2.0 * EPSILON / (dim_pad as f32 - 1.0).sqrt();
-        for i in 0..num {
+        for i in 0..num_centroids {
             let xc_over_ip = xc_distances[i] / x_dot_product[i];
             let factor = &mut factors[i];
             factor.error_bound =
@@ -333,14 +409,25 @@ impl RaBitQ {
         }
 
         // sort by distances
-        let mut idx = xc_distances.iter().enumerate().collect::<Vec<_>>();
-        idx.sort_by(|&x, &y| x.1.partial_cmp(y.1).unwrap());
-        let idx = idx.into_iter().map(|(i, _)| i).collect::<Vec<_>>();
-        let binary_vec = idx.iter().flat_map(|&i| binary_vec[i].clone()).collect();
-        let factors: Vec<Factor> = idx.iter().map(|&i| factors[i]).collect();
-        let centroids_col_based = Mat::from_fn(num, dim_pad, |i, j| *centroids_mat.get(idx[i], j))
-            .transpose()
-            .to_owned();
+        let mut sorted_to_original = xc_distances.iter().enumerate().collect::<Vec<_>>();
+        sorted_to_original.sort_by(|&x, &y| x.1.partial_cmp(y.1).unwrap());
+        let sorted_to_original = sorted_to_original
+            .into_iter()
+            .map(|(original_index, _)| original_index)
+            .collect::<Vec<_>>();
+        let binary_vec = sorted_to_original
+            .iter()
+            .flat_map(|&original_index| binary_vec[original_index].clone())
+            .collect();
+        let factors: Vec<Factor> = sorted_to_original
+            .iter()
+            .map(|&original_index| factors[original_index])
+            .collect();
+        let centroids_col_based = Mat::from_fn(num_centroids, dim_pad, |sorted_index, j| {
+            *centroids_mat.get(sorted_to_original[sorted_index], j)
+        })
+        .transpose()
+        .to_owned();
 
         RaBitQ {
             centroids: centroids_col_based,
@@ -348,7 +435,8 @@ impl RaBitQ {
             mean,
             binary_vec,
             factors,
-            idx,
+            sorted_to_original,
+            input_dim: dim,
             dim: dim_pad,
             metrics: Metrics::default(),
         }
@@ -356,93 +444,118 @@ impl RaBitQ {
 
     /// Retrieve the top-1 index.
     pub fn retrieve_top_one(&self, query: &[f32]) -> usize {
-        assert_eq!(self.dim, query.len().div_ceil(64) * 64);
-        let mut query_pad = query.to_vec();
-        if self.dim > query.len() {
-            query_pad.extend_from_slice(&vec![0.0; self.dim - query.len()]);
-        }
+        let mut workspace = RaBitQWorkspace::new(self.dim);
+        let (index, precise) = self.retrieve_top_one_with_workspace(query, &mut workspace);
+        self.metrics
+            .update(self.sorted_to_original.len() as u64, precise);
+        index
+    }
 
-        let projected = project(&query_pad, &self.orthogonal.as_ref());
-        let mut rough_distances = Vec::with_capacity(self.idx.len());
-        let mut quantized = vec![0u8; self.dim];
-        let mut binary = vec![0u64; (self.dim * THETA_LOG_DIM).div_ceil(64)];
-        let mut residual = vec![0.0; self.dim];
-        let projected_slice = projected.try_as_col_major().expect("col major").as_slice();
+    /// Retrieve the nearest centroid for a batch of queries in parallel.
+    ///
+    /// Workspaces are initialized by Rayon tasks and reused while each task
+    /// processes its queries.
+    pub fn retrieve_top_one_batch(&self, queries: &[f32], dim: usize, labels: &mut [u32]) {
+        assert!(dim > 0, "dimension must be greater than zero");
+        assert_eq!(
+            dim, self.input_dim,
+            "query dimension must match the vector dimension"
+        );
+        assert_eq!(queries.len() % dim, 0, "queries must be complete");
+        assert_eq!(labels.len(), queries.len() / dim);
+
+        let (rough, precise) = labels
+            .par_iter_mut()
+            .zip(queries.par_chunks_exact(dim))
+            .map_init(
+                || RaBitQWorkspace::new(self.dim),
+                |workspace, (label, query)| {
+                    let (index, precise) = self.retrieve_top_one_with_workspace(query, workspace);
+                    *label = index as u32;
+                    (self.len() as u64, precise)
+                },
+            )
+            .reduce(
+                || (0, 0),
+                |left, right| (left.0 + right.0, left.1 + right.1),
+            );
+        self.metrics.update(rough, precise);
+    }
+
+    pub(crate) fn retrieve_top_one_with_workspace(
+        &self,
+        query: &[f32],
+        workspace: &mut RaBitQWorkspace,
+    ) -> (usize, u64) {
+        assert_eq!(
+            query.len(),
+            self.input_dim,
+            "query dimension must match the vector dimension"
+        );
+        workspace.query.fill(0.0);
+        workspace.query[..query.len()].copy_from_slice(query);
+        workspace.binary.fill(0);
+
+        project_into(
+            &workspace.query,
+            &self.orthogonal.as_ref(),
+            &mut workspace.projected,
+        );
         let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
-        let yc_distance = squared_euclidean(projected_slice, mean_slice);
+        let query_center_distance_squared = squared_euclidean(&workspace.projected, mean_slice);
 
         let (lower_bound, upper_bound) =
-            min_max_residual(&mut residual, projected_slice, mean_slice);
+            min_max_residual(&mut workspace.residual, &workspace.projected, mean_slice);
         let delta = (upper_bound - lower_bound) * SCALAR;
         let one_over_delta = delta.recip();
-        let scalar_sum = scalar_quantize(&mut quantized, &residual, lower_bound, one_over_delta);
-        vector_binarize_query(&quantized, &mut binary);
-        self.calculate_rough_distance(
-            yc_distance,
-            &binary,
+        let scalar_sum = scalar_quantize(
+            &mut workspace.quantized,
+            &workspace.residual,
             lower_bound,
-            scalar_sum as f32,
-            delta,
-            &mut rough_distances,
+            one_over_delta,
         );
-        self.rank(&rough_distances, &query_pad)
-    }
+        vector_binarize_query(&workspace.quantized, &mut workspace.binary);
 
-    fn calculate_rough_distance(
-        &self,
-        yc_distance_square: f32,
-        y_binary_vec: &[u64],
-        lower_bound: f32,
-        scalar_sum: f32,
-        delta: f32,
-        rough_distances: &mut Vec<(f32, usize)>,
-    ) {
-        let dist_sqrt = yc_distance_square.sqrt();
-        let offset = y_binary_vec.len() / THETA_LOG_DIM;
-        for &i in self.idx.iter() {
-            let factor = &self.factors[i];
-            rough_distances.push((
-                (factor.center_distance_square
-                    + yc_distance_square
-                    + lower_bound * factor.factor_ppc
-                    + (2.0
-                        * asymmetric_binary_dot_product(
-                            &self.binary_vec[i * offset..(i + 1) * offset],
-                            y_binary_vec,
-                        ) as f32
-                        - scalar_sum)
-                        * factor.factor_ip
-                        * delta
-                    - factor.error_bound * dist_sqrt),
-                i,
-            ));
-        }
-    }
-
-    fn rank(&self, rough_distances: &[(f32, usize)], query: &[f32]) -> usize {
         let mut threshold = f32::MAX;
         let mut min_index = 0;
-        let mut count = 0;
-        for &(rough, i) in rough_distances.iter() {
+        let mut precise = 0;
+        let query_center_distance = query_center_distance_squared.sqrt();
+        let offset = workspace.binary.len() / THETA_LOG_DIM;
+        for (position, &original_index) in self.sorted_to_original.iter().enumerate() {
+            let factor = &self.factors[position];
+            let rough = factor.center_distance_square
+                + query_center_distance_squared
+                + lower_bound * factor.factor_ppc
+                + (2.0
+                    * asymmetric_binary_dot_product(
+                        &self.binary_vec[position * offset..(position + 1) * offset],
+                        &workspace.binary,
+                    ) as f32
+                    - scalar_sum as f32)
+                    * factor.factor_ip
+                    * delta
+                - factor.error_bound * query_center_distance;
             if rough < threshold {
-                count += 1;
+                precise += 1;
                 let accurate = squared_euclidean(
                     self.centroids
-                        .col(i)
+                        .col(position)
                         .try_as_col_major()
                         .expect("col major")
                         .as_slice(),
-                    query,
+                    &workspace.query,
                 );
                 if accurate < threshold {
                     threshold = accurate;
-                    min_index = self.idx[i];
+                    min_index = original_index;
                 }
             }
         }
-        self.metrics.update(rough_distances.len() as u64, count);
+        (min_index, precise)
+    }
 
-        min_index
+    pub(crate) fn update_metrics(&self, rough: u64, precise: u64) {
+        self.metrics.update(rough, precise);
     }
 
     /// Get the rough/precise metrics.
@@ -455,11 +568,21 @@ impl RaBitQ {
 mod test {
     use rand::Rng;
 
+    use super::{RaBitQ, min_max_residual, min_max_residual_native};
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::{
-        SCALAR, THETA_LOG_DIM, binary_dot_product_native, min_max_residual,
-        min_max_residual_native, scalar_quantize_native, vector_binarize_query_native,
+        SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
+        vector_binarize_query_native,
     };
+    use crate::distance::squared_euclidean;
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
+
+    #[test]
+    #[should_panic(expected = "centroids must be complete")]
+    fn test_new_rejects_incomplete_centroids() {
+        RaBitQ::new(&[0.0, 1.0, 2.0], 2);
+    }
 
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -562,6 +685,55 @@ mod test {
                     assert_eq!(res, res_simd);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_batch_retrieval_matches_individual_retrieval() {
+        let mut rng = rand::rng();
+        let dim = 64;
+        let centroids = (0..16 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let queries = (0..128 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let rabitq = RaBitQ::new(&centroids, dim);
+
+        let expected = queries
+            .chunks_exact(dim)
+            .map(|query| rabitq.retrieve_top_one(query) as u32)
+            .collect::<Vec<_>>();
+        let mut actual = vec![0; expected.len()];
+        rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_retrieval_matches_brute_force_after_centroid_sorting() {
+        let dim = 64;
+        let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
+        let mut centroids = vec![0.0; values.len() * dim];
+        for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
+            centroid[0] = value;
+        }
+        let rabitq = RaBitQ::new(&centroids, dim);
+
+        assert_ne!(
+            rabitq.sorted_to_original,
+            (0..values.len()).collect::<Vec<_>>()
+        );
+        for query in centroids.chunks_exact(dim) {
+            let expected = centroids
+                .chunks_exact(dim)
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
+                })
+                .map(|(index, _)| index)
+                .unwrap();
+            assert_eq!(rabitq.retrieve_top_one(query), expected);
         }
     }
 }
