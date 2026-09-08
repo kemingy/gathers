@@ -23,13 +23,11 @@ where
         res.push(iteration.next().expect("iteration less than n_sample"));
     }
 
-    let mut i = n_sample;
-    for vec in iteration.by_ref() {
+    for (i, vec) in (n_sample..).zip(iteration.by_ref()) {
         let j = rng.random_range(0..=i);
         if j < n_sample {
             res[j] = vec;
         }
-        i += 1;
     }
 
     res
