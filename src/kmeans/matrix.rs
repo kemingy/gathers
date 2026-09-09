@@ -32,6 +32,39 @@ fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     Some(values)
 }
 
+fn stable_l2_norm(values: &[f32]) -> f32 {
+    let mut scale = 0.0_f32;
+    for &value in values {
+        if !value.is_finite() {
+            // Preserve NaN or infinity so assignment detects a non-finite bound and falls back to
+            // the direct implementation.
+            return value.abs();
+        }
+        scale = scale.max(value.abs());
+    }
+    if scale == 0.0 {
+        return 0.0;
+    }
+
+    let scaled_sum = values
+        .iter()
+        .map(|&value| {
+            let scaled = value / scale;
+            scaled * scaled
+        })
+        .sum::<f32>();
+    scale * scaled_sum.sqrt()
+}
+
+impl Distance {
+    fn matrix_norm(self, values: &[f32]) -> f32 {
+        match self {
+            Self::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
+            Self::NegativeDotProduct => stable_l2_norm(values),
+        }
+    }
+}
+
 pub(super) struct MatrixAssignmentWorkspace {
     distance: Distance,
     vector_norms: Vec<f32>,
@@ -66,7 +99,7 @@ impl MatrixAssignmentWorkspace {
             .par_iter_mut()
             .zip(vecs.par_chunks_exact(dim))
             .for_each(|(norm, vector)| {
-                *norm = vector.iter().map(|value| value * value).sum();
+                *norm = distance.matrix_norm(vector);
             });
         Some(Self {
             distance,
@@ -117,7 +150,7 @@ impl MatrixAssignmentWorkspace {
             .par_iter_mut()
             .zip(centroids.par_chunks_exact(dim))
             .for_each(|(norm, centroid)| {
-                *norm = centroid.iter().map(|value| value * value).sum();
+                *norm = self.distance.matrix_norm(centroid);
             });
         let centroid_norms_are_finite = self.centroid_norms.iter().all(|norm| norm.is_finite());
         let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
@@ -132,7 +165,6 @@ impl MatrixAssignmentWorkspace {
         let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
         if self.distance == Distance::NegativeDotProduct {
-            let max_centroid_norm = max_centroid_norm.sqrt();
             labels
                 .par_iter_mut()
                 .zip(&self.vector_norms)
@@ -156,7 +188,7 @@ impl MatrixAssignmentWorkspace {
                     // ||x||₂ ||c||₂. Scores whose error intervals overlap are recomputed
                     // with the direct implementation to preserve its assignment semantics.
                     let uncertainty = DOT_ERROR_BOUND_SAFETY_FACTOR
-                        * (gamma * vector_norm.sqrt() * max_centroid_norm + underflow_error);
+                        * (gamma * vector_norm * max_centroid_norm + underflow_error);
                     let ambiguity = 2.0 * uncertainty;
                     if !centroid_norms_are_finite
                         || !vector_norm.is_finite()
@@ -484,6 +516,57 @@ mod tests {
         let mut vecs = Vec::with_capacity(num_vectors * dim);
         for index in 0..num_vectors {
             vecs.extend_from_slice(&centroids[(index % num_centroids) * dim..][..dim]);
+        }
+        let mut expected = vec![0; num_vectors];
+        let mut actual = vec![0; num_vectors];
+
+        base_assign(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        let mut workspace = MatrixAssignmentWorkspace::try_new(
+            &vecs,
+            num_centroids,
+            dim,
+            Distance::NegativeDotProduct,
+        )
+        .unwrap();
+        workspace.assign(&vecs, &centroids, dim, &mut actual);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_matrix_dot_product_handles_asymmetric_scales() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let dim = 64;
+        let num_vectors = 8192;
+        let num_centroids = 64;
+        let mut direction = (0..dim)
+            .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+            .collect::<Vec<_>>();
+        normalize(&mut direction);
+        let mut centroids = Vec::with_capacity(num_centroids * dim);
+        for _ in 0..num_centroids {
+            let mut centroid = direction.clone();
+            centroid.iter_mut().for_each(|value| {
+                *value += (rng.random::<f32>() * 2.0 - 1.0) * 1e-6;
+            });
+            normalize(&mut centroid);
+            centroid.iter_mut().for_each(|value| *value *= 1e15);
+            centroids.extend(centroid);
+        }
+        let mut vecs = Vec::with_capacity(num_vectors * dim);
+        for _ in 0..num_vectors {
+            let mut vector = (0..dim)
+                .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+                .collect::<Vec<_>>();
+            normalize(&mut vector);
+            vector.iter_mut().for_each(|value| *value *= 1e-25);
+            vecs.extend(vector);
         }
         let mut expected = vec![0; num_vectors];
         let mut actual = vec![0; num_vectors];

@@ -8,12 +8,13 @@ use std::time::Instant;
 
 use aligned_vec::AVec;
 use log::debug;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
-use crate::sampling::subsample;
+use crate::sampling::subsample_inner;
 use crate::utils::{as_continuous_vec, centroid_residual, normalize};
 
 const EPS: f32 = 1.0 / 1024.0;
@@ -172,6 +173,17 @@ pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, label
 
 /// Update centroids to the mean of assigned vectors.
 pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
+    let mut rng = rand::rng();
+    update_centroids_inner(vecs, centroids, dim, labels, &mut rng)
+}
+
+fn update_centroids_inner<R: Rng + ?Sized>(
+    vecs: &[f32],
+    centroids: &mut [f32],
+    dim: usize,
+    labels: &[u32],
+    rng: &mut R,
+) -> f32 {
     validate_assignment_inputs(vecs, centroids, dim, labels);
     let num_centroids = centroids.len() / dim;
     assert!(
@@ -207,7 +219,6 @@ pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels:
         if cluster_sizes[empty_cluster] == 0 {
             // need to split another cluster to fill this empty cluster
             empty_cluster_count += 1;
-            let mut rng = rand::rng();
             let total_weight: usize = cluster_sizes
                 .iter()
                 .map(|&size| size.saturating_sub(1))
@@ -262,6 +273,7 @@ pub struct KMeans {
     distance: Distance,
     use_residual: bool,
     use_default_config: bool,
+    seed: Option<u64>,
 }
 
 impl Default for KMeans {
@@ -273,6 +285,7 @@ impl Default for KMeans {
             distance: Distance::default(),
             use_residual: false,
             use_default_config: true,
+            seed: None,
         }
     }
 }
@@ -310,11 +323,31 @@ impl KMeans {
             distance,
             use_residual,
             use_default_config: false,
+            seed: None,
         }
     }
 
+    /// Set the random seed used for sampling and empty-cluster repair.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+
     /// Fit the KMeans configurations to the given vectors and return the centroids.
-    pub fn fit(&self, mut vecs: AVec<f32>, dim: usize) -> AVec<f32> {
+    pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
+        if let Some(seed) = self.seed {
+            self.fit_inner(vecs, dim, &mut StdRng::seed_from_u64(seed))
+        } else {
+            self.fit_inner(vecs, dim, &mut rand::rng())
+        }
+    }
+
+    fn fit_inner<R: Rng + ?Sized>(
+        &self,
+        mut vecs: AVec<f32>,
+        dim: usize,
+        rng: &mut R,
+    ) -> AVec<f32> {
         validate_vectors(&vecs, dim);
         assert!(!vecs.is_empty(), "at least one vector is required");
 
@@ -345,10 +378,11 @@ impl KMeans {
         if num_vectors > MAX_POINTS_PER_CENTROID * num_clusters as usize {
             let n_sample = MAX_POINTS_PER_CENTROID * num_clusters as usize;
             debug!("subsample to {n_sample} points");
-            vecs = as_continuous_vec(&subsample(n_sample, &vecs, dim));
+            vecs = as_continuous_vec(&subsample_inner(n_sample, &vecs, dim, rng));
         }
 
-        let mut centroids = as_continuous_vec(&subsample(num_clusters as usize, &vecs, dim));
+        let mut centroids =
+            as_continuous_vec(&subsample_inner(num_clusters as usize, &vecs, dim, rng));
         if self.distance == Distance::NegativeDotProduct {
             centroids.chunks_mut(dim).for_each(normalize);
         }
@@ -386,7 +420,7 @@ impl KMeans {
                 #[cfg(not(feature = "perf"))]
                 rabitq_assign_parallel(&vecs, &centroids, dim, &mut labels);
             }
-            let diff = update_centroids(&vecs, &mut centroids, dim, &labels);
+            let diff = update_centroids_inner(&vecs, &mut centroids, dim, &labels, rng);
             if self.distance == Distance::NegativeDotProduct {
                 centroids.chunks_mut(dim).for_each(normalize);
             }

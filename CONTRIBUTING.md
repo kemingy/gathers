@@ -18,7 +18,9 @@ identical.
 
 ## Benchmarks
 
-Benchmarks also generate fresh representative inputs intentionally. They measure performance over
+Local benchmarks generate fresh representative inputs intentionally. They measure performance over
 the input distribution rather than one permanently fixed sample; benchmark conclusions should be
-confirmed across multiple samples or runs. Input preparation and cloning belong in Criterion setup,
-outside the timed routine.
+confirmed across multiple samples or runs. CodSpeed sets `GATHERS_BENCH_SEED` so base and change
+measurements use the same input and K-means initialization. Set that variable locally to reproduce a
+CodSpeed workload. Input preparation and cloning belong in Criterion setup, outside the timed
+routine.
