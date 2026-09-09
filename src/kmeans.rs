@@ -355,19 +355,23 @@ impl KMeans {
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
+        let use_exact_assignment = self.distance == Distance::NegativeDotProduct
+            || training_num * dim <= LARGE_CLUSTER_THRESHOLD;
         #[cfg(not(feature = "perf"))]
-        let mut matrix_workspace = matrix::MatrixAssignmentWorkspace::try_new(
-            &vecs,
-            centroids.len() / dim,
-            dim,
-            self.distance,
-        );
+        let mut matrix_workspace = if use_exact_assignment {
+            matrix::MatrixAssignmentWorkspace::try_new(
+                &vecs,
+                centroids.len() / dim,
+                dim,
+                self.distance,
+            )
+        } else {
+            None
+        };
         debug!("start training");
         for i in 0..self.max_iter {
             let start_time = Instant::now();
-            if self.distance == Distance::NegativeDotProduct
-                || training_num * dim <= LARGE_CLUSTER_THRESHOLD
-            {
+            if use_exact_assignment {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
                 #[cfg(not(feature = "perf"))]
