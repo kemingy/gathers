@@ -285,12 +285,12 @@ impl MatrixAssignmentWorkspace {
 mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use seed_rand::seeded_rng;
 
     use super::MatrixAssignmentWorkspace;
     use crate::distance::Distance;
     use crate::kmeans::base_assign;
     use crate::utils::normalize;
-    use seed_rand::seeded_rng;
 
     #[test]
     fn test_matrix_assignment_matches_direct_assignment() {

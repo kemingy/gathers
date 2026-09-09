@@ -438,11 +438,11 @@ impl KMeans {
 #[cfg(test)]
 mod test {
     use rand::Rng;
+    use seed_rand::seeded_rng;
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
-    use seed_rand::seeded_rng;
 
     #[test]
     #[should_panic(expected = "dimension must be greater than zero")]

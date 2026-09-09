@@ -567,6 +567,7 @@ impl RaBitQ {
 #[cfg(test)]
 mod test {
     use rand::Rng;
+    use seed_rand::seeded_rng;
 
     use super::{RaBitQ, min_max_residual, min_max_residual_native};
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -577,7 +578,6 @@ mod test {
     use crate::distance::squared_euclidean;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
-    use seed_rand::seeded_rng;
 
     #[test]
     #[should_panic(expected = "centroids must be complete")]

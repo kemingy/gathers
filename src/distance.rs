@@ -134,12 +134,12 @@ pub fn argmin(vec: &[f32]) -> usize {
 #[cfg(test)]
 mod test {
     use rand::Rng;
+    use seed_rand::seeded_rng;
 
     use super::{
         argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
-    use seed_rand::seeded_rng;
 
     fn assert_f32_close(actual: f32, expected: f32, implementation: &str, dim: usize) {
         const ABS_TOLERANCE: f32 = 1e-6;
