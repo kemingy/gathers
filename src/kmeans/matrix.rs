@@ -23,6 +23,7 @@ const MATMUL_BLOCK_SIZE: usize = 256;
 // suffer cancellation; dot-product scores only contain the reduction error.
 const L2_ERROR_BOUND_SAFETY_FACTOR: f32 = 8.0;
 const DOT_ERROR_BOUND_SAFETY_FACTOR: f32 = 1.0;
+const MIN_SUBNORMAL: f32 = f32::from_bits(1);
 
 fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     let mut values = Vec::new();
@@ -126,6 +127,9 @@ impl MatrixAssignmentWorkspace {
         // so using it here is already conservative.
         let dimension_error = dim as f32 * f32::EPSILON;
         let gamma = dimension_error / (1.0 - dimension_error);
+        // The relative gamma_n model excludes underflow. Allow one minimum-subnormal rounding
+        // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
+        let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
         if self.distance == Distance::NegativeDotProduct {
             let max_centroid_norm = max_centroid_norm.sqrt();
@@ -152,9 +156,7 @@ impl MatrixAssignmentWorkspace {
                     // ||x||₂ ||c||₂. Scores whose error intervals overlap are recomputed
                     // with the direct implementation to preserve its assignment semantics.
                     let uncertainty = DOT_ERROR_BOUND_SAFETY_FACTOR
-                        * gamma
-                        * vector_norm.sqrt()
-                        * max_centroid_norm;
+                        * (gamma * vector_norm.sqrt() * max_centroid_norm + underflow_error);
                     let ambiguity = 2.0 * uncertainty;
                     if !centroid_norms_are_finite
                         || !vector_norm.is_finite()
@@ -203,8 +205,7 @@ impl MatrixAssignmentWorkspace {
                 // The norm identity can suffer cancellation. The safety factor is an
                 // engineering margin, not part of Higham's gamma_n bound.
                 let uncertainty = L2_ERROR_BOUND_SAFETY_FACTOR
-                    * gamma
-                    * (vector_norm.abs() + max_centroid_norm.abs());
+                    * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error);
                 // Two estimates can each err in opposite directions by `uncertainty`.
                 let ambiguity = 2.0 * uncertainty;
                 if !centroid_norms_are_finite
@@ -328,6 +329,34 @@ mod tests {
     }
 
     #[test]
+    fn test_matrix_assignment_reuses_workspace_with_updated_centroids() {
+        let mut rng = random_test_rng();
+        let dim = 64;
+        let num_vectors = 8192;
+        let num_centroids = 64;
+        let vecs = (0..num_vectors * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+
+        for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+            let mut centroids = (0..num_centroids * dim)
+                .map(|_| rng.random::<f32>())
+                .collect::<Vec<_>>();
+            let mut actual = vec![0; num_vectors];
+            let mut workspace =
+                MatrixAssignmentWorkspace::try_new(&vecs, num_centroids, dim, distance).unwrap();
+            workspace.assign(&vecs, &centroids, dim, &mut actual);
+
+            centroids.iter_mut().for_each(|value| *value = 1.0 - *value);
+            let mut expected = vec![0; num_vectors];
+            base_assign(&vecs, &centroids, dim, distance, &mut expected);
+            workspace.assign(&vecs, &centroids, dim, &mut actual);
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
     fn test_matrix_dot_product_falls_back_for_near_ties() {
         let mut rng = StdRng::seed_from_u64(7);
         let dim = 64;
@@ -434,5 +463,47 @@ mod tests {
         for (index, &label) in labels.iter().enumerate() {
             assert_eq!(label as usize, index % num_centroids);
         }
+    }
+
+    #[test]
+    fn test_matrix_dot_product_handles_subnormal_scores() {
+        let dim = 64;
+        let num_vectors = 8192;
+        let num_centroids = 64;
+        let tiny = f32::from_bits(1).sqrt();
+        let mut centroids = Vec::with_capacity(num_centroids * dim);
+        for index in 0..num_centroids {
+            centroids.extend((0..dim).map(|coordinate| {
+                if index & (1 << (coordinate % 6)) == 0 {
+                    tiny
+                } else {
+                    -tiny
+                }
+            }));
+        }
+        let mut vecs = Vec::with_capacity(num_vectors * dim);
+        for index in 0..num_vectors {
+            vecs.extend_from_slice(&centroids[(index % num_centroids) * dim..][..dim]);
+        }
+        let mut expected = vec![0; num_vectors];
+        let mut actual = vec![0; num_vectors];
+
+        base_assign(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        let mut workspace = MatrixAssignmentWorkspace::try_new(
+            &vecs,
+            num_centroids,
+            dim,
+            Distance::NegativeDotProduct,
+        )
+        .unwrap();
+        workspace.assign(&vecs, &centroids, dim, &mut actual);
+
+        assert_eq!(actual, expected);
     }
 }
