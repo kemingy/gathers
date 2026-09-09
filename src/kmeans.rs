@@ -403,18 +403,12 @@ impl KMeans {
 
 #[cfg(test)]
 mod test {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::Rng;
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
+    use crate::test_utils::random_test_rng;
     use crate::utils::as_continuous_vec;
-
-    fn random_test_rng() -> StdRng {
-        let seed = rand::rng().random();
-        eprintln!("random seed: {seed}");
-        StdRng::seed_from_u64(seed)
-    }
 
     #[test]
     #[should_panic(expected = "dimension must be greater than zero")]

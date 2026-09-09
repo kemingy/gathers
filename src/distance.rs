@@ -133,19 +133,13 @@ pub fn argmin(vec: &[f32]) -> usize {
 
 #[cfg(test)]
 mod test {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::Rng;
 
     use super::{
         argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
-
-    fn random_test_rng() -> StdRng {
-        let seed = rand::rng().random();
-        eprintln!("random seed: {seed}");
-        StdRng::seed_from_u64(seed)
-    }
+    use crate::test_utils::random_test_rng;
 
     fn assert_f32_close(actual: f32, expected: f32, implementation: &str, dim: usize) {
         const ABS_TOLERANCE: f32 = 1e-6;

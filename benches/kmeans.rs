@@ -1,4 +1,4 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gathers::distance::Distance;
 use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
 use gathers::rabitq::RaBitQ;
@@ -110,10 +110,18 @@ fn kmeans_benchmark(c: &mut Criterion) {
         (NUM_VECTORS * NUM_CENTROIDS * ITERATIONS) as u64,
     ));
     group.bench_function("fit_50176x256x128_5iter", |b| {
-        b.iter(|| l2_kmeans.fit(black_box(vecs.clone()), DIM))
+        b.iter_batched(
+            || vecs.clone(),
+            |input| l2_kmeans.fit(black_box(input), DIM),
+            BatchSize::LargeInput,
+        )
     });
     group.bench_function("fit_dot_50176x256x128_5iter", |b| {
-        b.iter(|| dot_kmeans.fit(black_box(vecs.clone()), DIM))
+        b.iter_batched(
+            || vecs.clone(),
+            |input| dot_kmeans.fit(black_box(input), DIM),
+            BatchSize::LargeInput,
+        )
     });
     group.finish();
 }

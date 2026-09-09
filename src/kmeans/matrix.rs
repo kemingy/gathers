@@ -15,11 +15,21 @@ const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 19;
 const SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 22;
 // Bound the reusable score matrix to 128 MiB.
 const MAX_MATRIX_ASSIGNMENT_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
+// Higham's gamma_n error bound is finite only while n * epsilon is below one.
+const MAX_ERROR_BOUND_DIMENSION: usize = (1.0 / f32::EPSILON) as usize;
+const MATMUL_BLOCK_SIZE: usize = 256;
 // Additional engineering margins on top of using `f32::EPSILON`, which is already twice
 // Higham's unit roundoff. L2 needs more margin because it also adds two computed norms and can
 // suffer cancellation; dot-product scores only contain the reduction error.
 const L2_ERROR_BOUND_SAFETY_FACTOR: f32 = 8.0;
 const DOT_ERROR_BOUND_SAFETY_FACTOR: f32 = 1.0;
+
+fn try_zeroed(len: usize) -> Option<Vec<f32>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(len).ok()?;
+    values.resize(len, 0.0);
+    Some(values)
+}
 
 pub(super) struct MatrixAssignmentWorkspace {
     distance: Distance,
@@ -42,22 +52,26 @@ impl MatrixAssignmentWorkspace {
         } else {
             MATRIX_ASSIGNMENT_THRESHOLD
         };
-        if dim < 32
+        if !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
             || num_centroids < 2
+            || MATMUL_BLOCK_SIZE.checked_mul(num_centroids).is_none()
             || !(assignment_threshold..=MAX_MATRIX_ASSIGNMENT_ELEMENTS).contains(&comparison_count)
         {
             return None;
         }
 
-        let vector_norms = vecs
-            .par_chunks_exact(dim)
-            .map(|vector| vector.iter().map(|value| value * value).sum())
-            .collect();
+        let mut vector_norms = try_zeroed(num_vectors)?;
+        vector_norms
+            .par_iter_mut()
+            .zip(vecs.par_chunks_exact(dim))
+            .for_each(|(norm, vector)| {
+                *norm = vector.iter().map(|value| value * value).sum();
+            });
         Some(Self {
             distance,
             vector_norms,
-            centroid_norms: vec![0.0; num_centroids],
-            dot_products: vec![0.0; comparison_count],
+            centroid_norms: try_zeroed(num_centroids)?,
+            dot_products: try_zeroed(comparison_count)?,
         })
     }
 
@@ -75,7 +89,6 @@ impl MatrixAssignmentWorkspace {
 
         // Process 256 input rows per GEMM task; tuned on Apple Silicon with
         // benchmark datasets averaging 196 training vectors per centroid.
-        const MATMUL_BLOCK_SIZE: usize = 256;
         let scale = match self.distance {
             Distance::SquaredEuclidean => -2.0,
             Distance::NegativeDotProduct => -1.0,
@@ -105,6 +118,7 @@ impl MatrixAssignmentWorkspace {
             .for_each(|(norm, centroid)| {
                 *norm = centroid.iter().map(|value| value * value).sum();
             });
+        let centroid_norms_are_finite = self.centroid_norms.iter().all(|norm| norm.is_finite());
         let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
         // Higham, Accuracy and Stability of Numerical Algorithms, Chapters 2-3,
         // bounds an n-term floating-point reduction with gamma_n = n*u/(1-n*u):
@@ -142,16 +156,21 @@ impl MatrixAssignmentWorkspace {
                         * vector_norm.sqrt()
                         * max_centroid_norm;
                     let ambiguity = 2.0 * uncertainty;
-                    if !best_score.is_finite() || second_best_score - best_score <= ambiguity {
-                        let mut exact_label = [0];
+                    if !centroid_norms_are_finite
+                        || !vector_norm.is_finite()
+                        || !uncertainty.is_finite()
+                        || !best_score.is_finite()
+                        || second_best_score - best_score <= ambiguity
+                    {
+                        let mut direct = [0];
                         base_assign(
                             vector,
                             centroids,
                             dim,
                             Distance::NegativeDotProduct,
-                            &mut exact_label,
+                            &mut direct,
                         );
-                        *label = exact_label[0];
+                        *label = direct[0];
                     } else {
                         *label = best_index as u32;
                     }
@@ -188,16 +207,20 @@ impl MatrixAssignmentWorkspace {
                     * (vector_norm.abs() + max_centroid_norm.abs());
                 // Two estimates can each err in opposite directions by `uncertainty`.
                 let ambiguity = 2.0 * uncertainty;
-                if !best_distance.is_finite() {
-                    let mut exact_label = [0];
+                if !centroid_norms_are_finite
+                    || !vector_norm.is_finite()
+                    || !uncertainty.is_finite()
+                    || !best_distance.is_finite()
+                {
+                    let mut direct = [0];
                     base_assign(
                         vector,
                         centroids,
                         dim,
                         Distance::SquaredEuclidean,
-                        &mut exact_label,
+                        &mut direct,
                     );
-                    *label = exact_label[0];
+                    *label = direct[0];
                 } else if best_distance < 0.0 || second_best_distance - best_distance <= ambiguity {
                     let cutoff = best_distance + ambiguity;
                     let mut exact_best_distance = f32::MAX;
@@ -233,13 +256,8 @@ mod tests {
     use super::MatrixAssignmentWorkspace;
     use crate::distance::Distance;
     use crate::kmeans::base_assign;
+    use crate::test_utils::random_test_rng;
     use crate::utils::normalize;
-
-    fn random_test_rng() -> StdRng {
-        let seed = rand::rng().random();
-        eprintln!("random seed: {seed}");
-        StdRng::seed_from_u64(seed)
-    }
 
     #[test]
     fn test_matrix_assignment_matches_direct_assignment() {
@@ -372,6 +390,35 @@ mod tests {
             let centroid = &centroids[(index % num_centroids) * dim..][..dim];
             vecs.extend_from_slice(centroid);
             *vecs.last_mut().unwrap() += 0.125;
+        }
+        let mut labels = vec![0; num_vectors];
+
+        let mut workspace = MatrixAssignmentWorkspace::try_new(
+            &vecs,
+            num_centroids,
+            dim,
+            Distance::SquaredEuclidean,
+        )
+        .unwrap();
+        workspace.assign(&vecs, &centroids, dim, &mut labels);
+
+        for (index, &label) in labels.iter().enumerate() {
+            assert_eq!(label as usize, index % num_centroids);
+        }
+    }
+
+    #[test]
+    fn test_matrix_assignment_handles_overflowed_norms() {
+        let dim = 64;
+        let num_vectors = 8192;
+        let num_centroids = 64;
+        let mut centroids = vec![1e20; num_centroids * dim];
+        for (index, centroid) in centroids.chunks_exact_mut(dim).enumerate() {
+            centroid[0] += index as f32 * 1e14;
+        }
+        let mut vecs = Vec::with_capacity(num_vectors * dim);
+        for index in 0..num_vectors {
+            vecs.extend_from_slice(&centroids[(index % num_centroids) * dim..][..dim]);
         }
         let mut labels = vec![0; num_vectors];
 
