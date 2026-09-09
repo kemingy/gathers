@@ -289,12 +289,12 @@ mod tests {
     use super::MatrixAssignmentWorkspace;
     use crate::distance::Distance;
     use crate::kmeans::base_assign;
-    use crate::test_utils::random_test_rng;
     use crate::utils::normalize;
+    use seed_rand::seeded_rng;
 
     #[test]
     fn test_matrix_assignment_matches_direct_assignment() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 64;
         let num_vectors = 8192;
         let num_centroids = 64;
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_matrix_dot_product_matches_direct_assignment() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 64;
         let num_vectors = 8192;
         let num_centroids = 64;
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_matrix_assignment_reuses_workspace_with_updated_centroids() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 64;
         let num_vectors = 8192;
         let num_centroids = 64;

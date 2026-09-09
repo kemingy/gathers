@@ -577,7 +577,7 @@ mod test {
     use crate::distance::squared_euclidean;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
-    use crate::test_utils::random_test_rng;
+    use seed_rand::seeded_rng;
 
     #[test]
     #[should_panic(expected = "centroids must be complete")]
@@ -591,7 +591,7 @@ mod test {
         if !crate::simd::Avx2::is_available() {
             return;
         }
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
 
         for _ in 0..100 {
             for dim in [1, 2, 4, 8, 10].into_iter() {
@@ -615,7 +615,7 @@ mod test {
         if !crate::simd::Avx2::is_available() {
             return;
         }
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
 
         for _ in 0..100 {
             for dim in [64, 128, 256, 320, 1024].into_iter() {
@@ -635,7 +635,7 @@ mod test {
         if !crate::simd::Avx2::is_available() {
             return;
         }
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [64, 128, 256, 320, 1024].into_iter() {
                 let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
@@ -657,7 +657,7 @@ mod test {
 
     #[test]
     fn test_min_max_residual() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [32, 64, 124, 128, 132].into_iter() {
                 let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
@@ -691,7 +691,7 @@ mod test {
 
     #[test]
     fn test_batch_retrieval_matches_individual_retrieval() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 64;
         let centroids = (0..16 * dim)
             .map(|_| rng.random::<f32>())

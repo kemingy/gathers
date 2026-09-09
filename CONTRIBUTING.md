@@ -9,7 +9,7 @@ inputs that a single fixed dataset may miss. Each test prints its seed before us
 Reproduce a failure with the printed seed:
 
 ```console
-GATHERS_TEST_SEED=123456 cargo test test_name -- --nocapture
+GATHERS_RANDOM_SEED=123456 cargo test test_name -- --nocapture
 ```
 
 Keep targeted regression tests deterministic when a particular input is part of the regression.
@@ -20,7 +20,7 @@ identical.
 
 Local benchmarks generate fresh representative inputs intentionally. They measure performance over
 the input distribution rather than one permanently fixed sample; benchmark conclusions should be
-confirmed across multiple samples or runs. CodSpeed sets `GATHERS_BENCH_SEED` so base and change
+confirmed across multiple samples or runs. CodSpeed sets `GATHERS_RANDOM_SEED` so base and change
 measurements use the same input and K-means initialization. Set that variable locally to reproduce a
 CodSpeed workload. Input preparation and cloning belong in Criterion setup, outside the timed
 routine.

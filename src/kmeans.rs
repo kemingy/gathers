@@ -441,8 +441,8 @@ mod test {
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
-    use crate::test_utils::random_test_rng;
     use crate::utils::as_continuous_vec;
+    use seed_rand::seeded_rng;
 
     #[test]
     #[should_panic(expected = "dimension must be greater than zero")]
@@ -465,7 +465,7 @@ mod test {
 
     #[test]
     fn test_kmeans() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 32;
         let n = 1000;
         let km = KMeans::default();
@@ -518,7 +518,7 @@ mod test {
 
     #[test]
     fn test_parallel_assignment_matches_single_thread() {
-        let mut rng = random_test_rng();
+        let mut rng = seeded_rng();
         let dim = 32;
         let vecs = (0..257 * dim)
             .map(|_| rng.random::<f32>())

@@ -2,31 +2,18 @@ use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, cr
 use gathers::distance::Distance;
 use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
 use gathers::rabitq::RaBitQ;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
-
-const BENCH_SEED_ENV: &str = "GATHERS_BENCH_SEED";
-
-fn benchmark_seed() -> u64 {
-    std::env::var(BENCH_SEED_ENV).map_or_else(
-        |_| rand::rng().random(),
-        |value| {
-            value
-                .parse()
-                .unwrap_or_else(|_| panic!("{BENCH_SEED_ENV} must be an unsigned 64-bit integer"))
-        },
-    )
-}
+use seed_rand::seeded_rng;
 
 fn assignment_benchmark(c: &mut Criterion) {
     const NUM_VECTORS: usize = 4096;
     const NUM_CENTROIDS: usize = 256;
     const DIM: usize = 128;
 
-    let mut rng = StdRng::seed_from_u64(benchmark_seed());
+    let mut rng = seeded_rng();
     let vecs: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
     let centroids: Vec<f32> = (0..NUM_CENTROIDS * DIM).map(|_| rng.random()).collect();
     let mut labels = vec![0; NUM_VECTORS];
@@ -100,8 +87,8 @@ fn kmeans_benchmark(c: &mut Criterion) {
     const DIM: usize = 128;
     const ITERATIONS: usize = 5;
 
-    let seed = benchmark_seed();
-    let mut rng = StdRng::seed_from_u64(seed);
+    let mut rng = seeded_rng();
+    let seed = rng.random();
     let source: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
     let vecs = gathers::utils::as_continuous_vec(&[source]);
     let l2_kmeans = KMeans::new(

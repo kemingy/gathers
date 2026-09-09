@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/seed_rand"]
+resolver = "3"
+
 [package]
 name = "gathers"
 version = "0.3.1"
@@ -42,6 +46,7 @@ perf = []
 
 [dev-dependencies]
 criterion = "0.5.1"
+seed-rand = { path = "crates/seed_rand" }
 
 [[bench]]
 name = "bench"
