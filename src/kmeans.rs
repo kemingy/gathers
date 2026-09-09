@@ -399,9 +399,8 @@ impl KMeans {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
