@@ -1,5 +1,8 @@
 //! K-means clustering implementation.
 
+#[cfg(not(feature = "perf"))]
+mod matrix;
+
 use core::panic;
 use std::time::Instant;
 
@@ -352,6 +355,13 @@ impl KMeans {
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
+        #[cfg(not(feature = "perf"))]
+        let mut matrix_workspace = matrix::MatrixAssignmentWorkspace::try_new(
+            &vecs,
+            centroids.len() / dim,
+            dim,
+            self.distance,
+        );
         debug!("start training");
         for i in 0..self.max_iter {
             let start_time = Instant::now();
@@ -361,7 +371,11 @@ impl KMeans {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
                 #[cfg(not(feature = "perf"))]
-                base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
+                if let Some(workspace) = &mut matrix_workspace {
+                    workspace.assign(&vecs, &centroids, dim, &mut labels);
+                } else {
+                    base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
+                }
             } else {
                 #[cfg(feature = "perf")]
                 rabitq_assign(&vecs, &centroids, dim, &mut labels);
@@ -386,10 +400,18 @@ impl KMeans {
 #[cfg(test)]
 mod test {
     use rand::Rng;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::utils::as_continuous_vec;
+
+    fn random_test_rng() -> StdRng {
+        let seed = rand::rng().random();
+        eprintln!("random seed: {seed}");
+        StdRng::seed_from_u64(seed)
+    }
 
     #[test]
     #[should_panic(expected = "dimension must be greater than zero")]
@@ -412,7 +434,7 @@ mod test {
 
     #[test]
     fn test_kmeans() {
-        let mut rng = rand::rng();
+        let mut rng = random_test_rng();
         let dim = 32;
         let n = 1000;
         let km = KMeans::default();
@@ -465,7 +487,7 @@ mod test {
 
     #[test]
     fn test_parallel_assignment_matches_single_thread() {
-        let mut rng = rand::rng();
+        let mut rng = random_test_rng();
         let dim = 32;
         let vecs = (0..257 * dim)
             .map(|_| rng.random::<f32>())
