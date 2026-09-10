@@ -374,6 +374,11 @@ impl RaBitQ {
         self.sorted_to_original.len()
     }
 
+    /// Return whether the index contains no centroids.
+    pub fn is_empty(&self) -> bool {
+        self.sorted_to_original.is_empty()
+    }
+
     /// Create a new RaBitQ instance.
     pub fn new(centroids: &[f32], dim: usize) -> Self {
         assert!(dim > 0, "dimension must be greater than zero");

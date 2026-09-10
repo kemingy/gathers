@@ -6,7 +6,7 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
-bytemuck = "1.22.0"
+bytemuck.workspace = true
 faer.workspace = true
 pulp.workspace = true
 rand.workspace = true
