@@ -40,12 +40,16 @@ rayon.workspace = true
 [profile.dev.package.faer]
 opt-level = 3
 
+[profile.release]
+lto = "thin"
+
 [profile.perf]
 inherits = "release"
 debug = true
 
 [profile.bench]
 debug = true
+lto = "thin"
 
 [features]
 default = []
