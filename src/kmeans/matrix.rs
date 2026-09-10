@@ -56,6 +56,22 @@ fn stable_l2_norm(values: &[f32]) -> f32 {
     scale * scaled_sum.sqrt()
 }
 
+fn best_two(scores: impl Iterator<Item = f32>) -> (f32, f32, usize) {
+    let mut best = f32::MAX;
+    let mut second_best = f32::MAX;
+    let mut best_index = 0;
+    for (index, score) in scores.enumerate() {
+        if score < best {
+            second_best = best;
+            best = score;
+            best_index = index;
+        } else if score < second_best {
+            second_best = score;
+        }
+    }
+    (best, second_best, best_index)
+}
+
 impl Distance {
     fn matrix_norm(self, values: &[f32]) -> f32 {
         match self {
@@ -164,98 +180,55 @@ impl MatrixAssignmentWorkspace {
         // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
         let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
-        if self.distance == Distance::NegativeDotProduct {
-            labels
-                .par_iter_mut()
-                .zip(&self.vector_norms)
-                .zip(vecs.par_chunks_exact(dim))
-                .zip(self.dot_products.par_chunks_exact(num_centroids))
-                .for_each(|(((label, &vector_norm), vector), scores)| {
-                    let mut best_score = f32::MAX;
-                    let mut second_best_score = f32::MAX;
-                    let mut best_index = 0;
-                    for (index, &score) in scores.iter().enumerate() {
-                        if score < best_score {
-                            second_best_score = best_score;
-                            best_score = score;
-                            best_index = index;
-                        } else if score < second_best_score {
-                            second_best_score = score;
-                        }
-                    }
-
-                    // Cauchy-Schwarz bounds the magnitude of the exact dot product by
-                    // ||x||₂ ||c||₂. Scores whose error intervals overlap are recomputed
-                    // with the direct implementation to preserve its assignment semantics.
-                    let uncertainty = DOT_ERROR_BOUND_SAFETY_FACTOR
-                        * (gamma * vector_norm * max_centroid_norm + underflow_error);
-                    let ambiguity = 2.0 * uncertainty;
-                    if !centroid_norms_are_finite
-                        || !vector_norm.is_finite()
-                        || !uncertainty.is_finite()
-                        || !best_score.is_finite()
-                        || second_best_score - best_score <= ambiguity
-                    {
-                        let mut direct = [0];
-                        base_assign(
-                            vector,
-                            centroids,
-                            dim,
-                            Distance::NegativeDotProduct,
-                            &mut direct,
-                        );
-                        *label = direct[0];
-                    } else {
-                        *label = best_index as u32;
-                    }
-                });
-            return;
-        }
-
+        let distance = self.distance;
         labels
             .par_iter_mut()
             .zip(&self.vector_norms)
             .zip(vecs.par_chunks_exact(dim))
             .zip(self.dot_products.par_chunks_exact(num_centroids))
             .for_each(|(((label, &vector_norm), vector), scores)| {
-                let mut best_distance = f32::MAX;
-                let mut second_best_distance = f32::MAX;
-                let mut best_index = 0;
-                for (index, (&score, &centroid_norm)) in
-                    scores.iter().zip(&self.centroid_norms).enumerate()
-                {
-                    let distance = score + vector_norm + centroid_norm;
-                    if distance < best_distance {
-                        second_best_distance = best_distance;
-                        best_distance = distance;
-                        best_index = index;
-                    } else if distance < second_best_distance {
-                        second_best_distance = distance;
-                    }
-                }
+                let (best_score, second_best_score, best_index) = match distance {
+                    Distance::NegativeDotProduct => best_two(scores.iter().copied()),
+                    Distance::SquaredEuclidean => best_two(
+                        scores
+                            .iter()
+                            .zip(&self.centroid_norms)
+                            .map(|(&score, &centroid_norm)| score + vector_norm + centroid_norm),
+                    ),
+                };
 
-                // The norm identity can suffer cancellation. The safety factor is an
-                // engineering margin, not part of Higham's gamma_n bound.
-                let uncertainty = L2_ERROR_BOUND_SAFETY_FACTOR
-                    * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error);
+                let uncertainty = match distance {
+                    // Cauchy-Schwarz bounds the magnitude of the exact dot product by
+                    // ||x||₂ ||c||₂.
+                    Distance::NegativeDotProduct => {
+                        DOT_ERROR_BOUND_SAFETY_FACTOR
+                            * (gamma * vector_norm * max_centroid_norm + underflow_error)
+                    }
+                    // The norm identity can suffer cancellation. The safety factor is an
+                    // engineering margin, not part of Higham's gamma_n bound.
+                    Distance::SquaredEuclidean => {
+                        L2_ERROR_BOUND_SAFETY_FACTOR
+                            * (gamma * (vector_norm.abs() + max_centroid_norm.abs())
+                                + underflow_error)
+                    }
+                };
                 // Two estimates can each err in opposite directions by `uncertainty`.
                 let ambiguity = 2.0 * uncertainty;
-                if !centroid_norms_are_finite
+                let invalid = !centroid_norms_are_finite
                     || !vector_norm.is_finite()
                     || !uncertainty.is_finite()
-                    || !best_distance.is_finite()
-                {
+                    || !best_score.is_finite();
+                let use_direct = invalid
+                    || (distance == Distance::NegativeDotProduct
+                        && second_best_score - best_score <= ambiguity);
+                if use_direct {
                     let mut direct = [0];
-                    base_assign(
-                        vector,
-                        centroids,
-                        dim,
-                        Distance::SquaredEuclidean,
-                        &mut direct,
-                    );
+                    base_assign(vector, centroids, dim, distance, &mut direct);
                     *label = direct[0];
-                } else if best_distance < 0.0 || second_best_distance - best_distance <= ambiguity {
-                    let cutoff = best_distance + ambiguity;
+                } else if distance == Distance::SquaredEuclidean
+                    && (best_score < 0.0 || second_best_score - best_score <= ambiguity)
+                {
+                    let cutoff = best_score + ambiguity;
                     let mut exact_best_distance = f32::MAX;
                     let mut exact_best_index = best_index;
                     for (index, ((&score, &centroid_norm), centroid)) in scores
