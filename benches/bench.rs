@@ -2,14 +2,14 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use gathers::distance::{
     l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
 };
-use gathers::rabitq::simd as rabitq_simd;
-use gathers::rabitq::{binary_dot_product_native, min_max_residual_native};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 #[cfg(target_arch = "aarch64")]
 use pulp::aarch64::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use pulp::x86::V3;
+use rabitq::simd as rabitq_simd;
+use rabitq::{binary_dot_product_native, min_max_residual_native};
 use rand::Rng;
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
