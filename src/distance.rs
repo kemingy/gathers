@@ -133,8 +133,8 @@ pub fn argmin(vec: &[f32]) -> usize {
 
 #[cfg(test)]
 mod test {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::Rng;
+    use seed_rand::seeded_rng;
 
     use super::{
         argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
@@ -155,7 +155,7 @@ mod test {
 
     #[test]
     fn test_l2_squared_distance() {
-        let mut rng = rand::rng();
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
@@ -179,7 +179,7 @@ mod test {
 
     #[test]
     fn test_dot_product_distance() {
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let lhs = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
@@ -206,7 +206,7 @@ mod test {
 
     #[test]
     fn test_l2_norm() {
-        let mut rng = rand::rng();
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [4, 12, 64, 70, 78].into_iter() {
                 let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
@@ -228,7 +228,7 @@ mod test {
 
     #[test]
     fn test_argmin() {
-        let mut rng = rand::rng();
+        let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [12, 32, 128, 140].into_iter() {
                 let vec = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();

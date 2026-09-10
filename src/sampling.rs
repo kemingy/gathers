@@ -5,7 +5,21 @@ use rand::Rng;
 
 /// Subsample a given number of vectors from a list of vectors.
 pub fn subsample(n_sample: usize, vecs: &[f32], dim: usize) -> Vec<Vec<f32>> {
-    reservoir_sampling(n_sample, &mut vecs.chunks(dim).map(|chunk| chunk.to_vec()))
+    let mut rng = rand::rng();
+    subsample_inner(n_sample, vecs, dim, &mut rng)
+}
+
+pub(crate) fn subsample_inner<R: Rng + ?Sized>(
+    n_sample: usize,
+    vecs: &[f32],
+    dim: usize,
+    rng: &mut R,
+) -> Vec<Vec<f32>> {
+    reservoir_sampling_inner(
+        n_sample,
+        &mut vecs.chunks(dim).map(|chunk| chunk.to_vec()),
+        rng,
+    )
 }
 
 /// Reservoir sampling algorithm.
@@ -16,9 +30,17 @@ where
     I: Iterator<Item = Vec<T>>,
     T: Num + Copy,
 {
-    let mut res = Vec::with_capacity(n_sample);
     let mut rng = rand::rng();
+    reservoir_sampling_inner(n_sample, iteration, &mut rng)
+}
 
+fn reservoir_sampling_inner<I, T, R>(n_sample: usize, iteration: &mut I, rng: &mut R) -> Vec<Vec<T>>
+where
+    I: Iterator<Item = Vec<T>>,
+    T: Num + Copy,
+    R: Rng + ?Sized,
+{
+    let mut res = Vec::with_capacity(n_sample);
     for _ in 0..n_sample {
         res.push(iteration.next().expect("iteration less than n_sample"));
     }

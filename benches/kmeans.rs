@@ -1,19 +1,19 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gathers::distance::Distance;
-use gathers::kmeans::{base_assign, base_assign_parallel, rabitq_assign_parallel};
+use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
 use gathers::rabitq::RaBitQ;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::Rng;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
+use seed_rand::seeded_rng;
 
 fn assignment_benchmark(c: &mut Criterion) {
     const NUM_VECTORS: usize = 4096;
     const NUM_CENTROIDS: usize = 256;
     const DIM: usize = 128;
 
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = seeded_rng();
     let vecs: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
     let centroids: Vec<f32> = (0..NUM_CENTROIDS * DIM).map(|_| rng.random()).collect();
     let mut labels = vec![0; NUM_VECTORS];
@@ -81,5 +81,55 @@ fn assignment_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+fn kmeans_benchmark(c: &mut Criterion) {
+    const NUM_VECTORS: usize = 50_176;
+    const NUM_CENTROIDS: usize = 256;
+    const DIM: usize = 128;
+    const ITERATIONS: usize = 5;
+
+    let mut rng = seeded_rng();
+    let seed = rng.random();
+    let source: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
+    let vecs = gathers::utils::as_continuous_vec(&[source]);
+    let l2_kmeans = KMeans::new(
+        NUM_CENTROIDS as u32,
+        ITERATIONS as u32,
+        f32::MIN_POSITIVE,
+        Distance::SquaredEuclidean,
+        false,
+    )
+    .seed(seed);
+    let dot_kmeans = KMeans::new(
+        NUM_CENTROIDS as u32,
+        ITERATIONS as u32,
+        f32::MIN_POSITIVE,
+        Distance::NegativeDotProduct,
+        false,
+    )
+    .seed(seed);
+
+    let mut group = c.benchmark_group("kmeans");
+    group.sample_size(20);
+    group.throughput(Throughput::Elements(
+        (NUM_VECTORS * NUM_CENTROIDS * ITERATIONS) as u64,
+    ));
+    group.bench_function("fit_50176x256x128_5iter", |b| {
+        b.iter_batched(
+            || vecs.clone(),
+            |input| l2_kmeans.fit(black_box(input), DIM),
+            BatchSize::LargeInput,
+        )
+    });
+    group.bench_function("fit_dot_50176x256x128_5iter", |b| {
+        b.iter_batched(
+            || vecs.clone(),
+            |input| dot_kmeans.fit(black_box(input), DIM),
+            BatchSize::LargeInput,
+        )
+    });
+    group.finish();
+}
+
 criterion_group!(assignment_benches, assignment_benchmark);
-criterion_main!(assignment_benches);
+criterion_group!(kmeans_benches, kmeans_benchmark);
+criterion_main!(kmeans_benches, assignment_benches);
