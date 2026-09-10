@@ -41,6 +41,7 @@ rayon.workspace = true
 opt-level = 3
 
 [profile.release]
+codegen-units = 1
 lto = "thin"
 
 [profile.perf]
@@ -48,6 +49,7 @@ inherits = "release"
 debug = true
 
 [profile.bench]
+codegen-units = 1
 debug = true
 lto = "thin"
 
