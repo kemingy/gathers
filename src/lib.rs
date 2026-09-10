@@ -25,7 +25,7 @@
 
 pub mod distance;
 pub mod kmeans;
-pub mod rabitq;
+pub use rabitq;
+pub use rabitq::simd;
 pub mod sampling;
-pub mod simd;
 pub mod utils;

@@ -10,7 +10,26 @@ use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
 
-use crate::distance::squared_euclidean;
+pub mod simd;
+
+#[inline]
+fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
+    struct Impl<'a> {
+        lhs: &'a [f32],
+        rhs: &'a [f32],
+    }
+
+    impl pulp::WithSimd for Impl<'_> {
+        type Output = f32;
+
+        #[inline(always)]
+        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
+            simd::pulp::l2_squared_distance(simd, self.lhs, self.rhs)
+        }
+    }
+
+    pulp::Arch::new().dispatch(Impl { lhs, rhs })
+}
 
 const DEFAULT_X_DOT_PRODUCT: f32 = 0.8;
 const EPSILON: f32 = 1.9;
@@ -88,7 +107,7 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
         fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
             let Self { vec, orthogonal } = self;
             Col::from_fn(orthogonal.ncols(), |i| {
-                crate::simd::pulp::dot_product(
+                simd::pulp::dot_product(
                     simd,
                     vec,
                     orthogonal
@@ -123,7 +142,7 @@ fn project_into(vec: &[f32], orthogonal: &MatRef<f32>, output: &mut [f32]) {
                 output,
             } = self;
             for (i, value) in output.iter_mut().enumerate() {
-                *value = crate::simd::pulp::dot_product(
+                *value = simd::pulp::dot_product(
                     simd,
                     vec,
                     orthogonal
@@ -176,7 +195,7 @@ pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
         #[inline(always)]
         fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
             let Self { res, x, y } = self;
-            crate::simd::pulp::min_max_residual(simd, res, x, y)
+            simd::pulp::min_max_residual(simd, res, x, y)
         }
     }
 
@@ -210,8 +229,8 @@ pub fn scalar_quantize(
 ) -> u32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        if crate::simd::Avx2::is_available() {
-            crate::simd::scalar_quantize(quantized, vec, lower_bound, multiplier)
+        if simd::Avx2::is_available() {
+            simd::scalar_quantize(quantized, vec, lower_bound, multiplier)
         } else {
             scalar_quantize_native(quantized, vec, lower_bound, multiplier)
         }
@@ -238,8 +257,8 @@ fn vector_binarize_query_native(vec: &[u8], binary: &mut [u64]) {
 pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     {
-        if crate::simd::Avx2::is_available() {
-            crate::simd::vector_binarize_query(vec, binary);
+        if simd::Avx2::is_available() {
+            simd::vector_binarize_query(vec, binary);
         } else {
             vector_binarize_query_native(vec, binary);
         }
@@ -273,8 +292,8 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
         res += {
             #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
             {
-                if crate::simd::Avx2::is_available() {
-                    unsafe { crate::simd::binary_dot_product_simd(x, y_slice) << i }
+                if simd::Avx2::is_available() {
+                    unsafe { simd::binary_dot_product_simd(x, y_slice) << i }
                     // crate::simd::binary_dot_product(x, y_slice) << i
                 } else {
                     binary_dot_product_native(x, y_slice) << i
@@ -295,7 +314,8 @@ struct Metrics {
     pub precise: AtomicU64,
 }
 
-pub(crate) struct RaBitQWorkspace {
+/// Reusable scratch space for RaBitQ queries.
+pub struct RaBitQWorkspace {
     query: Vec<f32>,
     projected: Vec<f32>,
     quantized: Vec<u8>,
@@ -304,7 +324,8 @@ pub(crate) struct RaBitQWorkspace {
 }
 
 impl RaBitQWorkspace {
-    pub(crate) fn new(dim: usize) -> Self {
+    /// Create workspace for the padded index dimension.
+    pub fn new(dim: usize) -> Self {
         Self {
             query: vec![0.0; dim],
             projected: vec![0.0; dim],
@@ -343,11 +364,13 @@ pub struct RaBitQ {
 }
 
 impl RaBitQ {
-    pub(crate) fn dim(&self) -> usize {
+    /// Return the padded index dimension.
+    pub fn dim(&self) -> usize {
         self.dim
     }
 
-    pub(crate) fn len(&self) -> usize {
+    /// Return the number of indexed centroids.
+    pub fn len(&self) -> usize {
         self.sorted_to_original.len()
     }
 
@@ -482,7 +505,10 @@ impl RaBitQ {
         self.metrics.update(rough, precise);
     }
 
-    pub(crate) fn retrieve_top_one_with_workspace(
+    /// Retrieve the top-1 index with reusable query workspace.
+    ///
+    /// Returns the index and the number of precise distance comparisons.
+    pub fn retrieve_top_one_with_workspace(
         &self,
         query: &[f32],
         workspace: &mut RaBitQWorkspace,
@@ -554,7 +580,8 @@ impl RaBitQ {
         (min_index, precise)
     }
 
-    pub(crate) fn update_metrics(&self, rough: u64, precise: u64) {
+    /// Add rough and precise comparison counts to the index metrics.
+    pub fn update_metrics(&self, rough: u64, precise: u64) {
         self.metrics.update(rough, precise);
     }
 
@@ -569,13 +596,13 @@ mod test {
     use rand::Rng;
     use seed_rand::seeded_rng;
 
+    use super::squared_euclidean;
     use super::{RaBitQ, min_max_residual, min_max_residual_native};
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::{
         SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
         vector_binarize_query_native,
     };
-    use crate::distance::squared_euclidean;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use crate::simd;
 

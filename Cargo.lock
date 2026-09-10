@@ -385,15 +385,14 @@ version = "0.3.1"
 dependencies = [
  "aligned-vec",
  "argh",
- "bytemuck",
  "criterion",
  "faer",
  "log",
  "logforth",
  "num-traits",
  "pulp",
+ "rabitq",
  "rand",
- "rand_distr",
  "rayon",
  "seed-rand",
 ]
@@ -912,6 +911,19 @@ name = "r-efi"
 version = "5.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74765f6d916ee2faa39bc8e68e4f3ed8949b48cccdac59983d287a7cb71ce9c5"
+
+[[package]]
+name = "rabitq"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "faer",
+ "pulp",
+ "rand",
+ "rand_distr",
+ "rayon",
+ "seed-rand",
+]
 
 [[package]]
 name = "rand"

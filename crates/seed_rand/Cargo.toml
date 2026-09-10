@@ -6,4 +6,4 @@ rust-version = "1.85"
 publish = false
 
 [dependencies]
-rand = "0.9.3"
+rand.workspace = true

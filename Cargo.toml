@@ -1,7 +1,13 @@
 [workspace]
-members = ["crates/seed_rand"]
+members = ["crates/rabitq", "crates/seed_rand"]
 exclude = ["python"]
 resolver = "3"
+
+[workspace.dependencies]
+faer = { version = "0.22.6", default-features = false, features = ["linalg", "std"] }
+pulp = "0.21.5"
+rand = "0.9.3"
+rayon = "1.10.0"
 
 [package]
 name = "gathers"
@@ -20,15 +26,14 @@ rust-version = "1.85"
 [dependencies]
 aligned-vec = "0.6.4"
 argh = "0.1.13"
-bytemuck = "1.22.0"
-faer = { version = "0.22.6", default-features = false, features = ["linalg", "std"] }
+faer.workspace = true
 log = "0.4.27"
 logforth = "0.24.0"
 num-traits = "0.2.19"
-pulp = "0.21.5"
-rand = "0.9.3"
-rand_distr = "0.5.0"
-rayon = "1.10.0"
+pulp.workspace = true
+rabitq = { path = "crates/rabitq" }
+rand.workspace = true
+rayon.workspace = true
 
 [profile.dev.package.faer]
 opt-level = 3

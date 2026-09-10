@@ -4,7 +4,7 @@
 use core::iter;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-use crate::rabitq::THETA_LOG_DIM;
+use crate::THETA_LOG_DIM;
 
 pub mod pulp;
 
