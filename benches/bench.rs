@@ -2,13 +2,13 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use gathers::distance::{
     l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
 };
-use gathers::rabitq::{binary_dot_product_native, min_max_residual_native};
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 #[cfg(target_arch = "aarch64")]
 use pulp::aarch64::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use pulp::x86::V3;
+use rabitq::{binary_dot_product_native, min_max_residual_native, simd as rabitq_simd};
 use rand::Rng;
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
@@ -67,7 +67,7 @@ pub fn min_max_benchmark(c: &mut Criterion) {
             |b, input| {
                 b.iter(|| {
                     let mut res = input.0.clone();
-                    unsafe { simd::min_max_residual(&mut res, input.1, input.2) }
+                    unsafe { rabitq_simd::min_max_residual(&mut res, input.1, input.2) }
                 });
             },
         );
@@ -79,7 +79,7 @@ pub fn min_max_benchmark(c: &mut Criterion) {
                 |b, input| {
                     b.iter(|| {
                         let mut res = input.0.clone();
-                        gathers::simd::pulp::min_max_residual(simd, &mut res, input.1, input.2)
+                        rabitq_simd::pulp::min_max_residual(simd, &mut res, input.1, input.2)
                     });
                 },
             );
@@ -92,7 +92,7 @@ pub fn min_max_benchmark(c: &mut Criterion) {
                 |b, input| {
                     b.iter(|| {
                         let mut res = input.0.clone();
-                        gathers::simd::pulp::min_max_residual(simd, &mut res, input.1, input.2)
+                        rabitq_simd::pulp::min_max_residual(simd, &mut res, input.1, input.2)
                     });
                 },
             );

@@ -1,7 +1,7 @@
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use gathers::distance::Distance;
 use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
-use gathers::rabitq::RaBitQ;
+use rabitq::RaBitQ;
 use rand::Rng;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,

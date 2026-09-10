@@ -25,7 +25,8 @@
 
 pub mod distance;
 pub mod kmeans;
-pub mod rabitq;
+/// RaBitQ-based approximate top-1 vector retrieval.
+pub use rabitq;
 pub mod sampling;
 pub mod simd;
 pub mod utils;

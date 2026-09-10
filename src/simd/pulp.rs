@@ -2,7 +2,7 @@
 
 use core::iter;
 
-use pulp::{Simd, as_arrays, as_arrays_mut};
+use pulp::{Simd, as_arrays};
 
 #[inline(always)]
 fn abs2_add<S: Simd>(simd: S, x: S::f32s, acc: S::f32s) -> S::f32s {
@@ -203,68 +203,6 @@ pub fn argmin<S: Simd>(simd: S, vec: &[f32]) -> usize {
             } else {
                 0
             }
-        },
-    )
-}
-
-/// Compute the min and max value of a vector.
-#[inline]
-pub fn min_max_residual<S: Simd>(simd: S, res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
-    simd.vectorize(
-        #[inline(always)]
-        || {
-            let (res, res_tail) = S::as_mut_simd_f32s(res);
-            let (x, x_tail) = S::as_simd_f32s(x);
-            let (y, y_tail) = S::as_simd_f32s(y);
-
-            let (res2, res1) = as_arrays_mut::<2, _>(res);
-            let (x2, x1) = as_arrays::<2, _>(x);
-            let (y2, y1) = as_arrays::<2, _>(y);
-
-            let infty = simd.splat_f32s(f32::INFINITY);
-            let neg_infty = simd.splat_f32s(f32::NEG_INFINITY);
-
-            let mut min0 = infty;
-            let mut min1 = infty;
-            let mut max0 = neg_infty;
-            let mut max1 = neg_infty;
-
-            for ([res0, res1], (&[x0, x1], &[y0, y1])) in iter::zip(res2, iter::zip(x2, y2)) {
-                let diff = simd.sub_f32s(x0, y0);
-                *res0 = diff;
-                min0 = simd.min_f32s(min0, diff);
-                max0 = simd.max_f32s(max0, diff);
-
-                let diff = simd.sub_f32s(x1, y1);
-                *res1 = diff;
-                min1 = simd.min_f32s(min1, diff);
-                max1 = simd.max_f32s(max1, diff);
-            }
-
-            for (res0, (&x0, &y0)) in iter::zip(res1, iter::zip(x1, y1)) {
-                let diff = simd.sub_f32s(x0, y0);
-                *res0 = diff;
-                min0 = simd.min_f32s(min0, diff);
-                max0 = simd.max_f32s(max0, diff);
-            }
-
-            min0 = simd.min_f32s(min0, min1);
-            max0 = simd.max_f32s(max0, max1);
-
-            {
-                let m = simd.mask_between_m32s(0, x_tail.len() as u32).mask();
-
-                let x0 = simd.partial_load_f32s(x_tail);
-                let y0 = simd.partial_load_f32s(y_tail);
-
-                let diff = simd.sub_f32s(x0, y0);
-                simd.partial_store_f32s(res_tail, diff);
-
-                min0 = simd.min_f32s(min0, simd.select_f32s_m32s(m, diff, infty));
-                max0 = simd.max_f32s(max0, simd.select_f32s_m32s(m, diff, neg_infty));
-            }
-
-            (simd.reduce_min_f32s(min0), simd.reduce_max_f32s(max0))
         },
     )
 }
