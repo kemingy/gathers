@@ -1,8 +1,8 @@
 use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par};
 use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
-    ParallelSliceMut,
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator,
+    ParallelSlice, ParallelSliceMut,
 };
 
 use super::base_assign;
@@ -147,11 +147,17 @@ impl MatrixAssignmentWorkspace {
             .for_each(|(norm, vector)| {
                 *norm = distance.matrix_norm(vector);
             });
+        let mut dot_products = Vec::new();
+        dot_products.try_reserve_exact(comparison_count).ok()?;
+        (0..comparison_count)
+            .into_par_iter()
+            .map(|_| 0.0)
+            .collect_into_vec(&mut dot_products);
         Some(Self {
             distance,
             vector_norms,
             centroid_norms: try_zeroed(num_centroids)?,
-            dot_products: try_zeroed(comparison_count)?,
+            dot_products,
         })
     }
 
