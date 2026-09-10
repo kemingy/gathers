@@ -73,10 +73,40 @@ fn best_two(scores: impl Iterator<Item = f32>) -> (f32, f32, usize) {
 }
 
 impl Distance {
+    fn matrix_scale(self) -> f32 {
+        match self {
+            Self::SquaredEuclidean => -2.0,
+            Self::NegativeDotProduct => -1.0,
+        }
+    }
+
     fn matrix_norm(self, values: &[f32]) -> f32 {
         match self {
             Self::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
             Self::NegativeDotProduct => stable_l2_norm(values),
+        }
+    }
+
+    fn matrix_uncertainty(
+        self,
+        gamma: f32,
+        vector_norm: f32,
+        max_centroid_norm: f32,
+        underflow_error: f32,
+    ) -> f32 {
+        match self {
+            // The norm identity can suffer cancellation. The safety factor is an
+            // engineering margin, not part of Higham's gamma_n bound.
+            Self::SquaredEuclidean => {
+                L2_ERROR_BOUND_SAFETY_FACTOR
+                    * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error)
+            }
+            // Cauchy-Schwarz bounds the magnitude of the exact dot product by
+            // ||x||₂ ||c||₂.
+            Self::NegativeDotProduct => {
+                DOT_ERROR_BOUND_SAFETY_FACTOR
+                    * (gamma * vector_norm * max_centroid_norm + underflow_error)
+            }
         }
     }
 }
@@ -139,10 +169,7 @@ impl MatrixAssignmentWorkspace {
 
         // Process 256 input rows per GEMM task; tuned on Apple Silicon with
         // benchmark datasets averaging 196 training vectors per centroid.
-        let scale = match self.distance {
-            Distance::SquaredEuclidean => -2.0,
-            Distance::NegativeDotProduct => -1.0,
-        };
+        let scale = self.distance.matrix_scale();
         self.dot_products
             .par_chunks_mut(MATMUL_BLOCK_SIZE * num_centroids)
             .zip(vecs.par_chunks(MATMUL_BLOCK_SIZE * dim))
@@ -197,21 +224,12 @@ impl MatrixAssignmentWorkspace {
                     ),
                 };
 
-                let uncertainty = match distance {
-                    // Cauchy-Schwarz bounds the magnitude of the exact dot product by
-                    // ||x||₂ ||c||₂.
-                    Distance::NegativeDotProduct => {
-                        DOT_ERROR_BOUND_SAFETY_FACTOR
-                            * (gamma * vector_norm * max_centroid_norm + underflow_error)
-                    }
-                    // The norm identity can suffer cancellation. The safety factor is an
-                    // engineering margin, not part of Higham's gamma_n bound.
-                    Distance::SquaredEuclidean => {
-                        L2_ERROR_BOUND_SAFETY_FACTOR
-                            * (gamma * (vector_norm.abs() + max_centroid_norm.abs())
-                                + underflow_error)
-                    }
-                };
+                let uncertainty = distance.matrix_uncertainty(
+                    gamma,
+                    vector_norm,
+                    max_centroid_norm,
+                    underflow_error,
+                );
                 // Two estimates can each err in opposite directions by `uncertainty`.
                 let ambiguity = 2.0 * uncertainty;
                 let invalid = !centroid_norms_are_finite
