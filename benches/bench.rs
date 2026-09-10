@@ -8,8 +8,7 @@ use gathers::simd::{self, argmin, dot_product, l2_norm, l2_squared_distance};
 use pulp::aarch64::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use pulp::x86::V3;
-use rabitq::simd as rabitq_simd;
-use rabitq::{binary_dot_product_native, min_max_residual_native};
+use rabitq::{binary_dot_product_native, min_max_residual_native, simd as rabitq_simd};
 use rand::Rng;
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {

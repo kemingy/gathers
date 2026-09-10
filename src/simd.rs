@@ -30,6 +30,7 @@ pub unsafe fn l2_squared_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
     impl ::pulp::WithSimd for Impl<'_> {
         type Output = f32;
+
         #[inline(always)]
         fn with_simd<S: ::pulp::Simd>(self, simd: S) -> Self::Output {
             pulp::l2_squared_distance(simd, self.lhs, self.rhs)
@@ -53,6 +54,7 @@ pub unsafe fn dot_product(lhs: &[f32], rhs: &[f32]) -> f32 {
     }
     impl ::pulp::WithSimd for Impl<'_> {
         type Output = f32;
+
         #[inline(always)]
         fn with_simd<S: ::pulp::Simd>(self, simd: S) -> Self::Output {
             pulp::dot_product(simd, self.lhs, self.rhs)
@@ -73,6 +75,7 @@ pub unsafe fn l2_norm(vec: &[f32]) -> f32 {
     struct Impl<'a>(&'a [f32]);
     impl ::pulp::WithSimd for Impl<'_> {
         type Output = f32;
+
         #[inline(always)]
         fn with_simd<S: ::pulp::Simd>(self, simd: S) -> Self::Output {
             pulp::l2_norm(simd, self.0)
@@ -93,6 +96,7 @@ pub unsafe fn argmin(vec: &[f32]) -> usize {
     struct Impl<'a>(&'a [f32]);
     impl ::pulp::WithSimd for Impl<'_> {
         type Output = usize;
+
         #[inline(always)]
         fn with_simd<S: ::pulp::Simd>(self, simd: S) -> Self::Output {
             pulp::argmin(simd, self.0)

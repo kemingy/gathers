@@ -601,8 +601,7 @@ mod test {
     use rand::Rng;
     use seed_rand::seeded_rng;
 
-    use super::squared_euclidean;
-    use super::{RaBitQ, min_max_residual, min_max_residual_native};
+    use super::{RaBitQ, min_max_residual, min_max_residual_native, squared_euclidean};
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::{
         SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
