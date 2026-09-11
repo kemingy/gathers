@@ -467,94 +467,70 @@ mod test {
     use super::{RaBitQ, SCALAR, min_max_residual, min_max_residual_native, squared_euclidean};
     use crate::simd;
 
-    mod construction {
-        use super::*;
-
-        #[test]
-        #[should_panic(expected = "centroids must be complete")]
-        fn rejects_incomplete_centroids() {
-            RaBitQ::new(&[0.0, 1.0, 2.0], 2);
-        }
+    #[test]
+    #[should_panic(expected = "centroids must be complete")]
+    fn test_new_rejects_incomplete_centroids() {
+        RaBitQ::new(&[0.0, 1.0, 2.0], 2);
     }
 
-    mod binary_dot_product {
-        use super::*;
-
-        #[test]
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_binary_dot_product() {
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-        #[allow(unsafe_code)]
-        fn x86() {
-            if !crate::simd::x86::Avx2::is_available() {
-                return;
-            }
-            let mut rng = seeded_rng();
+        if !crate::simd::x86::Avx2::is_available() {
+            return;
+        }
+        let mut rng = seeded_rng();
 
-            for _ in 0..100 {
-                for dim in [1, 2, 4, 8, 10].into_iter() {
-                    let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
-                    let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<u64>>();
+        for _ in 0..100 {
+            for dim in [1, 2, 4, 8, 10] {
+                let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
+                let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
 
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                {
                     assert_eq!(
                         binary_dot_product_native(&x, &y),
                         simd::x86::binary_dot_product(&x, &y),
                     );
                     assert_eq!(binary_dot_product_native(&x, &y), unsafe {
                         simd::x86::legacy::binary_dot_product(&x, &y)
-                    },);
+                    });
                 }
-            }
-        }
 
-        #[test]
-        #[cfg(target_arch = "aarch64")]
-        fn aarch64() {
-            let mut rng = seeded_rng();
-            for _ in 0..100 {
-                for dim in [1, 2, 4, 8, 10] {
-                    let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
-                    let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
-                    assert_eq!(
-                        simd::native::binary_dot_product(&x, &y),
-                        simd::aarch64::binary_dot_product(&x, &y),
-                    );
-                }
+                #[cfg(target_arch = "aarch64")]
+                assert_eq!(
+                    simd::native::binary_dot_product(&x, &y),
+                    simd::aarch64::binary_dot_product(&x, &y),
+                );
             }
         }
     }
 
-    mod query_binarize {
-        use super::*;
-
-        #[test]
+    #[test]
+    fn test_query_binarize() {
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-        fn x86() {
-            if !crate::simd::x86::Avx2::is_available() {
-                return;
-            }
-            let mut rng = seeded_rng();
+        if !crate::simd::x86::Avx2::is_available() {
+            return;
+        }
+        let mut rng = seeded_rng();
 
-            for _ in 0..100 {
-                for dim in [64, 128, 256, 320, 1024].into_iter() {
-                    let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
-                    let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-                    simd::native::vector_binarize_query(&x, &mut binary);
-                    let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+        for _ in 0..100 {
+            for dim in [64, 128, 256, 320, 1024] {
+                let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
+                let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                simd::native::vector_binarize_query(&x, &mut binary);
+
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                {
+                    let mut binary_simd = vec![0u64; binary.len()];
                     simd::x86::vector_binarize_query(&x, &mut binary_simd);
                     assert_eq!(binary, binary_simd);
                 }
-            }
-        }
 
-        #[test]
-        #[cfg(target_arch = "aarch64")]
-        fn aarch64() {
-            let mut rng = seeded_rng();
-            for _ in 0..100 {
-                for dim in [64, 128, 256, 320, 1024] {
-                    let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
-                    let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-                    simd::native::vector_binarize_query(&x, &mut binary);
-                    let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let mut binary_simd = vec![0u64; binary.len()];
                     simd::aarch64::vector_binarize_query(&x, &mut binary_simd);
                     assert_eq!(binary, binary_simd);
                 }
@@ -562,144 +538,128 @@ mod test {
         }
     }
 
-    mod scalar_quantize {
-        use super::*;
+    #[test]
+    fn test_scalar_quantize() {
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        if !simd::x86::Avx2::is_available() {
+            return;
+        }
 
-        #[test]
-        fn dispatch() {
-            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-            if !simd::x86::Avx2::is_available() {
-                return;
+        let mut rng = seeded_rng();
+        for _ in 0..100 {
+            for dim in [1, 15, 16, 17, 64, 128, 256, 320, 1024] {
+                let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let mut quantized = vec![0u8; dim];
+                let mut residual = vec![0.0; dim];
+                let (upper_bound, lower_bound) = min_max_residual_native(&mut residual, &x, &y);
+                let multiplier = ((upper_bound - lower_bound) * SCALAR).recip();
+                let sum = simd::native::scalar_quantize(
+                    &mut quantized,
+                    &residual,
+                    lower_bound,
+                    multiplier,
+                );
+                let mut quantized_simd = vec![0u8; dim];
+                let sum_simd =
+                    simd::scalar_quantize(&mut quantized_simd, &residual, lower_bound, multiplier);
+                assert_eq!(quantized, quantized_simd);
+                assert_eq!(sum, sum_simd);
             }
+        }
+    }
 
-            let mut rng = seeded_rng();
-            for _ in 0..100 {
-                for dim in [1, 15, 16, 17, 64, 128, 256, 320, 1024] {
-                    let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                    let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                    let mut quantized = vec![0u8; dim];
-                    let mut residual = vec![0.0; dim];
-                    let (upper_bound, lower_bound) = min_max_residual_native(&mut residual, &x, &y);
-                    let multiplier = ((upper_bound - lower_bound) * SCALAR).recip();
-                    let sum = simd::native::scalar_quantize(
-                        &mut quantized,
-                        &residual,
-                        lower_bound,
-                        multiplier,
-                    );
-                    let mut quantized_simd = vec![0u8; dim];
-                    let sum_simd = simd::scalar_quantize(
-                        &mut quantized_simd,
-                        &residual,
-                        lower_bound,
-                        multiplier,
-                    );
-                    assert_eq!(quantized, quantized_simd);
-                    assert_eq!(sum, sum_simd);
+    #[test]
+    #[allow(unsafe_code)]
+    fn test_min_max_residual() {
+        let mut rng = seeded_rng();
+        for _ in 0..100 {
+            for dim in [32, 64, 124, 128, 132].into_iter() {
+                let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
+                let mut res = vec![0.0; dim];
+                let (min, max) = min_max_residual_native(&mut res, &x, &y);
+
+                let mut res_pulp = vec![0.0; dim];
+                let (min_pulp, max_pulp) = min_max_residual(&mut res_pulp, &x, &y);
+
+                assert_eq!(min, min_pulp);
+                assert_eq!(max, max_pulp);
+                assert_eq!(res, res_pulp);
+
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let mut res_simd = vec![0.0; dim];
+                    let (min_simd, max_simd) =
+                        simd::aarch64::legacy::min_max_residual(&mut res_simd, &x, &y);
+                    assert_eq!(min, min_simd);
+                    assert_eq!(max, max_simd);
+                    assert_eq!(res, res_simd);
+                }
+
+                #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                {
+                    if !is_x86_feature_detected!("avx2") {
+                        continue;
+                    }
+                    let mut res_simd = vec![0.0; dim];
+                    let (min_simd, max_simd) =
+                        unsafe { simd::x86::legacy::min_max_residual(&mut res_simd, &x, &y) };
+
+                    assert_eq!(min, min_simd);
+                    assert_eq!(max, max_simd);
+                    assert_eq!(res, res_simd);
                 }
             }
         }
     }
 
-    mod min_max_residual {
-        use super::*;
+    #[test]
+    fn test_batch_retrieval_matches_individual_retrieval() {
+        let mut rng = seeded_rng();
+        let dim = 64;
+        let centroids = (0..16 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let queries = (0..128 * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let rabitq = RaBitQ::new(&centroids, dim);
 
-        #[test]
-        #[allow(unsafe_code)]
-        fn dispatch_and_architectures() {
-            let mut rng = seeded_rng();
-            for _ in 0..100 {
-                for dim in [32, 64, 124, 128, 132].into_iter() {
-                    let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                    let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                    let mut res = vec![0.0; dim];
-                    let (min, max) = min_max_residual_native(&mut res, &x, &y);
+        let expected = queries
+            .chunks_exact(dim)
+            .map(|query| rabitq.retrieve_top_one(query) as u32)
+            .collect::<Vec<_>>();
+        let mut actual = vec![0; expected.len()];
+        rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
 
-                    let mut res_pulp = vec![0.0; dim];
-                    let (min_pulp, max_pulp) = min_max_residual(&mut res_pulp, &x, &y);
-
-                    assert_eq!(min, min_pulp);
-                    assert_eq!(max, max_pulp);
-                    assert_eq!(res, res_pulp);
-
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        let mut res_simd = vec![0.0; dim];
-                        let (min_simd, max_simd) =
-                            simd::aarch64::legacy::min_max_residual(&mut res_simd, &x, &y);
-                        assert_eq!(min, min_simd);
-                        assert_eq!(max, max_simd);
-                        assert_eq!(res, res_simd);
-                    }
-
-                    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-                    {
-                        if !is_x86_feature_detected!("avx2") {
-                            continue;
-                        }
-                        let mut res_simd = vec![0.0; dim];
-                        let (min_simd, max_simd) =
-                            unsafe { simd::x86::legacy::min_max_residual(&mut res_simd, &x, &y) };
-
-                        assert_eq!(min, min_simd);
-                        assert_eq!(max, max_simd);
-                        assert_eq!(res, res_simd);
-                    }
-                }
-            }
-        }
+        assert_eq!(actual, expected);
     }
 
-    mod retrieval {
-        use super::*;
+    #[test]
+    fn test_retrieval_matches_brute_force_after_centroid_sorting() {
+        let dim = 64;
+        let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
+        let mut centroids = vec![0.0; values.len() * dim];
+        for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
+            centroid[0] = value;
+        }
+        let rabitq = RaBitQ::new(&centroids, dim);
 
-        #[test]
-        fn batch_matches_individual() {
-            let mut rng = seeded_rng();
-            let dim = 64;
-            let centroids = (0..16 * dim)
-                .map(|_| rng.random::<f32>())
-                .collect::<Vec<_>>();
-            let queries = (0..128 * dim)
-                .map(|_| rng.random::<f32>())
-                .collect::<Vec<_>>();
-            let rabitq = RaBitQ::new(&centroids, dim);
-
-            let expected = queries
+        assert_ne!(
+            rabitq.sorted_to_original,
+            (0..values.len()).collect::<Vec<_>>()
+        );
+        for query in centroids.chunks_exact(dim) {
+            let expected = centroids
                 .chunks_exact(dim)
-                .map(|query| rabitq.retrieve_top_one(query) as u32)
-                .collect::<Vec<_>>();
-            let mut actual = vec![0; expected.len()];
-            rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
-
-            assert_eq!(actual, expected);
-        }
-
-        #[test]
-        fn matches_brute_force_after_centroid_sorting() {
-            let dim = 64;
-            let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
-            let mut centroids = vec![0.0; values.len() * dim];
-            for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
-                centroid[0] = value;
-            }
-            let rabitq = RaBitQ::new(&centroids, dim);
-
-            assert_ne!(
-                rabitq.sorted_to_original,
-                (0..values.len()).collect::<Vec<_>>()
-            );
-            for query in centroids.chunks_exact(dim) {
-                let expected = centroids
-                    .chunks_exact(dim)
-                    .enumerate()
-                    .min_by(|(_, left), (_, right)| {
-                        squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
-                    })
-                    .map(|(index, _)| index)
-                    .unwrap();
-                assert_eq!(rabitq.retrieve_top_one(query), expected);
-            }
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
+                })
+                .map(|(index, _)| index)
+                .unwrap();
+            assert_eq!(rabitq.retrieve_top_one(query), expected);
         }
     }
 }
