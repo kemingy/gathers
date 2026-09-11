@@ -74,16 +74,18 @@ pub fn min_max_benchmark(c: &mut Criterion) {
             },
         );
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        group.bench_with_input(
-            BenchmarkId::new("simd_x86", dim),
-            &(&residual, &x, &y),
-            |b, input| {
-                let mut res = input.0.clone();
-                b.iter(|| unsafe {
-                    rabitq_simd::x86::legacy::min_max_residual(&mut res, input.1, input.2)
-                });
-            },
-        );
+        if std::is_x86_feature_detected!("avx") {
+            group.bench_with_input(
+                BenchmarkId::new("simd_x86", dim),
+                &(&residual, &x, &y),
+                |b, input| {
+                    let mut res = input.0.clone();
+                    b.iter(|| unsafe {
+                        rabitq_simd::x86::legacy::min_max_residual(&mut res, input.1, input.2)
+                    });
+                },
+            );
+        }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         if let Some(simd) = V3::try_new() {
             group.bench_with_input(
@@ -155,12 +157,19 @@ pub fn scalar_quantize_benchmark(c: &mut Criterion) {
             b.iter(|| scalar_quantize_native(&mut quantized, input, lower_bound, multiplier));
         });
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        group.bench_with_input(BenchmarkId::new("pulp_x86", dim), &input, |b, input| {
-            let mut quantized = vec![0; input.len()];
-            b.iter(|| {
-                rabitq_simd::x86::scalar_quantize(&mut quantized, input, lower_bound, multiplier)
+        if std::is_x86_feature_detected!("avx2") {
+            group.bench_with_input(BenchmarkId::new("pulp_x86", dim), &input, |b, input| {
+                let mut quantized = vec![0; input.len()];
+                b.iter(|| {
+                    rabitq_simd::x86::scalar_quantize(
+                        &mut quantized,
+                        input,
+                        lower_bound,
+                        multiplier,
+                    )
+                });
             });
-        });
+        }
         #[cfg(target_arch = "aarch64")]
         group.bench_with_input(BenchmarkId::new("pulp_aarch64", dim), &input, |b, input| {
             let mut quantized = vec![0; input.len()];
@@ -303,23 +312,27 @@ pub fn binary_ip_benchmark(c: &mut Criterion) {
             },
         );
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        group.bench_with_input(
-            BenchmarkId::new("simd_x86", dim * 64),
-            &(&lhs, &rhs),
-            |b, input| {
-                b.iter(|| unsafe {
-                    rabitq_simd::x86::legacy::binary_dot_product(input.0, input.1)
-                });
-            },
-        );
+        if std::is_x86_feature_detected!("avx2") {
+            group.bench_with_input(
+                BenchmarkId::new("simd_x86", dim * 64),
+                &(&lhs, &rhs),
+                |b, input| {
+                    b.iter(|| unsafe {
+                        rabitq_simd::x86::legacy::binary_dot_product(input.0, input.1)
+                    });
+                },
+            );
+        }
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        group.bench_with_input(
-            BenchmarkId::new("pulp_x86", dim * 64),
-            &(&lhs, &rhs),
-            |b, input| {
-                b.iter(|| rabitq_simd::x86::binary_dot_product(input.0, input.1));
-            },
-        );
+        if std::is_x86_feature_detected!("avx2") {
+            group.bench_with_input(
+                BenchmarkId::new("pulp_x86", dim * 64),
+                &(&lhs, &rhs),
+                |b, input| {
+                    b.iter(|| rabitq_simd::x86::binary_dot_product(input.0, input.1));
+                },
+            );
+        }
         #[cfg(target_arch = "aarch64")]
         group.bench_with_input(
             BenchmarkId::new("pulp_aarch64", dim * 64),
