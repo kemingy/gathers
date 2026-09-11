@@ -69,22 +69,29 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
     let length = x.len();
     assert_eq!(y.len(), length * THETA_LOG_DIM);
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    if crate::simd::x86::Avx2::is_available() {
+        return (0..THETA_LOG_DIM)
+            .map(|i| {
+                let y = &y[i * length..(i + 1) * length];
+                crate::simd::x86::binary_dot_product(x, y) << i
+            })
+            .sum();
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    return (0..THETA_LOG_DIM)
+        .map(|i| {
+            let y = &y[i * length..(i + 1) * length];
+            crate::simd::aarch64::binary_dot_product(x, y) << i
+        })
+        .sum();
+
+    #[cfg(not(target_arch = "aarch64"))]
     (0..THETA_LOG_DIM)
         .map(|i| {
             let y = &y[i * length..(i + 1) * length];
-
-            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-            if crate::simd::x86::Avx2::is_available() {
-                return crate::simd::x86::binary_dot_product(x, y) << i;
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            return crate::simd::aarch64::binary_dot_product(x, y) << i;
-
-            #[cfg(not(target_arch = "aarch64"))]
-            {
-                native::binary_dot_product(x, y) << i
-            }
+            native::binary_dot_product(x, y) << i
         })
         .sum()
 }
