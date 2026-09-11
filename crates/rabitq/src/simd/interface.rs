@@ -3,7 +3,9 @@
 use ::pulp as pulp_crate;
 
 use crate::THETA_LOG_DIM;
-use crate::simd::{native, pulp as kernels};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::simd::native;
+use crate::simd::pulp as kernels;
 
 /// Compute residuals and return their minimum and maximum.
 #[inline]
@@ -58,6 +60,10 @@ pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
         return;
     }
 
+    #[cfg(target_arch = "aarch64")]
+    return crate::simd::aarch64::vector_binarize_query(vec, binary);
+
+    #[cfg(not(target_arch = "aarch64"))]
     native::vector_binarize_query(vec, binary);
 }
 

@@ -39,6 +39,7 @@ pub(crate) fn scalar_quantize(
 
 /// Convert quantized values to bit-sliced binary vectors.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
     use crate::THETA_LOG_DIM;
 

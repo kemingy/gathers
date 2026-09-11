@@ -460,9 +460,11 @@ mod test {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 
-    use super::{RaBitQ, SCALAR, min_max_residual, min_max_residual_native, squared_euclidean};
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64"))]
+    use super::THETA_LOG_DIM;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    use super::{THETA_LOG_DIM, binary_dot_product_native};
+    use super::binary_dot_product_native;
+    use super::{RaBitQ, SCALAR, min_max_residual, min_max_residual_native, squared_euclidean};
     use crate::simd;
 
     #[test]
@@ -527,6 +529,22 @@ mod test {
                 simd::native::vector_binarize_query(&x, &mut binary);
                 let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
                 simd::x86::vector_binarize_query(&x, &mut binary_simd);
+                assert_eq!(binary, binary_simd);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn test_query_binarize_aarch64() {
+        let mut rng = seeded_rng();
+        for _ in 0..100 {
+            for dim in [64, 128, 256, 320, 1024] {
+                let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
+                let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                simd::native::vector_binarize_query(&x, &mut binary);
+                let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
+                simd::aarch64::vector_binarize_query(&x, &mut binary_simd);
                 assert_eq!(binary, binary_simd);
             }
         }

@@ -4,6 +4,63 @@ use pulp::aarch64::Neon;
 
 pub mod legacy;
 
+/// Convert four-bit quantized values to bit-sliced binary vectors.
+#[inline]
+pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
+    assert_eq!(vec.len() % 64, 0);
+    assert_eq!(binary.len(), vec.len() / 16);
+
+    let simd = Neon::try_new().expect("Neon is part of the AArch64 baseline");
+    simd.vectorize(|| {
+        let weights = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let weights = unsafe { simd.neon.vld1q_u8(weights.as_ptr()) };
+
+        macro_rules! bit_mask {
+            ($values:expr, 0) => {{
+                let bits = simd.neon.vandq_u8($values, simd.neon.vdupq_n_u8(1));
+                let weighted = simd.neon.vmulq_u8(bits, weights);
+                simd.neon.vaddlv_u8(simd.neon.vget_low_u8(weighted)) as u64
+                    | (simd.neon.vaddlv_u8(simd.neon.vget_high_u8(weighted)) as u64) << 8
+            }};
+            ($values:expr, $shift:literal) => {{
+                let bits = simd.neon.vandq_u8(
+                    simd.neon.vshrq_n_u8::<$shift>($values),
+                    simd.neon.vdupq_n_u8(1),
+                );
+                let weighted = simd.neon.vmulq_u8(bits, weights);
+                simd.neon.vaddlv_u8(simd.neon.vget_low_u8(weighted)) as u64
+                    | (simd.neon.vaddlv_u8(simd.neon.vget_high_u8(weighted)) as u64) << 8
+            }};
+        }
+
+        let chunks = vec.len() / 64;
+        for (chunk_index, chunk) in vec.chunks_exact(64).enumerate() {
+            let values = [
+                unsafe { simd.neon.vld1q_u8(chunk.as_ptr()) },
+                unsafe { simd.neon.vld1q_u8(chunk.as_ptr().add(16)) },
+                unsafe { simd.neon.vld1q_u8(chunk.as_ptr().add(32)) },
+                unsafe { simd.neon.vld1q_u8(chunk.as_ptr().add(48)) },
+            ];
+            binary[chunk_index] |= bit_mask!(values[0], 0)
+                | bit_mask!(values[1], 0) << 16
+                | bit_mask!(values[2], 0) << 32
+                | bit_mask!(values[3], 0) << 48;
+            binary[chunk_index + chunks] |= bit_mask!(values[0], 1)
+                | bit_mask!(values[1], 1) << 16
+                | bit_mask!(values[2], 1) << 32
+                | bit_mask!(values[3], 1) << 48;
+            binary[chunk_index + chunks * 2] |= bit_mask!(values[0], 2)
+                | bit_mask!(values[1], 2) << 16
+                | bit_mask!(values[2], 2) << 32
+                | bit_mask!(values[3], 2) << 48;
+            binary[chunk_index + chunks * 3] |= bit_mask!(values[0], 3)
+                | bit_mask!(values[1], 3) << 16
+                | bit_mask!(values[2], 3) << 32
+                | bit_mask!(values[3], 3) << 48;
+        }
+    });
+}
+
 /// Compute the u8 scalar quantization of an f32 vector.
 #[inline]
 pub fn scalar_quantize(
