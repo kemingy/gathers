@@ -41,9 +41,7 @@ pub fn scalar_quantize(
     }
 
     #[cfg(target_arch = "aarch64")]
-    {
-        crate::simd::aarch64::scalar_quantize(quantized, vec, lower_bound, multiplier)
-    }
+    return crate::simd::aarch64::scalar_quantize(quantized, vec, lower_bound, multiplier);
 
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -81,9 +79,7 @@ pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
             }
 
             #[cfg(target_arch = "aarch64")]
-            {
-                crate::simd::aarch64::binary_dot_product(x, y) << i
-            }
+            return crate::simd::aarch64::binary_dot_product(x, y) << i;
 
             #[cfg(not(target_arch = "aarch64"))]
             {
