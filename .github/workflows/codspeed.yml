@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+        run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 

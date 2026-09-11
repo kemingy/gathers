@@ -46,8 +46,8 @@ jobs:
           python-version: "3.11"
       - name: Install Rust toolchains
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
-          rustup toolchain install nightly --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup toolchain install nightly --profile minimal --component rustfmt --no-self-update
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Install lint tools
@@ -79,7 +79,7 @@ jobs:
         run: |
           pip install pytest
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+        run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Test
