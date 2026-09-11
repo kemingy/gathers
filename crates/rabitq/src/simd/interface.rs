@@ -2,8 +2,8 @@
 
 use ::pulp as pulp_crate;
 
-use crate::simd::pulp as kernels;
-use crate::{THETA_LOG_DIM, simd::native};
+use crate::THETA_LOG_DIM;
+use crate::simd::{native, pulp as kernels};
 
 /// Compute residuals and return their minimum and maximum.
 #[inline]
