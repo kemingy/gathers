@@ -5,7 +5,7 @@
 //! ```
 //! use gathers::kmeans::{KMeans, rabitq_assign};
 //! use gathers::utils::as_continuous_vec;
-//! # use rand::Rng;
+//! # use rand::RngExt;
 //! # let mut rng = rand::rng();
 //! # let vecs = (0..1000).map(|_| (0..32).map(|_| rng.random::<f32>()).collect::<Vec<f32>>()).collect::<Vec<Vec<f32>>>();
 //!

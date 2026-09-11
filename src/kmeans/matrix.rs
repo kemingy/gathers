@@ -281,7 +281,7 @@ impl MatrixAssignmentWorkspace {
 #[cfg(test)]
 mod tests {
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     use seed_rand::seeded_rng;
 
     use super::MatrixAssignmentWorkspace;

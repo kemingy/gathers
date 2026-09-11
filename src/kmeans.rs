@@ -9,7 +9,7 @@ use std::time::Instant;
 use aligned_vec::AVec;
 use log::debug;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
@@ -437,7 +437,7 @@ impl KMeans {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
+    use rand::RngExt;
     use seed_rand::seeded_rng;
 
     use super::{KMeans, base_assign, base_assign_parallel, rabitq_assign, update_centroids};

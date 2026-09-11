@@ -142,30 +142,30 @@ pub fn argmin<S: Simd>(simd: S, vec: &[f32]) -> usize {
             let mut idx = pulp::cast_lossy([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
             for &[v0, v1, v2, v3] in vec4 {
                 let less = simd.less_than_f32s(v0, min0);
-                min0 = simd.select_f32s_m32s(less, v0, min0);
-                min_idx0 = simd.select_u32s_m32s(less, idx, min_idx0);
+                min0 = simd.select_f32s(less, v0, min0);
+                min_idx0 = simd.select_u32s(less, idx, min_idx0);
                 idx = simd.add_u32s(idx, inc);
 
                 let less = simd.less_than_f32s(v1, min1);
-                min1 = simd.select_f32s_m32s(less, v1, min1);
-                min_idx1 = simd.select_u32s_m32s(less, idx, min_idx1);
+                min1 = simd.select_f32s(less, v1, min1);
+                min_idx1 = simd.select_u32s(less, idx, min_idx1);
                 idx = simd.add_u32s(idx, inc);
 
                 let less = simd.less_than_f32s(v2, min2);
-                min2 = simd.select_f32s_m32s(less, v2, min2);
-                min_idx2 = simd.select_u32s_m32s(less, idx, min_idx2);
+                min2 = simd.select_f32s(less, v2, min2);
+                min_idx2 = simd.select_u32s(less, idx, min_idx2);
                 idx = simd.add_u32s(idx, inc);
 
                 let less = simd.less_than_f32s(v3, min3);
-                min3 = simd.select_f32s_m32s(less, v3, min3);
-                min_idx3 = simd.select_u32s_m32s(less, idx, min_idx3);
+                min3 = simd.select_f32s(less, v3, min3);
+                min_idx3 = simd.select_u32s(less, idx, min_idx3);
                 idx = simd.add_u32s(idx, inc);
             }
 
             for &v0 in vec1 {
                 let less = simd.less_than_f32s(v0, min0);
-                min0 = simd.select_f32s_m32s(less, v0, min0);
-                min_idx0 = simd.select_u32s_m32s(less, idx, min_idx0);
+                min0 = simd.select_f32s(less, v0, min0);
+                min_idx0 = simd.select_u32s(less, idx, min_idx0);
 
                 idx = simd.add_u32s(idx, inc);
             }
@@ -174,24 +174,24 @@ pub fn argmin<S: Simd>(simd: S, vec: &[f32]) -> usize {
                 let m = simd.mask_between_m32s(0, vec_tail.len() as u32).mask();
 
                 let v0 = simd.partial_load_f32s(vec_tail);
-                let v0 = simd.select_f32s_m32s(m, v0, infty);
+                let v0 = simd.select_f32s(m, v0, infty);
 
                 let less = simd.less_than_f32s(v0, min0);
-                min0 = simd.select_f32s_m32s(less, v0, min0);
-                min_idx0 = simd.select_u32s_m32s(less, idx, min_idx0);
+                min0 = simd.select_f32s(less, v0, min0);
+                min_idx0 = simd.select_u32s(less, idx, min_idx0);
             }
 
             let less = simd.less_than_f32s(min0, min2);
-            min0 = simd.select_f32s_m32s(less, min0, min2);
-            min_idx0 = simd.select_u32s_m32s(less, min_idx0, min_idx2);
+            min0 = simd.select_f32s(less, min0, min2);
+            min_idx0 = simd.select_u32s(less, min_idx0, min_idx2);
 
             let less = simd.less_than_f32s(min1, min3);
-            min1 = simd.select_f32s_m32s(less, min1, min3);
-            min_idx1 = simd.select_u32s_m32s(less, min_idx1, min_idx3);
+            min1 = simd.select_f32s(less, min1, min3);
+            min_idx1 = simd.select_u32s(less, min_idx1, min_idx3);
 
             let less = simd.less_than_f32s(min0, min1);
-            min0 = simd.select_f32s_m32s(less, min0, min1);
-            min_idx0 = simd.select_u32s_m32s(less, min_idx0, min_idx1);
+            min0 = simd.select_f32s(less, min0, min1);
+            min_idx0 = simd.select_u32s(less, min_idx0, min_idx1);
 
             let min = simd.reduce_min_f32s(min0);
             let is_min = simd.equal_f32s(min0, simd.splat_f32s(min));

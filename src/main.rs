@@ -6,7 +6,7 @@ use gathers::kmeans::KMeans;
 use gathers::utils::{as_continuous_vec, as_matrix, read_vecs, write_vecs};
 use log::debug;
 use logforth::append;
-use logforth::filter::EnvFilter;
+use logforth::filter::rustlog::RustLogFilterBuilder;
 
 #[derive(FromArgs, Debug)]
 /// gathers CLI args
@@ -28,8 +28,8 @@ struct Args {
 fn main() {
     let args: Args = argh::from_env();
 
-    let env_filter = EnvFilter::from_env_or("GATHERS_LOG", "DEBUG");
-    logforth::builder()
+    let env_filter = RustLogFilterBuilder::from_env_or("GATHERS_LOG", "INFO").build();
+    logforth::starter_log::builder()
         .dispatch(|d| d.filter(env_filter).append(append::Stderr::default()))
         .apply();
     debug!("{args:?}");

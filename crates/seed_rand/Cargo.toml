@@ -1,9 +1,12 @@
 [package]
 name = "seed-rand"
 version = "0.0.0"
-edition = "2024"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 rand.workspace = true

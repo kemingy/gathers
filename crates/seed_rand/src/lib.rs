@@ -1,5 +1,5 @@
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 const RANDOM_SEED_ENV: &str = "GATHERS_RANDOM_SEED";
 
