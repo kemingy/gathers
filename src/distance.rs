@@ -133,7 +133,7 @@ pub fn argmin(vec: &[f32]) -> usize {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
+    use rand::RngExt;
     use seed_rand::seeded_rng;
 
     use super::{
@@ -169,9 +169,9 @@ mod test {
                     if !is_x86_feature_detected!("avx2") {
                         continue;
                     }
-                    let diff = unsafe { crate::simd::l2_squared_distance(&lhs, &rhs) }
+                    let diff = unsafe { crate::simd::legacy::l2_squared_distance(&lhs, &rhs) }
                         - native_squared_euclidean(&lhs, &rhs);
-                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
+                    assert!(diff.abs() < 1e-5, "legacy simd diff: {diff} for dim: {dim}");
                 }
             }
         }
@@ -194,9 +194,9 @@ mod test {
                         continue;
                     }
                     assert_f32_close(
-                        unsafe { crate::simd::dot_product(&lhs, &rhs) },
+                        unsafe { crate::simd::legacy::dot_product(&lhs, &rhs) },
                         expected,
-                        "simd",
+                        "legacy simd",
                         dim,
                     );
                 }
@@ -219,8 +219,8 @@ mod test {
                     if !is_x86_feature_detected!("avx2") {
                         continue;
                     }
-                    let diff = unsafe { crate::simd::l2_norm(&vec) } - l2_norm_native(&vec);
-                    assert!(diff.abs() < 1e-5, "simd diff: {diff} for dim: {dim}");
+                    let diff = unsafe { crate::simd::legacy::l2_norm(&vec) } - l2_norm_native(&vec);
+                    assert!(diff.abs() < 1e-5, "legacy simd diff: {diff}");
                 }
             }
         }
@@ -239,7 +239,7 @@ mod test {
                     if !is_x86_feature_detected!("avx2") {
                         continue;
                     }
-                    assert_eq!(argmin(&vec), unsafe { crate::simd::argmin(&vec) });
+                    assert_eq!(argmin(&vec), unsafe { crate::simd::legacy::argmin(&vec) });
                 }
             }
         }

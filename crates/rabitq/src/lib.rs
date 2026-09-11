@@ -4,13 +4,17 @@ use core::f32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
-use rand::Rng;
+use rand::RngExt;
 use rand_distr::StandardNormal;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
 
 pub mod simd;
+pub use simd::{
+    asymmetric_binary_dot_product, binary_dot_product_native, min_max_residual,
+    min_max_residual_native, scalar_quantize, vector_binarize_query,
+};
 
 #[inline]
 fn squared_euclidean(lhs: &[f32], rhs: &[f32]) -> f32 {
@@ -161,151 +165,6 @@ fn project_into(vec: &[f32], orthogonal: &MatRef<f32>, output: &mut [f32]) {
         orthogonal,
         output,
     });
-}
-
-/// Get the min/max value of the residual of two vectors.
-#[inline]
-pub fn min_max_residual_native(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
-    let mut min = f32::MAX;
-    let mut max = f32::MIN;
-    for i in 0..res.len() {
-        res[i] = x[i] - y[i];
-        if res[i] < min {
-            min = res[i];
-        }
-        if res[i] > max {
-            max = res[i];
-        }
-    }
-    (min, max)
-}
-
-/// Interface of `min_max_residual`: get the min/max value of the residual of two vectors.
-#[inline]
-pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
-    struct Impl<'a> {
-        res: &'a mut [f32],
-        x: &'a [f32],
-        y: &'a [f32],
-    }
-
-    impl pulp::WithSimd for Impl<'_> {
-        type Output = (f32, f32);
-
-        #[inline(always)]
-        fn with_simd<S: pulp::Simd>(self, simd: S) -> Self::Output {
-            let Self { res, x, y } = self;
-            simd::pulp::min_max_residual(simd, res, x, y)
-        }
-    }
-
-    pulp::Arch::new().dispatch(Impl { res, x, y })
-}
-
-// Quantize the query residual vector.
-#[inline]
-fn scalar_quantize_native(
-    quantized: &mut [u8],
-    vec: &[f32],
-    lower_bound: f32,
-    multiplier: f32,
-) -> u32 {
-    let mut sum = 0u32;
-    for i in 0..quantized.len() {
-        let q = ((vec[i] - lower_bound) * multiplier).round() as u8;
-        quantized[i] = q;
-        sum += q as u32;
-    }
-    sum
-}
-
-/// Interface of `scalar_quantize`: scale vector to u8.
-#[inline]
-pub fn scalar_quantize(
-    quantized: &mut [u8],
-    vec: &[f32],
-    lower_bound: f32,
-    multiplier: f32,
-) -> u32 {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if simd::Avx2::is_available() {
-            simd::scalar_quantize(quantized, vec, lower_bound, multiplier)
-        } else {
-            scalar_quantize_native(quantized, vec, lower_bound, multiplier)
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        scalar_quantize_native(quantized, vec, lower_bound, multiplier)
-    }
-}
-
-/// Convert the vector to binary format (one value to multiple bits) and store in a u64 vector.
-#[inline]
-fn vector_binarize_query_native(vec: &[u8], binary: &mut [u64]) {
-    let length = vec.len();
-    for j in 0..THETA_LOG_DIM {
-        for i in 0..length {
-            binary[(i + j * length) / 64] |= (((vec[i] >> j) & 1) as u64) << (i % 64);
-        }
-    }
-}
-
-/// Interface of `vector_binarize_query`
-#[inline]
-pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    {
-        if simd::Avx2::is_available() {
-            simd::vector_binarize_query(vec, binary);
-        } else {
-            vector_binarize_query_native(vec, binary);
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-    {
-        vector_binarize_query_native(vec, binary);
-    }
-}
-
-/// Calculate the dot product of two binary vectors.
-#[inline]
-pub fn binary_dot_product_native(x: &[u64], y: &[u64]) -> u32 {
-    let mut res = 0;
-    for i in 0..x.len() {
-        res += (x[i] & y[i]).count_ones();
-    }
-    res
-}
-
-/// Calculate the dot product of two binary vectors with different lengths.
-///
-/// The length of `y` should be `x.len() * THETA_LOG_DIM`.
-#[inline]
-pub fn asymmetric_binary_dot_product(x: &[u64], y: &[u64]) -> u32 {
-    let mut res = 0;
-    let length = x.len();
-    assert_eq!(y.len(), length * THETA_LOG_DIM);
-    for i in 0..THETA_LOG_DIM {
-        let y_slice = &y[i * length..(i + 1) * length];
-        res += {
-            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-            {
-                if simd::Avx2::is_available() {
-                    unsafe { simd::binary_dot_product_simd(x, y_slice) << i }
-                    // crate::simd::binary_dot_product(x, y_slice) << i
-                } else {
-                    binary_dot_product_native(x, y_slice) << i
-                }
-            }
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
-            {
-                binary_dot_product_native(x, y_slice) << i
-            }
-        };
-    }
-    res
 }
 
 #[derive(Debug, Default)]
@@ -598,16 +457,12 @@ impl RaBitQ {
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
+    use rand::RngExt;
     use seed_rand::seeded_rng;
 
-    use super::{RaBitQ, min_max_residual, min_max_residual_native, squared_euclidean};
+    use super::{RaBitQ, SCALAR, min_max_residual, min_max_residual_native, squared_euclidean};
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    use super::{
-        SCALAR, THETA_LOG_DIM, binary_dot_product_native, scalar_quantize_native,
-        vector_binarize_query_native,
-    };
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    use super::{THETA_LOG_DIM, binary_dot_product_native};
     use crate::simd;
 
     #[test]
@@ -618,8 +473,9 @@ mod test {
 
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    #[allow(unsafe_code)]
     fn test_binary_dot_product() {
-        if !crate::simd::Avx2::is_available() {
+        if !crate::simd::x86::Avx2::is_available() {
             return;
         }
         let mut rng = seeded_rng();
@@ -631,11 +487,27 @@ mod test {
 
                 assert_eq!(
                     binary_dot_product_native(&x, &y),
-                    simd::binary_dot_product(&x, &y),
+                    simd::x86::binary_dot_product(&x, &y),
                 );
                 assert_eq!(binary_dot_product_native(&x, &y), unsafe {
-                    simd::binary_dot_product_simd(&x, &y)
+                    simd::x86::legacy::binary_dot_product(&x, &y)
                 },);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn test_binary_dot_product_aarch64() {
+        let mut rng = seeded_rng();
+        for _ in 0..100 {
+            for dim in [1, 2, 4, 8, 10] {
+                let x = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
+                let y = (0..dim).map(|_| rng.random::<u64>()).collect::<Vec<_>>();
+                assert_eq!(
+                    simd::native::binary_dot_product(&x, &y),
+                    simd::aarch64::binary_dot_product(&x, &y),
+                );
             }
         }
     }
@@ -643,7 +515,7 @@ mod test {
     #[test]
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_query_binarize() {
-        if !crate::simd::Avx2::is_available() {
+        if !crate::simd::x86::Avx2::is_available() {
             return;
         }
         let mut rng = seeded_rng();
@@ -652,31 +524,36 @@ mod test {
             for dim in [64, 128, 256, 320, 1024].into_iter() {
                 let x = (0..dim).map(|_| rng.random::<u8>()).collect::<Vec<u8>>();
                 let mut binary = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-                vector_binarize_query_native(&x, &mut binary);
+                simd::native::vector_binarize_query(&x, &mut binary);
                 let mut binary_simd = vec![0u64; (dim * THETA_LOG_DIM).div_ceil(64)];
-                simd::vector_binarize_query(&x, &mut binary_simd);
+                simd::x86::vector_binarize_query(&x, &mut binary_simd);
                 assert_eq!(binary, binary_simd);
             }
         }
     }
 
     #[test]
-    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn test_scalar_quantize() {
-        if !crate::simd::Avx2::is_available() {
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        if !simd::x86::Avx2::is_available() {
             return;
         }
+
         let mut rng = seeded_rng();
         for _ in 0..100 {
-            for dim in [64, 128, 256, 320, 1024].into_iter() {
+            for dim in [1, 15, 16, 17, 64, 128, 256, 320, 1024] {
                 let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let mut quantized = vec![0u8; dim];
                 let mut residual = vec![0.0; dim];
                 let (upper_bound, lower_bound) = min_max_residual_native(&mut residual, &x, &y);
                 let multiplier = ((upper_bound - lower_bound) * SCALAR).recip();
-                let sum =
-                    scalar_quantize_native(&mut quantized, &residual, lower_bound, multiplier);
+                let sum = simd::native::scalar_quantize(
+                    &mut quantized,
+                    &residual,
+                    lower_bound,
+                    multiplier,
+                );
                 let mut quantized_simd = vec![0u8; dim];
                 let sum_simd =
                     simd::scalar_quantize(&mut quantized_simd, &residual, lower_bound, multiplier);
@@ -687,6 +564,7 @@ mod test {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn test_min_max_residual() {
         let mut rng = seeded_rng();
         for _ in 0..100 {
@@ -703,6 +581,16 @@ mod test {
                 assert_eq!(max, max_pulp);
                 assert_eq!(res, res_pulp);
 
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let mut res_simd = vec![0.0; dim];
+                    let (min_simd, max_simd) =
+                        simd::aarch64::legacy::min_max_residual(&mut res_simd, &x, &y);
+                    assert_eq!(min, min_simd);
+                    assert_eq!(max, max_simd);
+                    assert_eq!(res, res_simd);
+                }
+
                 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
                 {
                     if !is_x86_feature_detected!("avx2") {
@@ -710,7 +598,7 @@ mod test {
                     }
                     let mut res_simd = vec![0.0; dim];
                     let (min_simd, max_simd) =
-                        unsafe { simd::min_max_residual(&mut res_simd, &x, &y) };
+                        unsafe { simd::x86::legacy::min_max_residual(&mut res_simd, &x, &y) };
 
                     assert_eq!(min, min_simd);
                     assert_eq!(max, max_simd);

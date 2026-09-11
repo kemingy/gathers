@@ -1,16 +1,19 @@
 [package]
 name = "rabitq"
 version = "0.0.0"
-edition = "2024"
-rust-version = "1.85"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 bytemuck.workspace = true
 faer.workspace = true
 pulp.workspace = true
 rand.workspace = true
-rand_distr = "0.5.0"
+rand_distr = "0.6.0"
 rayon.workspace = true
 
 [dev-dependencies]

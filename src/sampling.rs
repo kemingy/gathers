@@ -1,7 +1,7 @@
 //! Down sampling methods.
 
 use num_traits::Num;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Subsample a given number of vectors from a list of vectors.
 pub fn subsample(n_sample: usize, vecs: &[f32], dim: usize) -> Vec<Vec<f32>> {

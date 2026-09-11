@@ -1,8 +1,10 @@
-use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use gathers::distance::Distance;
 use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
 use rabitq::RaBitQ;
-use rand::Rng;
+use rand::RngExt;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
