@@ -13,7 +13,6 @@ bytemuck.workspace = true
 faer.workspace = true
 pulp.workspace = true
 rand.workspace = true
-rand_distr = "0.6.0"
 rayon.workspace = true
 
 [dev-dependencies]

@@ -4,11 +4,13 @@ use core::f32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
-use rand::RngExt;
-use rand_distr::StandardNormal;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
 };
+
+pub mod rotator;
+
+use rotator::FhtKacRotator;
 
 pub mod simd;
 pub use simd::{
@@ -127,46 +129,6 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
     pulp::Arch::new().dispatch(Impl { vec, orthogonal })
 }
 
-#[inline]
-fn project_into(vec: &[f32], orthogonal: &MatRef<f32>, output: &mut [f32]) {
-    struct Impl<'a, 'b> {
-        vec: &'a [f32],
-        orthogonal: &'a MatRef<'b, f32>,
-        output: &'a mut [f32],
-    }
-
-    impl pulp::WithSimd for Impl<'_, '_> {
-        type Output = ();
-
-        #[inline(always)]
-        fn with_simd<S: pulp::Simd>(self, simd: S) {
-            let Self {
-                vec,
-                orthogonal,
-                output,
-            } = self;
-            for (i, value) in output.iter_mut().enumerate() {
-                *value = simd::pulp::dot_product(
-                    simd,
-                    vec,
-                    orthogonal
-                        .col(i)
-                        .try_as_col_major()
-                        .expect("col major")
-                        .as_slice(),
-                );
-            }
-        }
-    }
-
-    assert_eq!(output.len(), orthogonal.ncols());
-    pulp::Arch::new().dispatch(Impl {
-        vec,
-        orthogonal,
-        output,
-    });
-}
-
 #[derive(Debug, Default)]
 struct Metrics {
     pub rough: AtomicU64,
@@ -213,7 +175,7 @@ impl Metrics {
 pub struct RaBitQ {
     centroids: Mat<f32>,
     mean: Row<f32>,
-    orthogonal: Mat<f32>,
+    rotator: FhtKacRotator,
     factors: Vec<Factor>,
     binary_vec: Vec<u64>,
     sorted_to_original: Vec<usize>,
@@ -253,12 +215,18 @@ impl RaBitQ {
         });
         let dim_sqrt = (dim_pad as f32).sqrt();
 
-        // orthogonal matrix
         let mut rng = rand::rng();
-        let random: Mat<f32> = Mat::from_fn(dim_pad, dim_pad, |_, _| rng.sample(StandardNormal));
-        let orthogonal = random.qr().compute_Q();
-
-        let projected = &centroids_mat * &orthogonal;
+        let rotator = FhtKacRotator::new(dim, dim_pad, &mut rng);
+        let mut projected_data = vec![0.0; num_centroids * dim_pad];
+        for (centroid, projected) in centroids
+            .chunks_exact(dim)
+            .zip(projected_data.chunks_exact_mut(dim_pad))
+        {
+            rotator.rotate(centroid, projected);
+        }
+        let projected = Mat::from_fn(num_centroids, dim_pad, |i, j| {
+            projected_data[i * dim_pad + j]
+        });
         let mut factors = vec![Factor::default(); num_centroids];
         let mut xc_distances = vec![0.0; num_centroids];
         let mut x_dot_product = vec![0.0; num_centroids];
@@ -318,7 +286,7 @@ impl RaBitQ {
 
         RaBitQ {
             centroids: centroids_col_based,
-            orthogonal,
+            rotator,
             mean,
             binary_vec,
             factors,
@@ -386,11 +354,7 @@ impl RaBitQ {
         workspace.query[..query.len()].copy_from_slice(query);
         workspace.binary.fill(0);
 
-        project_into(
-            &workspace.query,
-            &self.orthogonal.as_ref(),
-            &mut workspace.projected,
-        );
+        self.rotator.rotate(query, &mut workspace.projected);
         let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
         let query_center_distance_squared = squared_euclidean(&workspace.projected, mean_slice);
 
@@ -638,28 +602,30 @@ mod test {
 
     #[test]
     fn test_retrieval_matches_brute_force_after_centroid_sorting() {
-        let dim = 64;
-        let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
-        let mut centroids = vec![0.0; values.len() * dim];
-        for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
-            centroid[0] = value;
-        }
-        let rabitq = RaBitQ::new(&centroids, dim);
+        for dim in [64, 65] {
+            let values = [-30.0, -2.0, 0.0, 1.0, 8.0, 40.0];
+            let mut centroids = vec![0.0; values.len() * dim];
+            for (centroid, &value) in centroids.chunks_exact_mut(dim).zip(&values) {
+                centroid[0] = value;
+            }
+            let rabitq = RaBitQ::new(&centroids, dim);
 
-        assert_ne!(
-            rabitq.sorted_to_original,
-            (0..values.len()).collect::<Vec<_>>()
-        );
-        for query in centroids.chunks_exact(dim) {
-            let expected = centroids
-                .chunks_exact(dim)
-                .enumerate()
-                .min_by(|(_, left), (_, right)| {
-                    squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
-                })
-                .map(|(index, _)| index)
-                .unwrap();
-            assert_eq!(rabitq.retrieve_top_one(query), expected);
+            assert_ne!(
+                rabitq.sorted_to_original,
+                (0..values.len()).collect::<Vec<_>>(),
+                "dimension {dim}",
+            );
+            for query in centroids.chunks_exact(dim) {
+                let expected = centroids
+                    .chunks_exact(dim)
+                    .enumerate()
+                    .min_by(|(_, left), (_, right)| {
+                        squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
+                    })
+                    .map(|(index, _)| index)
+                    .unwrap();
+                assert_eq!(rabitq.retrieve_top_one(query), expected, "dimension {dim}");
+            }
         }
     }
 }
