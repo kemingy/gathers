@@ -387,6 +387,33 @@ pub fn binary_ip_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+pub fn rotator_benchmark(c: &mut Criterion) {
+    use rabitq::rotator::FhtKacRotator;
+
+    let mut rng = seed_rand::seeded_rng();
+    let mut group = c.benchmark_group("fht_kac_rotation");
+    for dim in [64usize, 128, 960, 1024, 1088, 2048] {
+        let padded_dim = dim.div_ceil(64) * 64;
+        let rotator = FhtKacRotator::new(dim, padded_dim, &mut rng);
+        let input = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<_>>();
+        let mut output = vec![0.0; padded_dim];
+
+        group.bench_with_input(BenchmarkId::new("scalar", dim), &dim, |b, _| {
+            b.iter(|| {
+                rotator.rotate_scalar(&input, &mut output);
+                std::hint::black_box(&output);
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("pulp_dispatch", dim), &dim, |b, _| {
+            b.iter(|| {
+                rotator.rotate(&input, &mut output);
+                std::hint::black_box(&output);
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(l2_benches, l2_distance_benchmark);
 criterion_group!(ip_benches, ip_distance_benchmark);
 criterion_group!(norm_benches, l2_norm_benchmark);
@@ -398,6 +425,7 @@ criterion_group!(
 );
 criterion_group!(scalar_quantize_benches, scalar_quantize_benchmark);
 criterion_group!(binary_ip_benches, binary_ip_benchmark);
+criterion_group!(rotator_benches, rotator_benchmark);
 criterion_main!(
     l2_benches,
     ip_benches,
@@ -407,4 +435,5 @@ criterion_main!(
     vector_binarize_query_benches,
     scalar_quantize_benches,
     binary_ip_benches,
+    rotator_benches,
 );
