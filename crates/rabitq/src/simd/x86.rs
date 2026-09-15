@@ -3,6 +3,7 @@
 use core::iter;
 
 use crate::THETA_LOG_DIM;
+use crate::fastscan::BATCH_SIZE;
 
 #[allow(unsafe_code)]
 pub mod legacy;
@@ -140,6 +141,67 @@ pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
             }
         },
     )
+}
+
+/// Accumulate asymmetric binary dot products for 32 packed vectors.
+pub(crate) fn fastscan_accumulate(
+    simd: Avx2,
+    codes: &[u8],
+    lut: &[u8],
+    result: &mut [u32; BATCH_SIZE],
+) {
+    use ::pulp;
+
+    assert_eq!(codes.len(), lut.len());
+    let Avx2 { avx, avx2, .. } = simd;
+
+    simd.vectorize(
+        #[inline(always)]
+        || {
+            let low_mask = avx._mm256_set1_epi8(0x0f);
+            result.fill(0);
+
+            // Each iteration combines two four-coordinate groups. As on NEON, bound each
+            // u16 segment to 1,024 groups before widening into the u32 result.
+            for (codes, lut) in codes.chunks(16 * 1_024).zip(lut.chunks(16 * 1_024)) {
+                let mut lower_sum = avx._mm256_setzero_si256();
+                let mut upper_sum = avx._mm256_setzero_si256();
+                let (codes, code_tail) = codes.as_chunks::<32>();
+                let (luts, lut_tail) = lut.as_chunks::<32>();
+                assert!(code_tail.is_empty());
+                assert!(lut_tail.is_empty());
+
+                for (codes, lut) in codes.iter().zip(luts) {
+                    let codes = pulp::cast(*codes);
+                    let lut = pulp::cast(*lut);
+                    let lower =
+                        avx2._mm256_shuffle_epi8(lut, avx2._mm256_and_si256(codes, low_mask));
+                    let upper = avx2._mm256_shuffle_epi8(
+                        lut,
+                        avx2._mm256_and_si256(avx2._mm256_srli_epi16::<4>(codes), low_mask),
+                    );
+
+                    let lower0 = avx2._mm256_cvtepu8_epi16(avx._mm256_castsi256_si128(lower));
+                    let lower1 =
+                        avx2._mm256_cvtepu8_epi16(avx2._mm256_extracti128_si256::<1>(lower));
+                    lower_sum =
+                        avx2._mm256_add_epi16(lower_sum, avx2._mm256_add_epi16(lower0, lower1));
+                    let upper0 = avx2._mm256_cvtepu8_epi16(avx._mm256_castsi256_si128(upper));
+                    let upper1 =
+                        avx2._mm256_cvtepu8_epi16(avx2._mm256_extracti128_si256::<1>(upper));
+                    upper_sum =
+                        avx2._mm256_add_epi16(upper_sum, avx2._mm256_add_epi16(upper0, upper1));
+                }
+
+                let lower: [u16; 16] = pulp::cast(lower_sum);
+                let upper: [u16; 16] = pulp::cast(upper_sum);
+                for (lane, (&lower, &upper)) in lower.iter().zip(&upper).enumerate() {
+                    result[lane] += u32::from(lower);
+                    result[lane + 16] += u32::from(upper);
+                }
+            }
+        },
+    );
 }
 
 /// Compute the binary dot product of two vectors.

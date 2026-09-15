@@ -7,8 +7,10 @@ use faer::{Col, Mat, MatRef, Row};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
 
+mod fastscan;
 pub mod rotator;
 
+use fastscan::BinaryVectors;
 use rotator::FhtKacRotator;
 
 pub mod simd;
@@ -129,6 +131,7 @@ pub struct RaBitQWorkspace {
     quantized: Vec<u8>,
     binary: Vec<u64>,
     residual: Vec<f32>,
+    fastscan: fastscan::Workspace,
 }
 
 impl RaBitQWorkspace {
@@ -140,6 +143,7 @@ impl RaBitQWorkspace {
             quantized: vec![0; dim],
             binary: vec![0; (dim * THETA_LOG_DIM).div_ceil(64)],
             residual: vec![0.0; dim],
+            fastscan: fastscan::Workspace::new(dim),
         }
     }
 }
@@ -164,11 +168,19 @@ pub struct RaBitQ {
     mean: Row<f32>,
     rotator: FhtKacRotator,
     factors: Vec<Factor>,
-    binary_vec: Vec<u64>,
+    binary_vec: BinaryVectors,
     sorted_to_original: Vec<usize>,
     input_dim: usize,
     dim: usize,
     metrics: Metrics,
+}
+
+struct QueryFactors {
+    center_distance_squared: f32,
+    center_distance: f32,
+    lower_bound: f32,
+    scalar_sum: u32,
+    delta: f32,
 }
 
 impl RaBitQ {
@@ -257,10 +269,11 @@ impl RaBitQ {
             .into_iter()
             .map(|(original_index, _)| original_index)
             .collect::<Vec<_>>();
-        let binary_vec = sorted_to_original
+        let sorted_binary_vec = sorted_to_original
             .iter()
             .flat_map(|&original_index| binary_vec[original_index].clone())
-            .collect();
+            .collect::<Vec<_>>();
+        let binary_vec = BinaryVectors::new(sorted_binary_vec, num_centroids, dim_pad);
         let factors: Vec<Factor> = sorted_to_original
             .iter()
             .map(|&original_index| factors[original_index])
@@ -339,8 +352,6 @@ impl RaBitQ {
         );
         workspace.query.fill(0.0);
         workspace.query[..query.len()].copy_from_slice(query);
-        workspace.binary.fill(0);
-
         self.rotator.rotate(query, &mut workspace.projected);
         let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
         let query_center_distance_squared = squared_euclidean(&workspace.projected, mean_slice);
@@ -355,27 +366,57 @@ impl RaBitQ {
             lower_bound,
             one_over_delta,
         );
-        vector_binarize_query(&workspace.quantized, &mut workspace.binary);
+        let query_center_distance = query_center_distance_squared.sqrt();
+        let query_factors = QueryFactors {
+            center_distance_squared: query_center_distance_squared,
+            center_distance: query_center_distance,
+            lower_bound,
+            scalar_sum,
+            delta,
+        };
+        match &self.binary_vec {
+            BinaryVectors::Row(binary_vec) => {
+                workspace.binary.fill(0);
+                vector_binarize_query(&workspace.quantized, &mut workspace.binary);
+                let rough_scores = binary_vec
+                    .chunks_exact(workspace.binary.len() / THETA_LOG_DIM)
+                    .map(|binary| asymmetric_binary_dot_product(binary, &workspace.binary));
+                self.select_top_one(rough_scores, &workspace.query, &query_factors)
+            }
+            BinaryVectors::FastScan(fastscan) => {
+                workspace.fastscan.prepare(&workspace.quantized);
+                let rough_scores = fastscan
+                    .batches()
+                    .flat_map(|binary| {
+                        fastscan.accumulate(binary, &mut workspace.fastscan);
+                        workspace.fastscan.scores()
+                    })
+                    .take(self.len());
+                self.select_top_one(rough_scores, &workspace.query, &query_factors)
+            }
+        }
+    }
 
+    fn select_top_one(
+        &self,
+        rough_scores: impl Iterator<Item = u32>,
+        query: &[f32],
+        query_factors: &QueryFactors,
+    ) -> (usize, u64) {
         let mut threshold = f32::MAX;
         let mut min_index = 0;
         let mut precise = 0;
-        let query_center_distance = query_center_distance_squared.sqrt();
-        let offset = workspace.binary.len() / THETA_LOG_DIM;
-        for (position, &original_index) in self.sorted_to_original.iter().enumerate() {
+        for ((position, &original_index), binary_dot_product) in
+            self.sorted_to_original.iter().enumerate().zip(rough_scores)
+        {
             let factor = &self.factors[position];
             let rough = factor.center_distance_square
-                + query_center_distance_squared
-                + lower_bound * factor.factor_ppc
-                + (2.0
-                    * asymmetric_binary_dot_product(
-                        &self.binary_vec[position * offset..(position + 1) * offset],
-                        &workspace.binary,
-                    ) as f32
-                    - scalar_sum as f32)
+                + query_factors.center_distance_squared
+                + query_factors.lower_bound * factor.factor_ppc
+                + (2.0 * binary_dot_product as f32 - query_factors.scalar_sum as f32)
                     * factor.factor_ip
-                    * delta
-                - factor.error_bound * query_center_distance;
+                    * query_factors.delta
+                - factor.error_bound * query_factors.center_distance;
             if rough < threshold {
                 precise += 1;
                 let accurate = squared_euclidean(
@@ -384,7 +425,7 @@ impl RaBitQ {
                         .try_as_col_major()
                         .expect("col major")
                         .as_slice(),
-                    &workspace.query,
+                    query,
                 );
                 if accurate < threshold {
                     threshold = accurate;
