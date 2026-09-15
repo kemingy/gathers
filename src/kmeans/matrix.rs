@@ -454,6 +454,40 @@ mod tests {
     }
 
     #[test]
+    fn test_matrix_dot_product_matches_direct_across_centroid_tiles() {
+        let mut rng = seeded_rng();
+        let dim = 64;
+        let num_vectors = 513;
+        let num_centroids = PREFERRED_CENTROID_BLOCK_SIZE + 1;
+        let vecs = (0..num_vectors * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let centroids = (0..num_centroids * dim)
+            .map(|_| rng.random::<f32>())
+            .collect::<Vec<_>>();
+        let mut expected = vec![0; num_vectors];
+        let mut actual = vec![0; num_vectors];
+
+        base_assign(
+            &vecs,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        let mut workspace = MatrixAssignmentWorkspace::try_new(
+            &vecs,
+            num_centroids,
+            dim,
+            Distance::NegativeDotProduct,
+        )
+        .unwrap();
+        workspace.assign(&vecs, &centroids, dim, &mut actual);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn test_matrix_assignment_matches_direct_assignment() {
         let mut rng = seeded_rng();
         let dim = 64;
