@@ -6,6 +6,125 @@
 pub(crate) const BATCH_SIZE: usize = 32;
 const LANES: usize = BATCH_SIZE / 2;
 const DIMS_PER_CODE: usize = 4;
+const MIN_CENTROIDS: usize = 256;
+
+#[cfg(target_arch = "aarch64")]
+mod backend {
+    use pulp::aarch64::Neon;
+
+    pub(crate) type Backend = Neon;
+
+    pub(crate) fn detect() -> Option<Backend> {
+        Neon::try_new()
+    }
+
+    pub(crate) fn accumulate(
+        backend: Backend,
+        codes: &[u8],
+        lut: &[u8],
+        result: &mut [u32; crate::fastscan::BATCH_SIZE],
+    ) {
+        crate::simd::aarch64::fastscan_accumulate(backend, codes, lut, result);
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod backend {
+    use crate::simd::x86::Avx2;
+
+    pub(crate) type Backend = Avx2;
+
+    pub(crate) fn detect() -> Option<Backend> {
+        Avx2::try_new()
+    }
+
+    pub(crate) fn accumulate(
+        backend: Backend,
+        codes: &[u8],
+        lut: &[u8],
+        result: &mut [u32; crate::fastscan::BATCH_SIZE],
+    ) {
+        crate::simd::x86::fastscan_accumulate(backend, codes, lut, result);
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+mod backend {
+    #[derive(Clone, Copy)]
+    pub(crate) struct Backend;
+
+    pub(crate) fn detect() -> Option<Backend> {
+        None
+    }
+
+    pub(crate) fn accumulate(
+        _backend: Backend,
+        _codes: &[u8],
+        _lut: &[u8],
+        _result: &mut [u32; crate::fastscan::BATCH_SIZE],
+    ) {
+        unreachable!("FastScan has no backend on this architecture");
+    }
+}
+
+pub(crate) enum BinaryVectors {
+    Row(Vec<u64>),
+    FastScan(FastScan),
+}
+
+impl BinaryVectors {
+    pub(crate) fn new(codes: Vec<u64>, num_vectors: usize, dim: usize) -> Self {
+        if num_vectors < MIN_CENTROIDS {
+            return Self::Row(codes);
+        }
+        let Some(backend) = backend::detect() else {
+            return Self::Row(codes);
+        };
+        Self::FastScan(FastScan {
+            codes: pack_codes(&codes, num_vectors, dim),
+            backend,
+            bytes_per_batch: dim / DIMS_PER_CODE * LANES,
+        })
+    }
+}
+
+pub(crate) struct FastScan {
+    codes: Vec<u8>,
+    backend: backend::Backend,
+    bytes_per_batch: usize,
+}
+
+impl FastScan {
+    pub(crate) fn batches(&self) -> impl Iterator<Item = &[u8]> {
+        self.codes.chunks_exact(self.bytes_per_batch)
+    }
+
+    pub(crate) fn accumulate(&self, codes: &[u8], workspace: &mut Workspace) {
+        backend::accumulate(self.backend, codes, &workspace.lut, &mut workspace.scores);
+    }
+}
+
+pub(crate) struct Workspace {
+    lut: Vec<u8>,
+    scores: [u32; BATCH_SIZE],
+}
+
+impl Workspace {
+    pub(crate) fn new(dim: usize) -> Self {
+        Self {
+            lut: vec![0; dim / DIMS_PER_CODE * 16],
+            scores: [0; BATCH_SIZE],
+        }
+    }
+
+    pub(crate) fn prepare(&mut self, query: &[u8]) {
+        build_lut(query, &mut self.lut);
+    }
+
+    pub(crate) fn scores(&self) -> [u32; BATCH_SIZE] {
+        self.scores
+    }
+}
 
 pub(crate) fn pack_codes(codes: &[u64], num_vectors: usize, dim: usize) -> Vec<u8> {
     assert_eq!(dim % 64, 0);
@@ -84,8 +203,16 @@ mod tests {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 
-    use super::{BATCH_SIZE, accumulate_native, build_lut, pack_codes};
+    use super::{BATCH_SIZE, accumulate_native, backend, build_lut, pack_codes};
     use crate::{THETA_LOG_DIM, simd, vector_binarize_u64};
+
+    fn accumulate_simd(codes: &[u8], lut: &[u8], result: &mut [u32; BATCH_SIZE]) -> bool {
+        let Some(simd) = backend::detect() else {
+            return false;
+        };
+        backend::accumulate(simd, codes, lut, result);
+        true
+    }
 
     #[test]
     fn packed_scores_match_asymmetric_binary_dot_products() {
@@ -118,8 +245,9 @@ mod tests {
                 let mut actual = [0; BATCH_SIZE];
                 accumulate_native(packed, &lut, &mut actual);
                 let mut simd_actual = [0; BATCH_SIZE];
-                simd::aarch64::fastscan_accumulate(packed, &lut, &mut simd_actual);
-                assert_eq!(simd_actual, actual);
+                if accumulate_simd(packed, &lut, &mut simd_actual) {
+                    assert_eq!(simd_actual, actual);
+                }
                 let batch_start = batch * BATCH_SIZE;
                 for (lane, &actual) in actual
                     .iter()
@@ -151,7 +279,8 @@ mod tests {
         assert_eq!(expected, [dim as u32 * 15; BATCH_SIZE]);
 
         let mut actual = [0; BATCH_SIZE];
-        simd::aarch64::fastscan_accumulate(&packed, &lut, &mut actual);
-        assert_eq!(actual, expected);
+        if accumulate_simd(&packed, &lut, &mut actual) {
+            assert_eq!(actual, expected);
+        }
     }
 }

@@ -177,9 +177,13 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
     }
 }
 
-pub(crate) fn fastscan_accumulate(codes: &[u8], lut: &[u8], result: &mut [u32; BATCH_SIZE]) {
+pub(crate) fn fastscan_accumulate(
+    simd: Neon,
+    codes: &[u8],
+    lut: &[u8],
+    result: &mut [u32; BATCH_SIZE],
+) {
     assert_eq!(codes.len(), lut.len());
-    let simd = Neon::try_new().expect("Neon is part of the AArch64 baseline");
     let low_mask = simd.neon.vdupq_n_u8(0x0f);
     result.fill(0);
 
