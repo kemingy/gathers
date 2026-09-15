@@ -12,6 +12,7 @@ use rabitq::{
     vector_binarize_query,
 };
 use rand::RngExt;
+use seed_rand::seeded_rng;
 
 // Backend names are intentionally independent of instruction-set versions:
 // - native: scalar baseline
@@ -20,7 +21,7 @@ use rand::RngExt;
 // - simd_<arch>: architecture-specific intrinsic kernels
 
 pub fn l2_norm_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("l2_norm");
     for dim in [64, 118, 124, 128, 512, 1024] {
@@ -50,7 +51,7 @@ pub fn l2_norm_benchmark(c: &mut Criterion) {
 
 #[allow(unsafe_code)]
 pub fn min_max_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("min_max");
     for dim in [64, 118, 124, 128, 512, 1024] {
@@ -153,7 +154,7 @@ fn vector_binarize_query_native(vec: &[u8], binary: &mut [u64]) {
 }
 
 pub fn vector_binarize_query_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
     let mut group = c.benchmark_group("vector_binarize_query");
 
     for dim in [64, 256, 1024, 4096] {
@@ -186,7 +187,7 @@ pub fn vector_binarize_query_benchmark(c: &mut Criterion) {
 }
 
 pub fn scalar_quantize_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
     let mut group = c.benchmark_group("scalar_quantize");
 
     for dim in [64, 128, 512, 1024] {
@@ -229,7 +230,7 @@ pub fn scalar_quantize_benchmark(c: &mut Criterion) {
 }
 
 pub fn argmin_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("argmin");
     for dim in [64, 118, 124, 128, 512, 1024] {
@@ -258,7 +259,7 @@ pub fn argmin_benchmark(c: &mut Criterion) {
 }
 
 pub fn l2_distance_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("l2_distance");
     for dim in [64, 118, 124, 128, 512, 1024] {
@@ -300,7 +301,7 @@ pub fn l2_distance_benchmark(c: &mut Criterion) {
 }
 
 pub fn ip_distance_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("dot_product");
     for dim in [64, 118, 124, 128, 512, 1024] {
@@ -339,7 +340,7 @@ pub fn ip_distance_benchmark(c: &mut Criterion) {
 
 #[allow(unsafe_code)]
 pub fn binary_ip_benchmark(c: &mut Criterion) {
-    let mut rng = rand::rng();
+    let mut rng = seeded_rng();
 
     let mut group = c.benchmark_group("binary_dot_product");
     for dim in [1, 2, 4, 8, 10, 12, 14, 16, 20, 24, 28, 32, 36] {
@@ -390,7 +391,7 @@ pub fn binary_ip_benchmark(c: &mut Criterion) {
 pub fn rotator_benchmark(c: &mut Criterion) {
     use rabitq::rotator::FhtKacRotator;
 
-    let mut rng = seed_rand::seeded_rng();
+    let mut rng = seeded_rng();
     let mut group = c.benchmark_group("fht_kac_rotation");
     for dim in [64usize, 128, 960, 1024, 1088, 2048] {
         let padded_dim = dim.div_ceil(64) * 64;

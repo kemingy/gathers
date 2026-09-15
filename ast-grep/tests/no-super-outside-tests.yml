@@ -1,0 +1,23 @@
+id: no-super-outside-tests
+valid:
+  - use crate::parent::Item;
+  - pub(crate) struct Item;
+  - 'const MESSAGE: &str = "super is text here";'
+  - use crate::superman::Item;
+  - |
+      mod tests {
+          use super::Item;
+      }
+  - |
+      mod tests {
+          mod nested {
+              use super::super::Item;
+          }
+      }
+invalid:
+  - use super::Item;
+  - pub(super) struct Item;
+  - |
+      mod helpers {
+          use super::Item;
+      }

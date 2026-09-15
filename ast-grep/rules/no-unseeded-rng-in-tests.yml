@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-unseeded-rng-in-tests
+language: Rust
+severity: error
+message: Randomized tests must use `seed_rand::seeded_rng()`.
+note: |-
+  The shared helper prints its generated seed so failures can be reproduced
+  with GATHERS_RANDOM_SEED. Explicit fixed seeds remain valid for regression fixtures.
+rule:
+  all:
+    - any:
+        - pattern: rand::rng()
+        - pattern: ::rand::rng()
+        - all:
+            - kind: use_declaration
+            - regex: '^use\s+(::)?rand::'
+            - regex: '\brng\b'
+    - inside:
+        pattern: mod tests { $$$BODY }
+        stopBy: end

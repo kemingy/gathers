@@ -132,7 +132,7 @@ pub fn argmin(vec: &[f32]) -> usize {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 

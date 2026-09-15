@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-nonstandard-wildcard-imports
+language: Rust
+severity: error
+message: Wildcard imports are only allowed from `std`, `core`, or `alloc`.
+note: |-
+  Import explicit names from project and third-party modules so API additions do
+  not silently change name resolution. Standard-library wildcard imports remain allowed.
+rule:
+  all:
+    - kind: use_declaration
+    - has:
+        kind: use_wildcard
+        stopBy: end
+    - not:
+        regex: '^(pub(\([^)]*\))?\s+)?use\s+(::)?(std|core|alloc)::'

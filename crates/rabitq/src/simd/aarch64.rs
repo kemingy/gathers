@@ -34,7 +34,7 @@ pub fn vector_binarize_query(vec: &[u8], binary: &mut [u64]) {
         }
 
         let chunks = vec.len() / 64;
-        for (chunk_index, chunk) in vec.chunks_exact(64).enumerate() {
+        for (chunk_index, chunk) in vec.as_chunks::<64>().0.iter().enumerate() {
             let values = [
                 unsafe { simd.neon.vld1q_u8(chunk.as_ptr()) },
                 unsafe { simd.neon.vld1q_u8(chunk.as_ptr().add(16)) },

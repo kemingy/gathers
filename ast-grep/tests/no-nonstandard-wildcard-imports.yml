@@ -1,0 +1,13 @@
+id: no-nonstandard-wildcard-imports
+valid:
+  - use std::arch::x86_64::*;
+  - use core::arch::aarch64::*;
+  - use alloc::collections::*;
+  - pub use std::sync::*;
+  - pub(crate) use ::std::{arch::aarch64::*, hint};
+  - use rayon::iter::ParallelIterator;
+invalid:
+  - use rayon::prelude::*;
+  - use super::*;
+  - pub use crate::api::*;
+  - use dependency::{module::*, Item};

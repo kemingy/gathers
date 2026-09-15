@@ -10,7 +10,8 @@ use aligned_vec::AVec;
 use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
-use rayon::prelude::{IndexedParallelIterator, ParallelIterator, ParallelSlice, ParallelSliceMut};
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
@@ -436,7 +437,7 @@ impl KMeans {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 
