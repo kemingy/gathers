@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-unseeded-rng-in-benches
+language: Rust
+severity: error
+message: Benchmarks must use `seed_rand::seeded_rng()`.
+note: |-
+  Reproducible inputs make before/after benchmark comparisons meaningful.
+  Set GATHERS_RANDOM_SEED to replay the same generated data.
+files:
+  - benches/**/*.rs
+rule:
+  any:
+    - pattern: rand::rng()
+    - pattern: ::rand::rng()
+    - all:
+        - kind: use_declaration
+        - regex: '^use\s+(::)?rand::'
+        - regex: '\brng\b'

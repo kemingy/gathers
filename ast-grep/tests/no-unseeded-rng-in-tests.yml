@@ -1,0 +1,35 @@
+id: no-unseeded-rng-in-tests
+valid:
+  - |
+      mod tests {
+          let mut rng = seed_rand::seeded_rng();
+      }
+  - |
+      mod tests {
+          let mut rng = StdRng::seed_from_u64(7);
+      }
+  - |
+      fn production_code() {
+          let mut rng = rand::rng();
+      }
+invalid:
+  - |
+      mod tests {
+          let mut rng = rand::rng();
+      }
+  - |
+      mod tests {
+          let mut rng = ::rand::rng();
+      }
+  - |
+      mod tests {
+          use rand::rng;
+      }
+  - |
+      mod tests {
+          use ::rand::rng;
+      }
+  - |
+      mod tests {
+          use rand::{rng, RngExt};
+      }

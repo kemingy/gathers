@@ -20,6 +20,7 @@ The root Cargo workspace contains the public `gathers` crate and two internal cr
   workspace and has its own `Cargo.toml` and lockfile.
 - `benches/`: Criterion Rust benchmarks and comparison scripts. Keep input generation and cloning
   outside timed routines.
+- `ast-grep/` and `sgconfig.yml`: repository-specific Rust lint rules and their rule tests.
 - `scripts/`: development and data-generation utilities.
 
 Put reusable clustering behavior in the root library, not in `main.rs` or the Python binding. Keep
@@ -33,6 +34,8 @@ Use the Makefile targets as the normal repository workflow:
 
 - `make format`: format Rust with nightly rustfmt and fix Python Ruff issues.
 - `make lint`: check Rust formatting, run Clippy with warnings denied, and check Python with Ruff.
+- `make lint-ast`: scan the repository with its ast-grep rules.
+- `make test-ast`: validate and test the ast-grep rules.
 - `make test-rust`: run the Rust workspace tests verbosely.
 - `make install-python`: install the Python package in editable mode.
 - `make test-python`: install the editable extension and run `python/tests`.
@@ -154,6 +157,8 @@ to x86 code must still compile and pass through the fallback on non-x86 CI targe
   performance claims. Distinguish wall-clock improvements from isolated kernel improvements.
 - Run `make lint` and the relevant targeted tests before review; run `make test` when Rust/Python
   integration or public behavior changes.
+- Run `make lint-ast test-ast` after changing Rust sources or ast-grep rules. These checks are
+  intentionally separate from the aggregate `make lint` and `make test` targets.
 
 ## Changes and Reviews
 

@@ -4,9 +4,8 @@ use core::f32;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
-use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::slice::ParallelSlice;
 
 pub mod rotator;
 
@@ -54,18 +53,6 @@ pub struct Factor {
     pub error_bound: f32,
     /// (x - c) ** 2
     pub center_distance_square: f32,
-}
-
-impl Factor {
-    #[allow(dead_code)]
-    fn into_vec(self) -> Vec<f32> {
-        vec![
-            self.factor_ip,
-            self.factor_ppc,
-            self.error_bound,
-            self.center_distance_square,
-        ]
-    }
 }
 
 impl From<Vec<f32>> for Factor {
@@ -420,7 +407,7 @@ impl RaBitQ {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 

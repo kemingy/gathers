@@ -1,0 +1,12 @@
+id: no-nonstandard-prelude-imports
+valid:
+  - use rayon::iter::ParallelIterator;
+  - use std::prelude::rust_2024::*;
+  - use core::prelude::rust_2024::*;
+  - use alloc::prelude::v1::*;
+  - pub(crate) use ::std::prelude::rust_2024::Iterator;
+  - // prelude is only mentioned in a comment
+invalid:
+  - use rayon::prelude::*;
+  - use rayon::prelude::ParallelIterator;
+  - use rayon::{join, prelude::ParallelIterator};

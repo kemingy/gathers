@@ -5,9 +5,8 @@ use gathers::distance::Distance;
 use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
 use rabitq::RaBitQ;
 use rand::RngExt;
-use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::slice::ParallelSlice;
 use seed_rand::seeded_rng;
 
 fn assignment_benchmark(c: &mut Criterion) {

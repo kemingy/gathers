@@ -1,0 +1,10 @@
+id: no-unseeded-rng-in-benches
+valid:
+  - let mut rng = seed_rand::seeded_rng();
+  - let mut rng = StdRng::seed_from_u64(7);
+invalid:
+  - let mut rng = rand::rng();
+  - let mut rng = ::rand::rng();
+  - use rand::rng;
+  - use ::rand::rng;
+  - use rand::{rng, RngExt};

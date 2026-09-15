@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-super-outside-tests
+language: Rust
+severity: error
+message: Use an absolute crate path; `super` is reserved for code inside `mod tests`.
+note: |-
+  Absolute crate paths remain stable when implementation modules move. Tests may
+  use super to access the module under test; use pub(crate) for crate-visible items.
+rule:
+  all:
+    - pattern: super
+    - not:
+        inside:
+          pattern: mod tests { $$$BODY }
+          stopBy: end

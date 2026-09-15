@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-singular-test-modules
+language: Rust
+severity: error
+message: Name unit-test containers `tests`, not `test`.
+note: Purpose-specific test-only modules may keep descriptive names such as `legacy`.
+rule:
+  all:
+    - kind: mod_item
+    - has:
+        field: name
+        regex: ^test$

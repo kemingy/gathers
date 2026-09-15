@@ -5,6 +5,11 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/check.yml"
+      - "Makefile"
+      - "sgconfig.yml"
+      - "ast-grep/**"
+      - "benches/**"
+      - "crates/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -15,6 +20,11 @@ on:
     branches: ["main"]
     paths:
       - ".github/workflows/check.yml"
+      - "Makefile"
+      - "sgconfig.yml"
+      - "ast-grep/**"
+      - "benches/**"
+      - "crates/**"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -35,6 +45,24 @@ permissions:
   contents: read
 
 jobs:
+  ast-grep:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install ast-grep
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        with:
+          tool: ast-grep@0.45.3
+      - name: Test ast-grep rules
+        run: make test-ast
+      - name: Scan with ast-grep
+        run: make lint-ast
+        env:
+          AST_GREP_SCAN_ARGS: --format github
+
   lint:
     runs-on: ubuntu-latest
 
@@ -52,11 +80,9 @@ jobs:
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - name: Install lint tools
-        run: |
-          pip install ruff
+        run: pip install ruff
       - name: Lint
-        run: |
-          make lint
+        run: make lint
 
   test:
     strategy:

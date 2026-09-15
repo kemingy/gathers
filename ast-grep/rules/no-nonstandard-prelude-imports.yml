@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ast-grep/ast-grep/main/schemas/rust_rule.json
+
+id: no-nonstandard-prelude-imports
+language: Rust
+severity: error
+message: Import traits from their defining module instead of through a third-party prelude.
+note: |-
+  Explicit imports make trait dependencies visible and prevent a dependency from
+  silently changing the names in scope. Rust's std, core, and alloc preludes are allowed.
+rule:
+  all:
+    - kind: use_declaration
+    - has:
+        kind: identifier
+        regex: ^prelude$
+        stopBy: end
+    - not:
+        regex: '^(pub(\([^)]*\))?\s+)?use\s+(::)?(std|core|alloc)::'

@@ -1,0 +1,16 @@
+id: no-singular-test-modules
+valid:
+  - |
+      #[cfg(test)]
+      mod tests {}
+  - |
+      #[cfg(test)]
+      mod legacy {}
+  - mod testing {}
+invalid:
+  - |
+      #[cfg(test)]
+      mod test {}
+  - |
+      mod test {}
+  - mod test;

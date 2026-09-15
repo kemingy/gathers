@@ -1,12 +1,10 @@
 use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par};
-use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator, ParallelSlice,
-    ParallelSliceMut,
-};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use super::{base_assign, base_assign_parallel};
 use crate::distance::{Distance, squared_euclidean};
+use crate::kmeans::{base_assign, base_assign_parallel};
 
 // These crossover and block-size choices are tuned on Apple Silicon. Other targets use the
 // same safe defaults until platform-specific benchmarks justify changing them.
@@ -144,14 +142,14 @@ impl Distance {
     }
 }
 
-pub(super) struct MatrixAssignmentWorkspace {
+pub(crate) struct MatrixAssignmentWorkspace {
     distance: Distance,
     vector_norms: Vec<f32>,
     centroid_norms: Vec<f32>,
 }
 
 impl MatrixAssignmentWorkspace {
-    pub(super) fn try_new(
+    pub(crate) fn try_new(
         vecs: &[f32],
         num_centroids: usize,
         dim: usize,
@@ -186,7 +184,7 @@ impl MatrixAssignmentWorkspace {
         })
     }
 
-    pub(super) fn assign(
+    pub(crate) fn assign(
         &mut self,
         vecs: &[f32],
         centroids: &[f32],
