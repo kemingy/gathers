@@ -43,7 +43,7 @@ mod backend {
     use crate::simd::x86::Avx2;
 
     pub(crate) type Backend = Avx2;
-    pub(crate) const MULTI_QUERY: bool = false;
+    pub(crate) const MULTI_QUERY: bool = true;
 
     pub(crate) fn detect() -> Option<Backend> {
         Avx2::try_new()
@@ -64,9 +64,7 @@ mod backend {
         luts: &[&[u8]; N],
         results: &mut [[u32; crate::fastscan::BATCH_SIZE]; N],
     ) {
-        for query in 0..N {
-            accumulate(backend, codes, luts[query], &mut results[query]);
-        }
+        crate::simd::x86::fastscan_accumulate_many(backend, codes, luts, results);
     }
 }
 
@@ -337,6 +335,9 @@ mod tests {
         if !backend::MULTI_QUERY {
             return;
         }
+        let Some(backend) = backend::detect() else {
+            return;
+        };
 
         let mut rng = seeded_rng();
         for dim in [64, 960, 4_416] {
@@ -352,7 +353,6 @@ mod tests {
                 lut
             });
 
-            let backend = backend::detect().expect("multi-query backend must be available");
             let mut expected = [[0; BATCH_SIZE]; 4];
             for query in 0..4 {
                 backend::accumulate(backend, &codes, &luts[query], &mut expected[query]);
