@@ -2,6 +2,8 @@
 
 use pulp::aarch64::Neon;
 
+use crate::fastscan::BATCH_SIZE;
+
 pub mod legacy;
 
 /// Convert four-bit quantized values to bit-sliced binary vectors.
@@ -172,6 +174,64 @@ pub fn binary_dot_product(lhs: &[u64], rhs: &[u64]) -> u32 {
             lhs,
             rhs,
         )
+    }
+}
+
+pub(crate) fn fastscan_accumulate(
+    simd: Neon,
+    codes: &[u8],
+    lut: &[u8],
+    result: &mut [u32; BATCH_SIZE],
+) {
+    assert_eq!(codes.len(), lut.len());
+    let low_mask = simd.neon.vdupq_n_u8(0x0f);
+    result.fill(0);
+
+    // A four-coordinate lookup contributes at most 60. Limit each u16 accumulation
+    // segment to 1,024 lookups so arbitrary dimensions cannot overflow its lanes.
+    for (codes, lut) in codes.chunks(16 * 1_024).zip(lut.chunks(16 * 1_024)) {
+        let mut sum0 = simd.neon.vdupq_n_u16(0);
+        let mut sum1 = simd.neon.vdupq_n_u16(0);
+        let mut sum2 = simd.neon.vdupq_n_u16(0);
+        let mut sum3 = simd.neon.vdupq_n_u16(0);
+        let (codes, code_tail) = codes.as_chunks::<16>();
+        let (luts, lut_tail) = lut.as_chunks::<16>();
+        assert!(code_tail.is_empty());
+        assert!(lut_tail.is_empty());
+        for (codes, lut) in codes.iter().zip(luts) {
+            // SAFETY: both exact chunks contain 16 initialized bytes. NEON is part of the
+            // AArch64 baseline and `try_new` above proves the feature before these loads.
+            let codes = unsafe { simd.neon.vld1q_u8(codes.as_ptr()) };
+            let lut = unsafe { simd.neon.vld1q_u8(lut.as_ptr()) };
+            let lower = simd
+                .neon
+                .vqtbl1q_u8(lut, simd.neon.vandq_u8(codes, low_mask));
+            let upper = simd.neon.vqtbl1q_u8(lut, simd.neon.vshrq_n_u8::<4>(codes));
+            sum0 = simd
+                .neon
+                .vaddq_u16(sum0, simd.neon.vmovl_u8(simd.neon.vget_low_u8(lower)));
+            sum1 = simd
+                .neon
+                .vaddq_u16(sum1, simd.neon.vmovl_u8(simd.neon.vget_high_u8(lower)));
+            sum2 = simd
+                .neon
+                .vaddq_u16(sum2, simd.neon.vmovl_u8(simd.neon.vget_low_u8(upper)));
+            sum3 = simd
+                .neon
+                .vaddq_u16(sum3, simd.neon.vmovl_u8(simd.neon.vget_high_u8(upper)));
+        }
+
+        let mut segment = [0; BATCH_SIZE];
+        // SAFETY: the four stores exactly cover the 32-element segment array.
+        unsafe {
+            simd.neon.vst1q_u16(segment.as_mut_ptr(), sum0);
+            simd.neon.vst1q_u16(segment.as_mut_ptr().add(8), sum1);
+            simd.neon.vst1q_u16(segment.as_mut_ptr().add(16), sum2);
+            simd.neon.vst1q_u16(segment.as_mut_ptr().add(24), sum3);
+        }
+        for (result, segment) in result.iter_mut().zip(segment) {
+            *result += u32::from(segment);
+        }
     }
 }
 
