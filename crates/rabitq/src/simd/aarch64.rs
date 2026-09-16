@@ -235,6 +235,74 @@ pub(crate) fn fastscan_accumulate(
     }
 }
 
+pub(crate) fn fastscan_accumulate_many<const N: usize>(
+    simd: Neon,
+    codes: &[u8],
+    luts: &[&[u8]; N],
+    results: &mut [[u32; BATCH_SIZE]; N],
+) {
+    assert!(luts.iter().all(|lut| lut.len() == codes.len()));
+    results.fill([0; BATCH_SIZE]);
+    let low_mask = simd.neon.vdupq_n_u8(0x0f);
+
+    for segment_start in (0..codes.len()).step_by(16 * 1_024) {
+        let segment_end = (segment_start + 16 * 1_024).min(codes.len());
+        let code_segment = &codes[segment_start..segment_end];
+        let (code_chunks, code_tail) = code_segment.as_chunks::<16>();
+        assert!(code_tail.is_empty());
+        let zero = simd.neon.vdupq_n_u16(0);
+        let mut sums = [[zero; 4]; N];
+
+        for (group, codes) in code_chunks.iter().enumerate() {
+            // SAFETY: the exact chunk contains 16 initialized bytes.
+            let codes = unsafe { simd.neon.vld1q_u8(codes.as_ptr()) };
+            let lower_codes = simd.neon.vandq_u8(codes, low_mask);
+            let upper_codes = simd.neon.vshrq_n_u8::<4>(codes);
+            for query in 0..N {
+                let lut_start = segment_start + group * 16;
+                // SAFETY: every LUT has the same length as `codes`, and the current
+                // segment contains a complete 16-byte group.
+                let lut = unsafe { simd.neon.vld1q_u8(luts[query].as_ptr().add(lut_start)) };
+                let lower = simd.neon.vqtbl1q_u8(lut, lower_codes);
+                let upper = simd.neon.vqtbl1q_u8(lut, upper_codes);
+                sums[query][0] = simd.neon.vaddq_u16(
+                    sums[query][0],
+                    simd.neon.vmovl_u8(simd.neon.vget_low_u8(lower)),
+                );
+                sums[query][1] = simd.neon.vaddq_u16(
+                    sums[query][1],
+                    simd.neon.vmovl_u8(simd.neon.vget_high_u8(lower)),
+                );
+                sums[query][2] = simd.neon.vaddq_u16(
+                    sums[query][2],
+                    simd.neon.vmovl_u8(simd.neon.vget_low_u8(upper)),
+                );
+                sums[query][3] = simd.neon.vaddq_u16(
+                    sums[query][3],
+                    simd.neon.vmovl_u8(simd.neon.vget_high_u8(upper)),
+                );
+            }
+        }
+
+        for query in 0..N {
+            let mut segment = [0; BATCH_SIZE];
+            // SAFETY: the four stores exactly cover the 32-element segment array.
+            unsafe {
+                simd.neon.vst1q_u16(segment.as_mut_ptr(), sums[query][0]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(8), sums[query][1]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(16), sums[query][2]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(24), sums[query][3]);
+            }
+            for (result, segment) in results[query].iter_mut().zip(segment) {
+                *result += u32::from(segment);
+            }
+        }
+    }
+}
+
 fn binary_dot_product_neon_throughput(simd: Neon, lhs: &[u64], rhs: &[u64]) -> u32 {
     macro_rules! count {
         ($offset:expr) => {{

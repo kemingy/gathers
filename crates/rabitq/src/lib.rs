@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
-use rayon::slice::ParallelSlice;
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 mod fastscan;
 pub mod rotator;
@@ -42,6 +42,7 @@ const DEFAULT_X_DOT_PRODUCT: f32 = 0.8;
 const EPSILON: f32 = 1.9;
 pub(crate) const THETA_LOG_DIM: usize = 4;
 const SCALAR: f32 = 1.0 / ((1 << THETA_LOG_DIM) as f32 - 1.0);
+const QUERY_BLOCK_SIZE: usize = 4;
 
 /// Factor struct to store the metadata for centroids.
 #[derive(Debug, Clone, Copy, Default)]
@@ -356,21 +357,55 @@ impl RaBitQ {
         assert_eq!(queries.len() % dim, 0, "queries must be complete");
         assert_eq!(labels.len(), queries.len() / dim);
 
-        let (rough, precise) = labels
-            .par_iter_mut()
-            .zip(queries.par_chunks_exact(dim))
-            .map_init(
-                || RaBitQWorkspace::new(self.dim),
-                |workspace, (label, query)| {
-                    let (index, precise) = self.retrieve_top_one_with_workspace(query, workspace);
-                    *label = index as u32;
-                    (self.len() as u64, precise)
-                },
-            )
-            .reduce(
-                || (0, 0),
-                |left, right| (left.0 + right.0, left.1 + right.1),
-            );
+        let precise = match &self.binary_vec {
+            BinaryVectors::FastScan(fastscan) if fastscan.supports_multi_query() => labels
+                .par_chunks_mut(QUERY_BLOCK_SIZE)
+                .zip(queries.par_chunks(dim * QUERY_BLOCK_SIZE))
+                .map_init(
+                    || {
+                        std::array::from_fn::<_, QUERY_BLOCK_SIZE, _>(|_| {
+                            RaBitQWorkspace::new(self.dim)
+                        })
+                    },
+                    |workspaces, (labels, queries)| {
+                        if labels.len() == QUERY_BLOCK_SIZE {
+                            self.retrieve_top_one_fastscan_block(
+                                fastscan, queries, labels, workspaces,
+                            )
+                        } else {
+                            labels
+                                .iter_mut()
+                                .zip(queries.chunks_exact(dim))
+                                .zip(workspaces)
+                                .map(|((label, query), workspace)| {
+                                    let (index, precise) =
+                                        self.retrieve_top_one_with_workspace(query, workspace);
+                                    *label = index as u32;
+                                    precise
+                                })
+                                .sum()
+                        }
+                    },
+                )
+                .sum(),
+            _ => labels
+                .par_iter_mut()
+                .zip(queries.par_chunks_exact(dim))
+                .map_init(
+                    || RaBitQWorkspace::new(self.dim),
+                    |workspace, (label, query)| {
+                        let (index, precise) =
+                            self.retrieve_top_one_with_workspace(query, workspace);
+                        *label = index as u32;
+                        precise
+                    },
+                )
+                .sum(),
+        };
+        let rough = u64::try_from(labels.len())
+            .expect("label count exceeds u64")
+            .checked_mul(u64::try_from(self.len()).expect("centroid count exceeds u64"))
+            .expect("comparison count exceeds u64");
         self.metrics.update(rough, precise);
     }
 
@@ -387,30 +422,7 @@ impl RaBitQ {
             self.input_dim,
             "query dimension must match the vector dimension"
         );
-        workspace.query.fill(0.0);
-        workspace.query[..query.len()].copy_from_slice(query);
-        self.rotator.rotate(query, &mut workspace.projected);
-        let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
-        let query_center_distance_squared = squared_euclidean(&workspace.projected, mean_slice);
-
-        let (lower_bound, upper_bound) =
-            min_max_residual(&mut workspace.residual, &workspace.projected, mean_slice);
-        let delta = (upper_bound - lower_bound) * SCALAR;
-        let one_over_delta = delta.recip();
-        let scalar_sum = scalar_quantize(
-            &mut workspace.quantized,
-            &workspace.residual,
-            lower_bound,
-            one_over_delta,
-        );
-        let query_center_distance = query_center_distance_squared.sqrt();
-        let query_factors = QueryFactors {
-            center_distance_squared: query_center_distance_squared,
-            center_distance: query_center_distance,
-            lower_bound,
-            scalar_sum,
-            delta,
-        };
+        let query_factors = self.prepare_query(query, workspace);
         match &self.binary_vec {
             BinaryVectors::Row(binary_vec) => {
                 workspace.binary.fill(0);
@@ -433,6 +445,112 @@ impl RaBitQ {
                 )
             }
         }
+    }
+
+    fn prepare_query(&self, query: &[f32], workspace: &mut RaBitQWorkspace) -> QueryFactors {
+        workspace.query.fill(0.0);
+        workspace.query[..query.len()].copy_from_slice(query);
+        self.rotator.rotate(query, &mut workspace.projected);
+        let mean_slice = self.mean.try_as_row_major().expect("row major").as_slice();
+        let query_center_distance_squared = squared_euclidean(&workspace.projected, mean_slice);
+
+        let (lower_bound, upper_bound) =
+            min_max_residual(&mut workspace.residual, &workspace.projected, mean_slice);
+        let delta = (upper_bound - lower_bound) * SCALAR;
+        let one_over_delta = delta.recip();
+        let scalar_sum = scalar_quantize(
+            &mut workspace.quantized,
+            &workspace.residual,
+            lower_bound,
+            one_over_delta,
+        );
+        let query_center_distance = query_center_distance_squared.sqrt();
+        QueryFactors {
+            center_distance_squared: query_center_distance_squared,
+            center_distance: query_center_distance,
+            lower_bound,
+            scalar_sum,
+            delta,
+        }
+    }
+
+    fn retrieve_top_one_fastscan_block(
+        &self,
+        fastscan: &fastscan::FastScan,
+        queries: &[f32],
+        labels: &mut [u32],
+        workspaces: &mut [RaBitQWorkspace; QUERY_BLOCK_SIZE],
+    ) -> u64 {
+        assert_eq!(labels.len(), QUERY_BLOCK_SIZE);
+        assert_eq!(queries.len(), QUERY_BLOCK_SIZE * self.input_dim);
+
+        let query_factors: [QueryFactors; QUERY_BLOCK_SIZE] = std::array::from_fn(|index| {
+            let start = index * self.input_dim;
+            let query = &queries[start..start + self.input_dim];
+            let workspace = &mut workspaces[index];
+            let factors = self.prepare_query(query, workspace);
+            workspace
+                .fastscan
+                .get_or_insert_with(|| fastscan::Workspace::new(self.dim))
+                .prepare(&workspace.quantized);
+            factors
+        });
+
+        let mut thresholds = [f32::MAX; QUERY_BLOCK_SIZE];
+        let mut min_indices = [0; QUERY_BLOCK_SIZE];
+        let mut precise = [0_u64; QUERY_BLOCK_SIZE];
+        let mut scores = [[0; fastscan::BATCH_SIZE]; QUERY_BLOCK_SIZE];
+        let mut rough_distances = [[0.0; fastscan::BATCH_SIZE]; QUERY_BLOCK_SIZE];
+        let mut position = 0;
+        for binary in fastscan.batches() {
+            let luts = std::array::from_fn(|query| {
+                workspaces[query]
+                    .fastscan
+                    .as_ref()
+                    .expect("FastScan workspace initialized above")
+                    .lut()
+            });
+            fastscan.accumulate_many(binary, &luts, &mut scores);
+            let candidates = fastscan::BATCH_SIZE.min(self.len() - position);
+            for query in 0..QUERY_BLOCK_SIZE {
+                compute_rough_distances(
+                    &self.factors,
+                    position,
+                    &scores[query][..candidates],
+                    &query_factors[query],
+                    &mut rough_distances[query][..candidates],
+                );
+            }
+
+            for query in 0..QUERY_BLOCK_SIZE {
+                for (candidate, &rough_distance) in
+                    rough_distances[query][..candidates].iter().enumerate()
+                {
+                    if rough_distance < thresholds[query] {
+                        precise[query] += 1;
+                        let sorted_index = position + candidate;
+                        let accurate = squared_euclidean(
+                            self.centroids
+                                .col(sorted_index)
+                                .try_as_col_major()
+                                .expect("col major")
+                                .as_slice(),
+                            &workspaces[query].query,
+                        );
+                        if accurate < thresholds[query] {
+                            thresholds[query] = accurate;
+                            min_indices[query] = self.sorted_to_original[sorted_index];
+                        }
+                    }
+                }
+            }
+            position += candidates;
+        }
+
+        for (label, index) in labels.iter_mut().zip(min_indices) {
+            *label = index as u32;
+        }
+        precise.iter().sum()
     }
 
     fn select_top_one_fastscan(
@@ -800,6 +918,48 @@ mod tests {
             assert_eq!(actual, expected);
         }
         assert!(workspace.fastscan.is_some());
+    }
+
+    #[test]
+    fn test_fastscan_query_blocks_match_individual_retrieval_across_tails() {
+        let mut rng = seeded_rng();
+        let dim = 64;
+        let num_centroids = 257;
+        let centroids = (0..num_centroids * dim)
+            .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+            .collect::<Vec<_>>();
+        let rabitq = RaBitQ::new(&centroids, dim);
+        if !matches!(rabitq.binary_vec, BinaryVectors::FastScan(_)) {
+            return;
+        }
+
+        for count in [1, 3, 4, 5, 8, 9] {
+            let queries = (0..count * dim)
+                .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+                .collect::<Vec<_>>();
+            let mut workspace = RaBitQWorkspace::new(rabitq.dim());
+            let expected = queries
+                .chunks_exact(dim)
+                .map(|query| rabitq.retrieve_top_one_with_workspace(query, &mut workspace))
+                .collect::<Vec<_>>();
+            let before = rabitq.get_metrics();
+            let mut actual = vec![0; count];
+            rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
+            let after = rabitq.get_metrics();
+
+            assert_eq!(
+                actual,
+                expected
+                    .iter()
+                    .map(|&(index, _)| index as u32)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(after.0 - before.0, (count * num_centroids) as u64);
+            assert_eq!(
+                after.1 - before.1,
+                expected.iter().map(|&(_, precise)| precise).sum::<u64>()
+            );
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod backend {
     use pulp::aarch64::Neon;
 
     pub(crate) type Backend = Neon;
+    pub(crate) const MULTI_QUERY: bool = true;
 
     pub(crate) fn detect() -> Option<Backend> {
         Neon::try_new()
@@ -26,6 +27,15 @@ mod backend {
     ) {
         crate::simd::aarch64::fastscan_accumulate(backend, codes, lut, result);
     }
+
+    pub(crate) fn accumulate_many<const N: usize>(
+        backend: Backend,
+        codes: &[u8],
+        luts: &[&[u8]; N],
+        results: &mut [[u32; crate::fastscan::BATCH_SIZE]; N],
+    ) {
+        crate::simd::aarch64::fastscan_accumulate_many(backend, codes, luts, results);
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -33,6 +43,7 @@ mod backend {
     use crate::simd::x86::Avx2;
 
     pub(crate) type Backend = Avx2;
+    pub(crate) const MULTI_QUERY: bool = false;
 
     pub(crate) fn detect() -> Option<Backend> {
         Avx2::try_new()
@@ -46,12 +57,24 @@ mod backend {
     ) {
         crate::simd::x86::fastscan_accumulate(backend, codes, lut, result);
     }
+
+    pub(crate) fn accumulate_many<const N: usize>(
+        backend: Backend,
+        codes: &[u8],
+        luts: &[&[u8]; N],
+        results: &mut [[u32; crate::fastscan::BATCH_SIZE]; N],
+    ) {
+        for query in 0..N {
+            accumulate(backend, codes, luts[query], &mut results[query]);
+        }
+    }
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
 mod backend {
     #[derive(Clone, Copy)]
     pub(crate) struct Backend;
+    pub(crate) const MULTI_QUERY: bool = false;
 
     pub(crate) fn detect() -> Option<Backend> {
         None
@@ -62,6 +85,15 @@ mod backend {
         _codes: &[u8],
         _lut: &[u8],
         _result: &mut [u32; crate::fastscan::BATCH_SIZE],
+    ) {
+        unreachable!("FastScan has no backend on this architecture");
+    }
+
+    pub(crate) fn accumulate_many<const N: usize>(
+        _backend: Backend,
+        _codes: &[u8],
+        _luts: &[&[u8]; N],
+        _results: &mut [[u32; crate::fastscan::BATCH_SIZE]; N],
     ) {
         unreachable!("FastScan has no backend on this architecture");
     }
@@ -95,12 +127,25 @@ pub(crate) struct FastScan {
 }
 
 impl FastScan {
+    pub(crate) fn supports_multi_query(&self) -> bool {
+        backend::MULTI_QUERY
+    }
+
     pub(crate) fn batches(&self) -> impl Iterator<Item = &[u8]> {
         self.codes.chunks_exact(self.bytes_per_batch)
     }
 
     pub(crate) fn accumulate(&self, codes: &[u8], workspace: &mut Workspace) {
         backend::accumulate(self.backend, codes, &workspace.lut, &mut workspace.scores);
+    }
+
+    pub(crate) fn accumulate_many<const N: usize>(
+        &self,
+        codes: &[u8],
+        luts: &[&[u8]; N],
+        results: &mut [[u32; BATCH_SIZE]; N],
+    ) {
+        backend::accumulate_many(self.backend, codes, luts, results);
     }
 }
 
@@ -123,6 +168,10 @@ impl Workspace {
 
     pub(crate) fn scores(&self) -> &[u32; BATCH_SIZE] {
         &self.scores
+    }
+
+    pub(crate) fn lut(&self) -> &[u8] {
+        &self.lut
     }
 }
 
@@ -280,6 +329,39 @@ mod tests {
         let mut actual = [0; BATCH_SIZE];
         if accumulate_simd(&packed, &lut, &mut actual) {
             assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn multi_query_scores_match_individual_accumulation() {
+        if !backend::MULTI_QUERY {
+            return;
+        }
+
+        let mut rng = seeded_rng();
+        for dim in [64, 960, 4_416] {
+            let codes = (0..dim / 4 * LANES)
+                .map(|_| rng.random::<u8>())
+                .collect::<Vec<_>>();
+            let luts: [Vec<u8>; 4] = std::array::from_fn(|_| {
+                let query = (0..dim)
+                    .map(|_| rng.random_range(0..1 << THETA_LOG_DIM))
+                    .collect::<Vec<u8>>();
+                let mut lut = vec![0; dim / 4 * 16];
+                build_lut(&query, &mut lut);
+                lut
+            });
+
+            let backend = backend::detect().expect("multi-query backend must be available");
+            let mut expected = [[0; BATCH_SIZE]; 4];
+            for query in 0..4 {
+                backend::accumulate(backend, &codes, &luts[query], &mut expected[query]);
+            }
+
+            let lut_refs = std::array::from_fn(|query| luts[query].as_slice());
+            let mut actual = [[0; BATCH_SIZE]; 4];
+            backend::accumulate_many(backend, &codes, &lut_refs, &mut actual);
+            assert_eq!(actual, expected, "dimension {dim}");
         }
     }
 }
