@@ -354,4 +354,27 @@ mod tests {
             assert_eq!(actual, expected, "dimension {dim}");
         }
     }
+
+    #[test]
+    fn multi_query_scores_handle_maximum_lut_values() {
+        let Some(backend) = backend::detect() else {
+            return;
+        };
+
+        let dim = 960;
+        let codes = vec![u8::MAX; dim / 4 * LANES];
+        let query = vec![(1 << THETA_LOG_DIM) - 1; dim];
+        let mut lut = vec![0; dim / 4 * 16];
+        build_lut(&query, &mut lut);
+        let luts = [lut.as_slice(); 4];
+
+        let mut expected = [[0; BATCH_SIZE]; 4];
+        for scores in &mut expected {
+            backend::accumulate(backend, &codes, &lut, scores);
+        }
+
+        let mut actual = [[0; BATCH_SIZE]; 4];
+        backend::accumulate_many(backend, &codes, &luts, &mut actual);
+        assert_eq!(actual, expected);
+    }
 }
