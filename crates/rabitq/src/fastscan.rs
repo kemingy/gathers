@@ -41,10 +41,23 @@ mod backend {
 mod backend {
     use crate::simd::x86::Avx2;
 
-    pub(crate) type Backend = Avx2;
+    #[derive(Clone, Copy)]
+    pub(crate) enum Backend {
+        Avx512 { avx2: Avx2 },
+        Avx2(Avx2),
+    }
 
     pub(crate) fn detect() -> Option<Backend> {
-        Avx2::try_new()
+        let avx2 = Avx2::try_new()?;
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+            && std::arch::is_x86_feature_detected!("avx512vnni")
+        {
+            Some(Backend::Avx512 { avx2 })
+        } else {
+            Some(Backend::Avx2(avx2))
+        }
     }
 
     pub(crate) fn accumulate(
@@ -53,16 +66,31 @@ mod backend {
         lut: &[u8],
         result: &mut [u32; crate::fastscan::BATCH_SIZE],
     ) {
-        crate::simd::x86::fastscan_accumulate(backend, codes, lut, result);
+        let simd = match backend {
+            Backend::Avx512 { avx2 } | Backend::Avx2(avx2) => avx2,
+        };
+        crate::simd::x86::fastscan_accumulate(simd, codes, lut, result);
     }
 
+    #[allow(unsafe_code)]
     pub(crate) fn accumulate_many<const N: usize>(
         backend: Backend,
         codes: &[u8],
         luts: &[&[u8]; N],
         results: &mut [[u32; crate::fastscan::BATCH_SIZE]; N],
     ) {
-        crate::simd::x86::fastscan_accumulate_many(backend, codes, luts, results);
+        match backend {
+            Backend::Avx512 { .. } => {
+                // SAFETY: `detect` proves every target feature required by this kernel
+                // before constructing this backend variant.
+                unsafe {
+                    crate::simd::x86::fastscan_accumulate_many_avx512(codes, luts, results);
+                }
+            }
+            Backend::Avx2(simd) => {
+                crate::simd::x86::fastscan_accumulate_many(simd, codes, luts, results);
+            }
+        }
     }
 }
 

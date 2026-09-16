@@ -42,7 +42,14 @@ const DEFAULT_X_DOT_PRODUCT: f32 = 0.8;
 const EPSILON: f32 = 1.9;
 pub(crate) const THETA_LOG_DIM: usize = 4;
 const SCALAR: f32 = 1.0 / ((1 << THETA_LOG_DIM) as f32 - 1.0);
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const QUERY_BLOCK_SIZE: usize = 2;
+#[cfg(target_arch = "aarch64")]
 const QUERY_BLOCK_SIZE: usize = 4;
+// FastScan is disabled on other architectures, but its shared retrieval code
+// still needs a block size to remain well-formed.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+const QUERY_BLOCK_SIZE: usize = 1;
 
 /// Factor struct to store the metadata for centroids.
 #[derive(Debug, Clone, Copy, Default)]
