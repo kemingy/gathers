@@ -1,7 +1,7 @@
 //! Batched binary-code layout for lookup-table scans.
 //!
 //! This follows upstream RaBitQ's 32-vector FastScan principle, but keeps centroids in
-//! natural NEON lane order instead of the AVX-specific permutation used upstream.
+//! a natural 16-lane order shared by NEON and AVX2.
 
 pub(crate) const BATCH_SIZE: usize = 32;
 const LANES: usize = BATCH_SIZE / 2;
@@ -13,7 +13,6 @@ mod backend {
     use pulp::aarch64::Neon;
 
     pub(crate) type Backend = Neon;
-    pub(crate) const MULTI_QUERY: bool = true;
 
     pub(crate) fn detect() -> Option<Backend> {
         Neon::try_new()
@@ -43,7 +42,6 @@ mod backend {
     use crate::simd::x86::Avx2;
 
     pub(crate) type Backend = Avx2;
-    pub(crate) const MULTI_QUERY: bool = true;
 
     pub(crate) fn detect() -> Option<Backend> {
         Avx2::try_new()
@@ -72,7 +70,6 @@ mod backend {
 mod backend {
     #[derive(Clone, Copy)]
     pub(crate) struct Backend;
-    pub(crate) const MULTI_QUERY: bool = false;
 
     pub(crate) fn detect() -> Option<Backend> {
         None
@@ -125,10 +122,6 @@ pub(crate) struct FastScan {
 }
 
 impl FastScan {
-    pub(crate) fn supports_multi_query(&self) -> bool {
-        backend::MULTI_QUERY
-    }
-
     pub(crate) fn batches(&self) -> impl Iterator<Item = &[u8]> {
         self.codes.chunks_exact(self.bytes_per_batch)
     }
@@ -332,9 +325,6 @@ mod tests {
 
     #[test]
     fn multi_query_scores_match_individual_accumulation() {
-        if !backend::MULTI_QUERY {
-            return;
-        }
         let Some(backend) = backend::detect() else {
             return;
         };

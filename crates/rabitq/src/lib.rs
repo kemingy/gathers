@@ -358,58 +358,10 @@ impl RaBitQ {
         assert_eq!(labels.len(), queries.len() / dim);
 
         let precise = match &self.binary_vec {
-            BinaryVectors::FastScan(fastscan) if fastscan.supports_multi_query() => {
-                let full_query_count = labels.len() / QUERY_BLOCK_SIZE * QUERY_BLOCK_SIZE;
-                let (full_labels, tail_labels) = labels.split_at_mut(full_query_count);
-                let (full_queries, tail_queries) = queries.split_at(full_query_count * dim);
-
-                let blocked_precise = full_labels
-                    .par_chunks_exact_mut(QUERY_BLOCK_SIZE)
-                    .zip(full_queries.par_chunks_exact(dim * QUERY_BLOCK_SIZE))
-                    .map_init(
-                        || {
-                            std::array::from_fn::<_, QUERY_BLOCK_SIZE, _>(|_| {
-                                RaBitQWorkspace::new(self.dim)
-                            })
-                        },
-                        |workspaces, (labels, queries)| {
-                            self.retrieve_top_one_fastscan_block(
-                                fastscan, queries, labels, workspaces,
-                            )
-                        },
-                    )
-                    .sum::<u64>();
-
-                let tail_precise = if tail_labels.is_empty() {
-                    0
-                } else {
-                    let mut workspace = RaBitQWorkspace::new(self.dim);
-                    tail_labels
-                        .iter_mut()
-                        .zip(tail_queries.chunks_exact(dim))
-                        .map(|(label, query)| {
-                            let (index, precise) =
-                                self.retrieve_top_one_with_workspace(query, &mut workspace);
-                            *label = index as u32;
-                            precise
-                        })
-                        .sum::<u64>()
-                };
-                blocked_precise + tail_precise
+            BinaryVectors::FastScan(fastscan) => {
+                self.retrieve_top_one_fastscan_batch(fastscan, queries, labels)
             }
-            _ => labels
-                .par_iter_mut()
-                .zip(queries.par_chunks_exact(dim))
-                .map_init(
-                    || RaBitQWorkspace::new(self.dim),
-                    |workspace, (label, query)| {
-                        let (index, precise) =
-                            self.retrieve_top_one_with_workspace(query, workspace);
-                        *label = index as u32;
-                        precise
-                    },
-                )
-                .sum(),
+            BinaryVectors::Row(_) => self.retrieve_top_one_parallel(queries, labels),
         };
         let rough = u64::try_from(labels.len())
             .expect("label count exceeds u64")
@@ -454,6 +406,62 @@ impl RaBitQ {
                 )
             }
         }
+    }
+
+    fn retrieve_top_one_parallel(&self, queries: &[f32], labels: &mut [u32]) -> u64 {
+        labels
+            .par_iter_mut()
+            .zip(queries.par_chunks_exact(self.input_dim))
+            .map_init(
+                || RaBitQWorkspace::new(self.dim),
+                |workspace, (label, query)| {
+                    let (index, precise) = self.retrieve_top_one_with_workspace(query, workspace);
+                    *label = index as u32;
+                    precise
+                },
+            )
+            .sum()
+    }
+
+    fn retrieve_top_one_fastscan_batch(
+        &self,
+        fastscan: &fastscan::FastScan,
+        queries: &[f32],
+        labels: &mut [u32],
+    ) -> u64 {
+        let full_query_count = labels.len() / QUERY_BLOCK_SIZE * QUERY_BLOCK_SIZE;
+        let (full_labels, tail_labels) = labels.split_at_mut(full_query_count);
+        let (full_queries, tail_queries) = queries.split_at(full_query_count * self.input_dim);
+
+        let full_precise = full_labels
+            .par_chunks_exact_mut(QUERY_BLOCK_SIZE)
+            .zip(full_queries.par_chunks_exact(self.input_dim * QUERY_BLOCK_SIZE))
+            .map_init(
+                || std::array::from_fn(|_| RaBitQWorkspace::new(self.dim)),
+                |workspaces, (labels, queries)| {
+                    self.retrieve_top_one_fastscan_block(fastscan, queries, labels, workspaces)
+                },
+            )
+            .sum::<u64>();
+
+        full_precise + self.retrieve_top_one_tail(tail_queries, tail_labels)
+    }
+
+    fn retrieve_top_one_tail(&self, queries: &[f32], labels: &mut [u32]) -> u64 {
+        if labels.is_empty() {
+            return 0;
+        }
+
+        let mut workspace = RaBitQWorkspace::new(self.dim);
+        labels
+            .iter_mut()
+            .zip(queries.chunks_exact(self.input_dim))
+            .map(|(label, query)| {
+                let (index, precise) = self.retrieve_top_one_with_workspace(query, &mut workspace);
+                *label = index as u32;
+                precise
+            })
+            .sum()
     }
 
     fn prepare_query(&self, query: &[f32], workspace: &mut RaBitQWorkspace) -> QueryFactors {
@@ -510,15 +518,15 @@ impl RaBitQ {
         let mut precise = [0_u64; QUERY_BLOCK_SIZE];
         let mut scores = [[0; fastscan::BATCH_SIZE]; QUERY_BLOCK_SIZE];
         let mut rough_distances = [[0.0; fastscan::BATCH_SIZE]; QUERY_BLOCK_SIZE];
+        let luts = std::array::from_fn(|query| {
+            workspaces[query]
+                .fastscan
+                .as_ref()
+                .expect("FastScan workspace initialized above")
+                .lut()
+        });
         let mut position = 0;
         for binary in fastscan.batches() {
-            let luts = std::array::from_fn(|query| {
-                workspaces[query]
-                    .fastscan
-                    .as_ref()
-                    .expect("FastScan workspace initialized above")
-                    .lut()
-            });
             fastscan.accumulate_many(binary, &luts, &mut scores);
             let candidates = fastscan::BATCH_SIZE.min(self.len() - position);
             for query in 0..QUERY_BLOCK_SIZE {

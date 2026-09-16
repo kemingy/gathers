@@ -258,8 +258,8 @@ pub(crate) fn fastscan_accumulate_many<const N: usize>(
             let codes = unsafe { simd.neon.vld1q_u8(codes.as_ptr()) };
             let lower_codes = simd.neon.vandq_u8(codes, low_mask);
             let upper_codes = simd.neon.vshrq_n_u8::<4>(codes);
+            let lut_start = segment_start + group * 16;
             for query in 0..N {
-                let lut_start = segment_start + group * 16;
                 // SAFETY: every LUT has the same length as `codes`, and the current
                 // segment contains a complete 16-byte group.
                 let lut = unsafe { simd.neon.vld1q_u8(luts[query].as_ptr().add(lut_start)) };
