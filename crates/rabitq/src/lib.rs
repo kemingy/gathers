@@ -131,7 +131,7 @@ pub struct RaBitQWorkspace {
     quantized: Vec<u8>,
     binary: Vec<u64>,
     residual: Vec<f32>,
-    fastscan: fastscan::Workspace,
+    fastscan: Option<fastscan::Workspace>,
 }
 
 impl RaBitQWorkspace {
@@ -143,7 +143,7 @@ impl RaBitQWorkspace {
             quantized: vec![0; dim],
             binary: vec![0; (dim * THETA_LOG_DIM).div_ceil(64)],
             residual: vec![0.0; dim],
-            fastscan: fastscan::Workspace::new(dim),
+            fastscan: None,
         }
     }
 }
@@ -384,12 +384,15 @@ impl RaBitQ {
                 self.select_top_one(rough_scores, &workspace.query, &query_factors)
             }
             BinaryVectors::FastScan(fastscan) => {
-                workspace.fastscan.prepare(&workspace.quantized);
+                let fastscan_workspace = workspace
+                    .fastscan
+                    .get_or_insert_with(|| fastscan::Workspace::new(self.dim));
+                fastscan_workspace.prepare(&workspace.quantized);
                 let rough_scores = fastscan
                     .batches()
                     .flat_map(|binary| {
-                        fastscan.accumulate(binary, &mut workspace.fastscan);
-                        workspace.fastscan.scores()
+                        fastscan.accumulate(binary, fastscan_workspace);
+                        fastscan_workspace.scores()
                     })
                     .take(self.len());
                 self.select_top_one(rough_scores, &workspace.query, &query_factors)
@@ -456,7 +459,10 @@ mod tests {
     use super::THETA_LOG_DIM;
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::binary_dot_product_native;
-    use super::{RaBitQ, SCALAR, min_max_residual, min_max_residual_native, squared_euclidean};
+    use super::{
+        BinaryVectors, RaBitQ, RaBitQWorkspace, SCALAR, min_max_residual, min_max_residual_native,
+        squared_euclidean,
+    };
     use crate::simd;
 
     #[test]
@@ -626,6 +632,52 @@ mod tests {
         rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_row_retrieval_does_not_allocate_fastscan_workspace() {
+        let dim = 64;
+        let centroids = vec![0.0; 16 * dim];
+        let rabitq = RaBitQ::new(&centroids, dim);
+        let mut workspace = RaBitQWorkspace::new(rabitq.dim());
+
+        assert!(matches!(rabitq.binary_vec, BinaryVectors::Row(_)));
+        assert!(workspace.fastscan.is_none());
+        rabitq.retrieve_top_one_with_workspace(&centroids[..dim], &mut workspace);
+        assert!(workspace.fastscan.is_none());
+    }
+
+    #[test]
+    fn test_fastscan_retrieval_matches_brute_force_across_partial_batch() {
+        let mut rng = seeded_rng();
+        let dim = 64;
+        let num_centroids = 257;
+        let centroids = (0..num_centroids * dim)
+            .map(|_| rng.random::<f32>() * 2.0 - 1.0)
+            .collect::<Vec<_>>();
+        let rabitq = RaBitQ::new(&centroids, dim);
+        if !matches!(rabitq.binary_vec, BinaryVectors::FastScan(_)) {
+            return;
+        }
+        assert_ne!(
+            rabitq.sorted_to_original,
+            (0..num_centroids).collect::<Vec<_>>()
+        );
+
+        let mut workspace = RaBitQWorkspace::new(rabitq.dim());
+        for query in centroids.chunks_exact(dim) {
+            let expected = centroids
+                .chunks_exact(dim)
+                .enumerate()
+                .min_by(|(_, left), (_, right)| {
+                    squared_euclidean(left, query).total_cmp(&squared_euclidean(right, query))
+                })
+                .map(|(index, _)| index)
+                .unwrap();
+            let (actual, _) = rabitq.retrieve_top_one_with_workspace(query, &mut workspace);
+            assert_eq!(actual, expected);
+        }
+        assert!(workspace.fastscan.is_some());
     }
 
     #[test]
