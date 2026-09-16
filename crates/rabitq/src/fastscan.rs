@@ -183,28 +183,27 @@ pub(crate) fn build_lut(query: &[u8], lut: &mut [u8]) {
 }
 
 #[cfg(test)]
-pub(crate) fn accumulate_native(codes: &[u8], lut: &[u8], result: &mut [u32; BATCH_SIZE]) {
-    assert_eq!(codes.len(), lut.len() / 16 * LANES);
-    result.fill(0);
-    let (codes, code_tail) = codes.as_chunks::<LANES>();
-    let (luts, lut_tail) = lut.as_chunks::<16>();
-    assert!(code_tail.is_empty());
-    assert!(lut_tail.is_empty());
-    for (codes, lut) in codes.iter().zip(luts) {
-        for (lane, &code) in codes.iter().enumerate() {
-            result[lane] += u32::from(lut[(code & 0x0f) as usize]);
-            result[lane + LANES] += u32::from(lut[(code >> 4) as usize]);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use rand::RngExt;
     use seed_rand::seeded_rng;
 
-    use super::{BATCH_SIZE, accumulate_native, backend, build_lut, pack_codes};
+    use super::{BATCH_SIZE, LANES, backend, build_lut, pack_codes};
     use crate::{THETA_LOG_DIM, simd, vector_binarize_u64};
+
+    fn accumulate_native(codes: &[u8], lut: &[u8], result: &mut [u32; BATCH_SIZE]) {
+        assert_eq!(codes.len(), lut.len() / 16 * LANES);
+        result.fill(0);
+        let (codes, code_tail) = codes.as_chunks::<LANES>();
+        let (luts, lut_tail) = lut.as_chunks::<16>();
+        assert!(code_tail.is_empty());
+        assert!(lut_tail.is_empty());
+        for (codes, lut) in codes.iter().zip(luts) {
+            for (lane, &code) in codes.iter().enumerate() {
+                result[lane] += u32::from(lut[(code & 0x0f) as usize]);
+                result[lane + LANES] += u32::from(lut[(code >> 4) as usize]);
+            }
+        }
+    }
 
     fn accumulate_simd(codes: &[u8], lut: &[u8], result: &mut [u32; BATCH_SIZE]) -> bool {
         let Some(simd) = backend::detect() else {
