@@ -358,36 +358,45 @@ impl RaBitQ {
         assert_eq!(labels.len(), queries.len() / dim);
 
         let precise = match &self.binary_vec {
-            BinaryVectors::FastScan(fastscan) if fastscan.supports_multi_query() => labels
-                .par_chunks_mut(QUERY_BLOCK_SIZE)
-                .zip(queries.par_chunks(dim * QUERY_BLOCK_SIZE))
-                .map_init(
-                    || {
-                        std::array::from_fn::<_, QUERY_BLOCK_SIZE, _>(|_| {
-                            RaBitQWorkspace::new(self.dim)
-                        })
-                    },
-                    |workspaces, (labels, queries)| {
-                        if labels.len() == QUERY_BLOCK_SIZE {
+            BinaryVectors::FastScan(fastscan) if fastscan.supports_multi_query() => {
+                let full_query_count = labels.len() / QUERY_BLOCK_SIZE * QUERY_BLOCK_SIZE;
+                let (full_labels, tail_labels) = labels.split_at_mut(full_query_count);
+                let (full_queries, tail_queries) = queries.split_at(full_query_count * dim);
+
+                let blocked_precise = full_labels
+                    .par_chunks_exact_mut(QUERY_BLOCK_SIZE)
+                    .zip(full_queries.par_chunks_exact(dim * QUERY_BLOCK_SIZE))
+                    .map_init(
+                        || {
+                            std::array::from_fn::<_, QUERY_BLOCK_SIZE, _>(|_| {
+                                RaBitQWorkspace::new(self.dim)
+                            })
+                        },
+                        |workspaces, (labels, queries)| {
                             self.retrieve_top_one_fastscan_block(
                                 fastscan, queries, labels, workspaces,
                             )
-                        } else {
-                            labels
-                                .iter_mut()
-                                .zip(queries.chunks_exact(dim))
-                                .zip(workspaces)
-                                .map(|((label, query), workspace)| {
-                                    let (index, precise) =
-                                        self.retrieve_top_one_with_workspace(query, workspace);
-                                    *label = index as u32;
-                                    precise
-                                })
-                                .sum()
-                        }
-                    },
-                )
-                .sum(),
+                        },
+                    )
+                    .sum::<u64>();
+
+                let tail_precise = if tail_labels.is_empty() {
+                    0
+                } else {
+                    let mut workspace = RaBitQWorkspace::new(self.dim);
+                    tail_labels
+                        .iter_mut()
+                        .zip(tail_queries.chunks_exact(dim))
+                        .map(|(label, query)| {
+                            let (index, precise) =
+                                self.retrieve_top_one_with_workspace(query, &mut workspace);
+                            *label = index as u32;
+                            precise
+                        })
+                        .sum::<u64>()
+                };
+                blocked_precise + tail_precise
+            }
             _ => labels
                 .par_iter_mut()
                 .zip(queries.par_chunks_exact(dim))
