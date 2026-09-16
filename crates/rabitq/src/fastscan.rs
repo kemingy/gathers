@@ -121,8 +121,8 @@ impl Workspace {
         build_lut(query, &mut self.lut);
     }
 
-    pub(crate) fn scores(&self) -> [u32; BATCH_SIZE] {
-        self.scores
+    pub(crate) fn scores(&self) -> &[u32; BATCH_SIZE] {
+        &self.scores
     }
 }
 

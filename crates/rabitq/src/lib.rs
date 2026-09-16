@@ -183,6 +183,43 @@ struct QueryFactors {
     delta: f32,
 }
 
+#[inline(always)]
+fn rough_distance(
+    binary_dot_product: u32,
+    factor_ip: f32,
+    factor_ppc: f32,
+    error_bound: f32,
+    center_distance_square: f32,
+    query: &QueryFactors,
+) -> f32 {
+    center_distance_square
+        + query.center_distance_squared
+        + query.lower_bound * factor_ppc
+        + (2.0 * binary_dot_product as f32 - query.scalar_sum as f32) * factor_ip * query.delta
+        - error_bound * query.center_distance
+}
+
+fn compute_rough_distances(
+    factors: &[Factor],
+    start: usize,
+    scores: &[u32],
+    query: &QueryFactors,
+    output: &mut [f32],
+) {
+    let factors = &factors[start..start + scores.len()];
+    for index in 0..scores.len() {
+        let factor = factors[index];
+        output[index] = rough_distance(
+            scores[index],
+            factor.factor_ip,
+            factor.factor_ppc,
+            factor.error_bound,
+            factor.center_distance_square,
+            query,
+        );
+    }
+}
+
 impl RaBitQ {
     /// Return the padded index dimension.
     pub fn dim(&self) -> usize {
@@ -388,16 +425,59 @@ impl RaBitQ {
                     .fastscan
                     .get_or_insert_with(|| fastscan::Workspace::new(self.dim));
                 fastscan_workspace.prepare(&workspace.quantized);
-                let rough_scores = fastscan
-                    .batches()
-                    .flat_map(|binary| {
-                        fastscan.accumulate(binary, fastscan_workspace);
-                        fastscan_workspace.scores()
-                    })
-                    .take(self.len());
-                self.select_top_one(rough_scores, &workspace.query, &query_factors)
+                self.select_top_one_fastscan(
+                    fastscan,
+                    fastscan_workspace,
+                    &workspace.query,
+                    &query_factors,
+                )
             }
         }
+    }
+
+    fn select_top_one_fastscan(
+        &self,
+        fastscan: &fastscan::FastScan,
+        workspace: &mut fastscan::Workspace,
+        query: &[f32],
+        query_factors: &QueryFactors,
+    ) -> (usize, u64) {
+        let mut threshold = f32::MAX;
+        let mut min_index = 0;
+        let mut precise = 0;
+        let mut position = 0;
+        let mut rough_distances = [0.0; fastscan::BATCH_SIZE];
+        for binary in fastscan.batches() {
+            fastscan.accumulate(binary, workspace);
+            let count = fastscan::BATCH_SIZE.min(self.len() - position);
+            compute_rough_distances(
+                &self.factors,
+                position,
+                &workspace.scores()[..count],
+                query_factors,
+                &mut rough_distances[..count],
+            );
+            for &rough in &rough_distances[..count] {
+                let original_index = self.sorted_to_original[position];
+                if rough < threshold {
+                    precise += 1;
+                    let accurate = squared_euclidean(
+                        self.centroids
+                            .col(position)
+                            .try_as_col_major()
+                            .expect("col major")
+                            .as_slice(),
+                        query,
+                    );
+                    if accurate < threshold {
+                        threshold = accurate;
+                        min_index = original_index;
+                    }
+                }
+                position += 1;
+            }
+        }
+        (min_index, precise)
     }
 
     fn select_top_one(
@@ -412,14 +492,15 @@ impl RaBitQ {
         for ((position, &original_index), binary_dot_product) in
             self.sorted_to_original.iter().enumerate().zip(rough_scores)
         {
-            let factor = &self.factors[position];
-            let rough = factor.center_distance_square
-                + query_factors.center_distance_squared
-                + query_factors.lower_bound * factor.factor_ppc
-                + (2.0 * binary_dot_product as f32 - query_factors.scalar_sum as f32)
-                    * factor.factor_ip
-                    * query_factors.delta
-                - factor.error_bound * query_factors.center_distance;
+            let factor = self.factors[position];
+            let rough = rough_distance(
+                binary_dot_product,
+                factor.factor_ip,
+                factor.factor_ppc,
+                factor.error_bound,
+                factor.center_distance_square,
+                query_factors,
+            );
             if rough < threshold {
                 precise += 1;
                 let accurate = squared_euclidean(
@@ -460,8 +541,8 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::binary_dot_product_native;
     use super::{
-        BinaryVectors, RaBitQ, RaBitQWorkspace, SCALAR, min_max_residual, min_max_residual_native,
-        squared_euclidean,
+        BinaryVectors, Factor, QueryFactors, RaBitQ, RaBitQWorkspace, SCALAR,
+        compute_rough_distances, min_max_residual, min_max_residual_native, squared_euclidean,
     };
     use crate::simd;
 
@@ -469,6 +550,47 @@ mod tests {
     #[should_panic(expected = "centroids must be complete")]
     fn test_new_rejects_incomplete_centroids() {
         RaBitQ::new(&[0.0, 1.0, 2.0], 2);
+    }
+
+    #[test]
+    fn batched_rough_distances_match_individual_formula_across_batch_tails() {
+        let factors = (0..40)
+            .map(|index| Factor {
+                factor_ip: -0.1 - index as f32 * 0.001,
+                factor_ppc: index as f32 * 0.25 - 4.0,
+                error_bound: 0.01 + index as f32 * 0.0001,
+                center_distance_square: 2.0 + index as f32 * 0.5,
+            })
+            .collect::<Vec<_>>();
+        let query = QueryFactors {
+            center_distance_squared: 3.25,
+            center_distance: 1.8,
+            lower_bound: -0.2,
+            scalar_sum: 317,
+            delta: 0.015,
+        };
+
+        for count in [1, 3, 31, 32] {
+            let start = 2;
+            let scores = (0..count)
+                .map(|index| (index * 37 + 11) as u32)
+                .collect::<Vec<_>>();
+            let mut actual = vec![0.0; count];
+            compute_rough_distances(&factors, start, &scores, &query, &mut actual);
+
+            for (index, &actual) in actual.iter().enumerate() {
+                let factor = factors[start + index];
+                let expected = factor.center_distance_square
+                    + query.center_distance_squared
+                    + query.lower_bound * factor.factor_ppc
+                    + (2.0 * scores[index] as f32 - query.scalar_sum as f32)
+                        * factor.factor_ip
+                        * query.delta
+                    - factor.error_bound * query.center_distance;
+                let tolerance = 1e-6 * expected.abs().max(1.0);
+                assert!((actual - expected).abs() <= tolerance);
+            }
+        }
     }
 
     #[test]
