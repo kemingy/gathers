@@ -15,5 +15,8 @@ pulp.workspace = true
 rand.workspace = true
 rayon.workspace = true
 
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+pulp = { workspace = true, features = ["x86-v4"] }
+
 [dev-dependencies]
 seed-rand = { path = "../seed_rand" }
