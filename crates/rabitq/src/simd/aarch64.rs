@@ -235,6 +235,86 @@ pub(crate) fn fastscan_accumulate(
     }
 }
 
+pub(crate) fn fastscan_accumulate_many<const N: usize>(
+    simd: Neon,
+    codes: &[u8],
+    luts: &[&[u8]; N],
+    results: &mut [[u32; BATCH_SIZE]; N],
+) {
+    assert!(luts.iter().all(|lut| lut.len() == codes.len()));
+    results.fill([0; BATCH_SIZE]);
+    let low_mask = simd.neon.vdupq_n_u8(0x0f);
+
+    for segment_start in (0..codes.len()).step_by(16 * 1_024) {
+        let segment_end = (segment_start + 16 * 1_024).min(codes.len());
+        let code_segment = &codes[segment_start..segment_end];
+        let (code_chunks, code_tail) = code_segment.as_chunks::<16>();
+        assert!(code_tail.is_empty());
+        let (code_pairs, pair_tail) = code_chunks.as_chunks::<2>();
+        assert!(pair_tail.is_empty());
+        let zero = simd.neon.vdupq_n_u16(0);
+        let mut sums = [[zero; 4]; N];
+
+        for (pair, codes) in code_pairs.iter().enumerate() {
+            // SAFETY: both exact chunks contain 16 initialized bytes.
+            let codes0 = unsafe { simd.neon.vld1q_u8(codes[0].as_ptr()) };
+            let codes1 = unsafe { simd.neon.vld1q_u8(codes[1].as_ptr()) };
+            let lower_codes0 = simd.neon.vandq_u8(codes0, low_mask);
+            let lower_codes1 = simd.neon.vandq_u8(codes1, low_mask);
+            let upper_codes0 = simd.neon.vshrq_n_u8::<4>(codes0);
+            let upper_codes1 = simd.neon.vshrq_n_u8::<4>(codes1);
+            let lut_start = segment_start + pair * 32;
+            for query in 0..N {
+                // SAFETY: every LUT has the same length as `codes`, and the current
+                // segment contains two complete 16-byte groups.
+                let lut0 = unsafe { simd.neon.vld1q_u8(luts[query].as_ptr().add(lut_start)) };
+                let lut1 = unsafe { simd.neon.vld1q_u8(luts[query].as_ptr().add(lut_start + 16)) };
+                let lower0 = simd.neon.vqtbl1q_u8(lut0, lower_codes0);
+                let lower1 = simd.neon.vqtbl1q_u8(lut1, lower_codes1);
+                let upper0 = simd.neon.vqtbl1q_u8(lut0, upper_codes0);
+                let upper1 = simd.neon.vqtbl1q_u8(lut1, upper_codes1);
+                // A lookup sums four 4-bit query values. Folding two groups is bounded
+                // by 2 * 4 * 15 = 120, so the byte additions cannot overflow.
+                let lower = simd.neon.vaddq_u8(lower0, lower1);
+                let upper = simd.neon.vaddq_u8(upper0, upper1);
+                sums[query][0] = simd.neon.vaddq_u16(
+                    sums[query][0],
+                    simd.neon.vmovl_u8(simd.neon.vget_low_u8(lower)),
+                );
+                sums[query][1] = simd.neon.vaddq_u16(
+                    sums[query][1],
+                    simd.neon.vmovl_u8(simd.neon.vget_high_u8(lower)),
+                );
+                sums[query][2] = simd.neon.vaddq_u16(
+                    sums[query][2],
+                    simd.neon.vmovl_u8(simd.neon.vget_low_u8(upper)),
+                );
+                sums[query][3] = simd.neon.vaddq_u16(
+                    sums[query][3],
+                    simd.neon.vmovl_u8(simd.neon.vget_high_u8(upper)),
+                );
+            }
+        }
+
+        for query in 0..N {
+            let mut segment = [0; BATCH_SIZE];
+            // SAFETY: the four stores exactly cover the 32-element segment array.
+            unsafe {
+                simd.neon.vst1q_u16(segment.as_mut_ptr(), sums[query][0]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(8), sums[query][1]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(16), sums[query][2]);
+                simd.neon
+                    .vst1q_u16(segment.as_mut_ptr().add(24), sums[query][3]);
+            }
+            for (result, segment) in results[query].iter_mut().zip(segment) {
+                *result += u32::from(segment);
+            }
+        }
+    }
+}
+
 fn binary_dot_product_neon_throughput(simd: Neon, lhs: &[u64], rhs: &[u64]) -> u32 {
     macro_rules! count {
         ($offset:expr) => {{

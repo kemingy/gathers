@@ -204,6 +204,171 @@ pub(crate) fn fastscan_accumulate(
     );
 }
 
+/// Accumulate asymmetric binary dot products for several queries while sharing code loads.
+pub(crate) fn fastscan_accumulate_many<const N: usize>(
+    simd: Avx2,
+    codes: &[u8],
+    luts: &[&[u8]; N],
+    results: &mut [[u32; BATCH_SIZE]; N],
+) {
+    use ::pulp;
+
+    assert!(luts.iter().all(|lut| lut.len() == codes.len()));
+    let Avx2 {
+        avx, avx2, sse2, ..
+    } = simd;
+
+    simd.vectorize(
+        #[inline(always)]
+        || {
+            let low_mask = avx._mm256_set1_epi8(0x0f);
+            results.fill([0; BATCH_SIZE]);
+
+            for segment_start in (0..codes.len()).step_by(16 * 1_024) {
+                let segment_end = (segment_start + 16 * 1_024).min(codes.len());
+                let (code_chunks, code_tail) = codes[segment_start..segment_end].as_chunks::<32>();
+                assert!(code_tail.is_empty());
+                let lut_chunks: [&[[u8; 32]]; N] = std::array::from_fn(|query| {
+                    let (chunks, tail) = luts[query][segment_start..segment_end].as_chunks::<32>();
+                    assert!(tail.is_empty());
+                    chunks
+                });
+                let zero = avx._mm256_setzero_si256();
+                let zero128 = sse2._mm_setzero_si128();
+                let mut sums = [[zero; 2]; N];
+
+                let (code_pairs, code_pair_tail) = code_chunks.as_chunks::<2>();
+                assert!(code_pair_tail.is_empty());
+                for (pair, code_pair) in code_pairs.iter().enumerate() {
+                    let mut byte_sums = [[zero128; 2]; N];
+                    for (offset, codes) in code_pair.iter().enumerate() {
+                        let codes = pulp::cast(*codes);
+                        let lower_codes = avx2._mm256_and_si256(codes, low_mask);
+                        let upper_codes =
+                            avx2._mm256_and_si256(avx2._mm256_srli_epi16::<4>(codes), low_mask);
+                        for query in 0..N {
+                            let lut = pulp::cast(lut_chunks[query][pair * 2 + offset]);
+                            let lower = avx2._mm256_shuffle_epi8(lut, lower_codes);
+                            let upper = avx2._mm256_shuffle_epi8(lut, upper_codes);
+                            let lower = sse2._mm_add_epi8(
+                                avx._mm256_castsi256_si128(lower),
+                                avx2._mm256_extracti128_si256::<1>(lower),
+                            );
+                            let upper = sse2._mm_add_epi8(
+                                avx._mm256_castsi256_si128(upper),
+                                avx2._mm256_extracti128_si256::<1>(upper),
+                            );
+                            byte_sums[query][0] = sse2._mm_add_epi8(byte_sums[query][0], lower);
+                            byte_sums[query][1] = sse2._mm_add_epi8(byte_sums[query][1], upper);
+                        }
+                    }
+                    // A shuffle result sums four 4-bit query values. Each code chunk
+                    // already combines two 128-bit lanes; folding two chunks is bounded
+                    // by 4 * 4 * 15 = 240, so the byte additions cannot overflow.
+                    for query in 0..N {
+                        sums[query][0] = avx2._mm256_add_epi16(
+                            sums[query][0],
+                            avx2._mm256_cvtepu8_epi16(byte_sums[query][0]),
+                        );
+                        sums[query][1] = avx2._mm256_add_epi16(
+                            sums[query][1],
+                            avx2._mm256_cvtepu8_epi16(byte_sums[query][1]),
+                        );
+                    }
+                }
+
+                for query in 0..N {
+                    let lower: [u16; 16] = pulp::cast(sums[query][0]);
+                    let upper: [u16; 16] = pulp::cast(sums[query][1]);
+                    for (lane, (&lower, &upper)) in lower.iter().zip(&upper).enumerate() {
+                        results[query][lane] += u32::from(lower);
+                        results[query][lane + 16] += u32::from(upper);
+                    }
+                }
+            }
+        },
+    );
+}
+
+/// Accumulate several queries with AVX-512 while sharing code loads.
+///
+/// # Safety
+///
+/// The caller must prove that AVX-512F, AVX-512BW, AVX-512VBMI, and
+/// AVX-512VNNI are available.
+#[allow(unsafe_code)]
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi,avx512vnni")]
+pub(crate) unsafe fn fastscan_accumulate_many_avx512<const N: usize>(
+    codes: &[u8],
+    luts: &[&[u8]; N],
+    results: &mut [[u32; BATCH_SIZE]; N],
+) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    // `vpshufb` evaluates four coordinate groups independently in its 128-bit lanes.
+    // These indices regroup the four scores for each centroid so VNNI can sum them.
+    const TRANSPOSE_INDICES: [u8; 64] = [
+        0, 16, 32, 48, 1, 17, 33, 49, 2, 18, 34, 50, 3, 19, 35, 51, 4, 20, 36, 52, 5, 21, 37, 53,
+        6, 22, 38, 54, 7, 23, 39, 55, 8, 24, 40, 56, 9, 25, 41, 57, 10, 26, 42, 58, 11, 27, 43, 59,
+        12, 28, 44, 60, 13, 29, 45, 61, 14, 30, 46, 62, 15, 31, 47, 63,
+    ];
+    assert!(luts.iter().all(|lut| lut.len() == codes.len()));
+    let low_mask = _mm512_set1_epi8(0x0f);
+    // SAFETY: the constant contains exactly 64 initialized bytes.
+    let transpose = unsafe { _mm512_loadu_si512(TRANSPOSE_INDICES.as_ptr().cast()) };
+    let ones = _mm512_set1_epi8(1);
+    results.fill([0; BATCH_SIZE]);
+
+    for segment_start in (0..codes.len()).step_by(16 * 1_024) {
+        let segment_end = (segment_start + 16 * 1_024).min(codes.len());
+        let (code_chunks, code_tail) = codes[segment_start..segment_end].as_chunks::<64>();
+        assert!(code_tail.is_empty());
+        let lut_chunks: [&[[u8; 64]]; N] = std::array::from_fn(|query| {
+            let (chunks, tail) = luts[query][segment_start..segment_end].as_chunks::<64>();
+            assert!(tail.is_empty());
+            chunks
+        });
+        let mut sums = [[_mm512_setzero_si512(); 2]; N];
+
+        for (group, codes) in code_chunks.iter().enumerate() {
+            // SAFETY: `codes` is an exact 64-byte chunk.
+            let codes = unsafe { _mm512_loadu_si512(codes.as_ptr().cast()) };
+            let lower_codes = _mm512_and_si512(codes, low_mask);
+            let upper_codes = _mm512_and_si512(_mm512_srli_epi16::<4>(codes), low_mask);
+            for query in 0..N {
+                // SAFETY: every LUT chunk contains exactly 64 initialized bytes.
+                let lut = unsafe { _mm512_loadu_si512(lut_chunks[query][group].as_ptr().cast()) };
+                let lower =
+                    _mm512_permutexvar_epi8(transpose, _mm512_shuffle_epi8(lut, lower_codes));
+                let upper =
+                    _mm512_permutexvar_epi8(transpose, _mm512_shuffle_epi8(lut, upper_codes));
+                sums[query][0] = _mm512_dpbusd_epi32(sums[query][0], lower, ones);
+                sums[query][1] = _mm512_dpbusd_epi32(sums[query][1], upper, ones);
+            }
+        }
+
+        for query in 0..N {
+            // SAFETY: each result contains 32 initialized u32 values. The two loads and
+            // stores cover its lower and upper 16-element halves without overlap.
+            unsafe {
+                let lower = results[query].as_mut_ptr();
+                let upper = lower.add(16);
+                _mm512_storeu_si512(
+                    lower.cast(),
+                    _mm512_add_epi32(_mm512_loadu_si512(lower.cast()), sums[query][0]),
+                );
+                _mm512_storeu_si512(
+                    upper.cast(),
+                    _mm512_add_epi32(_mm512_loadu_si512(upper.cast()), sums[query][1]),
+                );
+            }
+        }
+    }
+}
+
 /// Compute the binary dot product of two vectors.
 ///
 /// Refer to: <https://github.com/komrad36/popcount>
