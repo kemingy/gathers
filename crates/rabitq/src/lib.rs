@@ -127,9 +127,67 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
 }
 
 #[derive(Debug, Default)]
-struct Metrics {
-    pub rough: AtomicU64,
-    pub precise: AtomicU64,
+struct AtomicMetrics {
+    queries: AtomicU64,
+    precise_comparisons: AtomicU64,
+}
+
+/// Cumulative statistics for queries executed by a RaBitQ index.
+///
+/// A snapshot may observe concurrent updates at slightly different instants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RaBitQMetrics {
+    /// Number of queries represented by this snapshot.
+    pub queries: u64,
+    /// Number of approximate comparisons evaluated before pruning.
+    pub rough_comparisons: u64,
+    /// Number of candidates refined with an exact distance computation.
+    pub precise_comparisons: u64,
+}
+
+impl RaBitQMetrics {
+    /// Return the saturating difference from an earlier cumulative snapshot.
+    pub fn saturating_sub(self, earlier: Self) -> Self {
+        Self {
+            queries: self.queries.saturating_sub(earlier.queries),
+            rough_comparisons: self
+                .rough_comparisons
+                .saturating_sub(earlier.rough_comparisons),
+            precise_comparisons: self
+                .precise_comparisons
+                .saturating_sub(earlier.precise_comparisons),
+        }
+    }
+
+    /// Number of approximate candidates rejected without an exact distance computation.
+    pub fn pruned_comparisons(self) -> u64 {
+        self.rough_comparisons
+            .saturating_sub(self.precise_comparisons)
+    }
+
+    /// Fraction of approximate comparisons followed by exact refinement.
+    ///
+    /// Returns `None` when the snapshot contains no comparisons.
+    pub fn refinement_rate(self) -> Option<f64> {
+        (self.rough_comparisons != 0)
+            .then(|| self.precise_comparisons as f64 / self.rough_comparisons as f64)
+    }
+
+    /// Fraction of approximate comparisons pruned before exact refinement.
+    ///
+    /// Returns `None` when the snapshot contains no comparisons.
+    pub fn pruning_rate(self) -> Option<f64> {
+        (self.rough_comparisons != 0)
+            .then(|| self.pruned_comparisons() as f64 / self.rough_comparisons as f64)
+    }
+
+    /// Mean number of exact refinements performed per query.
+    ///
+    /// Returns `None` when the snapshot contains no queries.
+    pub fn precise_comparisons_per_query(self) -> Option<f64> {
+        (self.queries != 0).then(|| self.precise_comparisons as f64 / self.queries as f64)
+    }
 }
 
 /// Reusable scratch space for RaBitQ queries.
@@ -156,17 +214,23 @@ impl RaBitQWorkspace {
     }
 }
 
-impl Metrics {
-    pub fn update(&self, rough: u64, precise: u64) {
-        self.rough.fetch_add(rough, Ordering::Relaxed);
-        self.precise.fetch_add(precise, Ordering::Relaxed);
+impl AtomicMetrics {
+    fn update(&self, queries: u64, precise: u64) {
+        self.queries.fetch_add(queries, Ordering::Relaxed);
+        self.precise_comparisons
+            .fetch_add(precise, Ordering::Relaxed);
     }
 
-    pub fn fetch(&self) -> (u64, u64) {
-        (
-            self.rough.load(Ordering::Relaxed),
-            self.precise.load(Ordering::Relaxed),
-        )
+    fn fetch(&self, num_centroids: usize) -> RaBitQMetrics {
+        let queries = self.queries.load(Ordering::Relaxed);
+        let num_centroids = u64::try_from(num_centroids).expect("centroid count exceeds u64");
+        RaBitQMetrics {
+            queries,
+            rough_comparisons: queries
+                .checked_mul(num_centroids)
+                .expect("rough comparison count exceeds u64"),
+            precise_comparisons: self.precise_comparisons.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -180,7 +244,7 @@ pub struct RaBitQ {
     sorted_to_original: Vec<usize>,
     input_dim: usize,
     dim: usize,
-    metrics: Metrics,
+    metrics: AtomicMetrics,
 }
 
 struct QueryFactors {
@@ -338,7 +402,7 @@ impl RaBitQ {
             sorted_to_original,
             input_dim: dim,
             dim: dim_pad,
-            metrics: Metrics::default(),
+            metrics: AtomicMetrics::default(),
         }
     }
 
@@ -346,8 +410,7 @@ impl RaBitQ {
     pub fn retrieve_top_one(&self, query: &[f32]) -> usize {
         let mut workspace = RaBitQWorkspace::new(self.dim);
         let (index, precise) = self.retrieve_top_one_with_workspace(query, &mut workspace);
-        self.metrics
-            .update(self.sorted_to_original.len() as u64, precise);
+        self.metrics.update(1, precise);
         index
     }
 
@@ -370,11 +433,10 @@ impl RaBitQ {
             }
             BinaryVectors::Row(_) => self.retrieve_top_one_parallel(queries, labels),
         };
-        let rough = u64::try_from(labels.len())
-            .expect("label count exceeds u64")
-            .checked_mul(u64::try_from(self.len()).expect("centroid count exceeds u64"))
-            .expect("comparison count exceeds u64");
-        self.metrics.update(rough, precise);
+        self.metrics.update(
+            u64::try_from(labels.len()).expect("label count exceeds u64"),
+            precise,
+        );
     }
 
     /// Retrieve the top-1 index with reusable query workspace.
@@ -664,12 +726,24 @@ impl RaBitQ {
 
     /// Add rough and precise comparison counts to the index metrics.
     pub fn update_metrics(&self, rough: u64, precise: u64) {
-        self.metrics.update(rough, precise);
+        let num_centroids = u64::try_from(self.len()).expect("centroid count exceeds u64");
+        assert_eq!(
+            rough % num_centroids,
+            0,
+            "rough comparisons must contain complete queries"
+        );
+        self.metrics.update(rough / num_centroids, precise);
     }
 
-    /// Get the rough/precise metrics.
+    /// Return rough and precise comparison counts for compatibility with the tuple API.
     pub fn get_metrics(&self) -> (u64, u64) {
-        self.metrics.fetch()
+        let metrics = self.metrics();
+        (metrics.rough_comparisons, metrics.precise_comparisons)
+    }
+
+    /// Return a snapshot of cumulative query statistics.
+    pub fn metrics(&self) -> RaBitQMetrics {
+        self.metrics.fetch(self.len())
     }
 }
 
@@ -683,10 +757,41 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     use super::binary_dot_product_native;
     use super::{
-        BinaryVectors, Factor, QueryFactors, RaBitQ, RaBitQWorkspace, SCALAR,
+        BinaryVectors, Factor, QueryFactors, RaBitQ, RaBitQMetrics, RaBitQWorkspace, SCALAR,
         compute_rough_distances, min_max_residual, min_max_residual_native, squared_euclidean,
     };
     use crate::simd;
+
+    #[test]
+    fn test_metrics_derived_statistics() {
+        let metrics = RaBitQMetrics {
+            queries: 4,
+            rough_comparisons: 1_000,
+            precise_comparisons: 25,
+        };
+
+        assert_eq!(metrics.pruned_comparisons(), 975);
+        assert_eq!(metrics.refinement_rate(), Some(0.025));
+        assert_eq!(metrics.pruning_rate(), Some(0.975));
+        assert_eq!(metrics.precise_comparisons_per_query(), Some(6.25));
+        assert_eq!(
+            metrics.saturating_sub(RaBitQMetrics {
+                queries: 1,
+                rough_comparisons: 250,
+                precise_comparisons: 5,
+            }),
+            RaBitQMetrics {
+                queries: 3,
+                rough_comparisons: 750,
+                precise_comparisons: 20,
+            }
+        );
+
+        let empty = RaBitQMetrics::default();
+        assert_eq!(empty.refinement_rate(), None);
+        assert_eq!(empty.pruning_rate(), None);
+        assert_eq!(empty.precise_comparisons_per_query(), None);
+    }
 
     #[test]
     #[should_panic(expected = "centroids must be complete")]
@@ -966,10 +1071,10 @@ mod tests {
                 .chunks_exact(dim)
                 .map(|query| rabitq.retrieve_top_one_with_workspace(query, &mut workspace))
                 .collect::<Vec<_>>();
-            let before = rabitq.get_metrics();
+            let before = rabitq.metrics();
             let mut actual = vec![0; count];
             rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
-            let after = rabitq.get_metrics();
+            let after = rabitq.metrics();
 
             assert_eq!(
                 actual,
@@ -978,10 +1083,18 @@ mod tests {
                     .map(|&(index, _)| index as u32)
                     .collect::<Vec<_>>()
             );
-            assert_eq!(after.0 - before.0, (count * num_centroids) as u64);
+            assert_eq!(after.queries - before.queries, count as u64);
             assert_eq!(
-                after.1 - before.1,
+                after.rough_comparisons - before.rough_comparisons,
+                (count * num_centroids) as u64
+            );
+            assert_eq!(
+                after.precise_comparisons - before.precise_comparisons,
                 expected.iter().map(|&(_, precise)| precise).sum::<u64>()
+            );
+            assert_eq!(
+                rabitq.get_metrics(),
+                (after.rough_comparisons, after.precise_comparisons)
             );
         }
     }
