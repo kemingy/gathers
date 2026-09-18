@@ -134,7 +134,10 @@ struct AtomicMetrics {
 
 /// Cumulative statistics for queries executed by a RaBitQ index.
 ///
-/// A snapshot may observe concurrent updates at slightly different instants.
+/// Rough comparisons are derived as queries times the index's fixed centroid count:
+/// every query evaluates one rough bound per centroid, including rejected candidates.
+/// A snapshot may observe concurrent updates at slightly different instants; read after
+/// retrieval has finished for consistent totals and rates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RaBitQMetrics {
@@ -410,7 +413,7 @@ impl RaBitQ {
     pub fn retrieve_top_one(&self, query: &[f32]) -> usize {
         let mut workspace = RaBitQWorkspace::new(self.dim);
         let (index, precise) = self.retrieve_top_one_with_workspace(query, &mut workspace);
-        self.metrics.update(1, precise);
+        self.record_queries(1, precise);
         index
     }
 
@@ -433,15 +436,14 @@ impl RaBitQ {
             }
             BinaryVectors::Row(_) => self.retrieve_top_one_parallel(queries, labels),
         };
-        self.metrics.update(
-            u64::try_from(labels.len()).expect("label count exceeds u64"),
-            precise,
-        );
+        self.record_queries(labels.len(), precise);
     }
 
     /// Retrieve the top-1 index with reusable query workspace.
     ///
     /// Returns the index and the number of precise distance comparisons.
+    /// This method does not update the index statistics. Aggregate the returned counts
+    /// and call [`Self::record_queries`] once after processing your queries.
     pub fn retrieve_top_one_with_workspace(
         &self,
         query: &[f32],
@@ -724,15 +726,16 @@ impl RaBitQ {
         (min_index, precise)
     }
 
-    /// Add rough and precise comparison counts to the index metrics.
-    pub fn update_metrics(&self, rough: u64, precise: u64) {
-        let num_centroids = u64::try_from(self.len()).expect("centroid count exceeds u64");
-        assert_eq!(
-            rough % num_centroids,
-            0,
-            "rough comparisons must contain complete queries"
+    /// Record completed workspace queries and their total exact distance comparisons.
+    ///
+    /// Use this once after aggregating results from [`Self::retrieve_top_one_with_workspace`].
+    /// [`Self::retrieve_top_one`] and [`Self::retrieve_top_one_batch`] already record their
+    /// queries and must not be recorded again. Rough comparisons are derived at snapshot time.
+    pub fn record_queries(&self, queries: usize, precise_comparisons: u64) {
+        self.metrics.update(
+            u64::try_from(queries).expect("query count exceeds u64"),
+            precise_comparisons,
         );
-        self.metrics.update(rough / num_centroids, precise);
     }
 
     /// Return rough and precise comparison counts for compatibility with the tuple API.
@@ -797,6 +800,39 @@ mod tests {
     #[should_panic(expected = "centroids must be complete")]
     fn test_new_rejects_incomplete_centroids() {
         RaBitQ::new(&[0.0, 1.0, 2.0], 2);
+    }
+
+    #[test]
+    fn test_workspace_metrics_are_recorded_once_per_group() {
+        let mut rng = seeded_rng();
+        let dim = 64;
+        for num_centroids in [16, 257] {
+            let centroids = (0..num_centroids * dim)
+                .map(|_| rng.random::<f32>())
+                .collect::<Vec<_>>();
+            let index = RaBitQ::new(&centroids, dim);
+            let mut workspace = RaBitQWorkspace::new(index.dim());
+            let mut precise = 0;
+            for query in centroids.chunks_exact(dim).take(3) {
+                precise += index
+                    .retrieve_top_one_with_workspace(query, &mut workspace)
+                    .1;
+            }
+            assert_eq!(index.metrics(), RaBitQMetrics::default());
+            index.record_queries(3, precise);
+            let recorded = index.metrics();
+            assert_eq!(recorded.queries, 3);
+            assert_eq!(recorded.rough_comparisons, 3 * num_centroids as u64);
+            assert_eq!(recorded.precise_comparisons, precise);
+
+            index.retrieve_top_one_batch(&[], dim, &mut []);
+            assert_eq!(index.metrics(), recorded);
+            index.retrieve_top_one(&centroids[..dim]);
+            let delta = index.metrics().saturating_sub(recorded);
+            assert_eq!(delta.queries, 1);
+            assert_eq!(delta.rough_comparisons, num_centroids as u64);
+            assert!(delta.precise_comparisons > 0);
+        }
     }
 
     #[test]

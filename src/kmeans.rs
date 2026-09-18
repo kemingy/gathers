@@ -139,11 +139,7 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
         *label = index as u32;
         precise += count;
     }
-    let rough = u64::try_from(labels.len())
-        .expect("label count exceeds u64")
-        .checked_mul(u64::try_from(rabitq.len()).expect("centroid count exceeds u64"))
-        .expect("comparison count exceeds u64");
-    rabitq.update_metrics(rough, precise);
+    rabitq.record_queries(labels.len(), precise);
 
     let metrics = rabitq.metrics();
     debug!(
