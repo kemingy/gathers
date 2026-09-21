@@ -2,7 +2,7 @@
 
 ## Project Structure and Ownership
 
-The root Cargo workspace contains the public `gathers` crate and three internal crates:
+The root Cargo workspace contains the public `gathers` crate and internal crates:
 
 - `src/lib.rs`: public Rust library surface. The crate denies missing documentation, so every new
   public item needs rustdoc.
@@ -12,7 +12,7 @@ The root Cargo workspace contains the public `gathers` crate and three internal 
 - `src/simd.rs` and `src/simd/`: SIMD dispatch and portable kernels implemented with `pulp`.
 - `src/{sampling,utils}.rs`: shared sampling and vector-layout helpers.
 - `crates/cli/`: non-published `gathers` executable. Owns fvecs I/O, CLI options, and profiling
-  reports; calls library algorithms rather than implementing them again.
+  reports.
 - `crates/rabitq/`: internal, non-published RaBitQ implementation. Keep its quantization, retrieval,
   workspace, and specialized SIMD code here; the root crate re-exports its public API.
 - `crates/seed_rand/`: internal test/benchmark helper for reproducible randomized workloads. It

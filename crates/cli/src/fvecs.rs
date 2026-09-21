@@ -1,12 +1,11 @@
 //! Validated fvecs I/O into a flat aligned buffer shared by CLI commands.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use aligned_vec::AVec;
-
-use crate::invalid;
+use anyhow::{Context, Result, anyhow, ensure};
 
 pub(crate) struct Vectors {
     pub(crate) data: AVec<f32>,
@@ -19,71 +18,89 @@ impl Vectors {
     }
 }
 
-pub(crate) fn read(path: &Path, limit: Option<usize>) -> io::Result<Vectors> {
-    let file = File::open(path)?;
-    let bytes = file.metadata()?.len();
+pub(crate) fn read(path: &Path, limit: Option<usize>) -> Result<Vectors> {
+    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+    let bytes = file
+        .metadata()
+        .with_context(|| format!("cannot read metadata for {}", path.display()))?
+        .len();
     read_rows(BufReader::new(file), bytes, limit)
+        .with_context(|| format!("cannot read fvecs from {}", path.display()))
 }
 
-fn read_rows(mut reader: impl Read, bytes: u64, limit: Option<usize>) -> io::Result<Vectors> {
+fn read_rows(mut reader: impl Read, bytes: u64, limit: Option<usize>) -> Result<Vectors> {
     let mut header = [0; 4];
-    reader.read_exact(&mut header)?;
+    reader
+        .read_exact(&mut header)
+        .context("cannot read first fvecs dimension")?;
     let dim = u32::from_le_bytes(header) as usize;
-    if dim == 0 {
-        return Err(invalid("fvecs dimension must be positive"));
-    }
+    ensure!(dim > 0, "fvecs dimension must be positive");
     let row_bytes = (dim as u64 + 1) * 4;
-    if !bytes.is_multiple_of(row_bytes) {
-        return Err(invalid("fvecs input contains an incomplete row"));
-    }
-    let available =
-        usize::try_from(bytes / row_bytes).map_err(|_| invalid("too many fvecs rows"))?;
+    ensure!(
+        bytes.is_multiple_of(row_bytes),
+        "fvecs input contains an incomplete row"
+    );
+    let available = usize::try_from(bytes / row_bytes).context("too many fvecs rows")?;
     let rows = limit.unwrap_or(available);
-    if rows == 0 || rows > available {
-        return Err(invalid(
-            "requested row count must be positive and fit in the input",
-        ));
-    }
-    let values = rows
-        .checked_mul(dim)
-        .ok_or_else(|| invalid("input shape overflow"))?;
+    ensure!(
+        rows > 0 && rows <= available,
+        "requested row count must be positive and fit in the input"
+    );
+    let values = rows.checked_mul(dim).context("input shape overflow")?;
     let mut data = AVec::new(64);
     data.try_reserve_exact(values)
-        .map_err(|error| io::Error::other(format!("cannot allocate vector buffer: {error:?}")))?;
+        .map_err(|error| anyhow!("cannot allocate vector buffer: {error:?}"))?;
     data.resize(values, 0.0_f32);
     for (index, row) in data.chunks_exact_mut(dim).enumerate() {
         if index > 0 {
-            reader.read_exact(&mut header)?;
-            if u32::from_le_bytes(header) as usize != dim {
-                return Err(invalid("fvecs rows must have the same dimension"));
-            }
+            reader
+                .read_exact(&mut header)
+                .with_context(|| format!("cannot read dimension for row {}", index + 1))?;
+            ensure!(
+                u32::from_le_bytes(header) as usize == dim,
+                "fvecs row {} has a different dimension (expected {dim})",
+                index + 1
+            );
         }
-        reader.read_exact(bytemuck::cast_slice_mut(row))?;
+        reader
+            .read_exact(bytemuck::cast_slice_mut(row))
+            .with_context(|| format!("cannot read coordinates for row {}", index + 1))?;
         for value in row {
             *value = f32::from_bits(u32::from_le(value.to_bits()));
-            if !value.is_finite() {
-                return Err(invalid("fvecs coordinates must be finite"));
-            }
+            ensure!(
+                value.is_finite(),
+                "fvecs row {} contains a non-finite coordinate",
+                index + 1
+            );
         }
     }
     Ok(Vectors { data, dim })
 }
 
-pub(crate) fn write(path: &Path, data: &[f32], dim: usize) -> io::Result<()> {
-    if dim == 0 || !data.len().is_multiple_of(dim) {
-        return Err(invalid("output must contain complete vectors"));
-    }
+pub(crate) fn write(path: &Path, data: &[f32], dim: usize) -> Result<()> {
+    ensure!(
+        dim > 0 && data.len().is_multiple_of(dim),
+        "output must contain complete vectors"
+    );
     let header = u32::try_from(dim)
-        .map_err(|_| invalid("output dimension exceeds u32"))?
+        .context("output dimension exceeds u32")?
         .to_le_bytes();
-    let mut writer = BufWriter::new(File::create(path)?);
+    let mut writer = BufWriter::new(
+        File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
+    );
     for row in data.chunks_exact(dim) {
-        writer.write_all(&header)?;
+        writer
+            .write_all(&header)
+            .context("cannot write fvecs dimension")?;
         for value in row {
-            writer.write_all(&value.to_le_bytes())?;
+            writer
+                .write_all(&value.to_le_bytes())
+                .context("cannot write fvecs coordinate")?;
         }
     }
-    writer.flush()
+    writer
+        .flush()
+        .with_context(|| format!("cannot flush {}", path.display()))
 }
 
 #[cfg(test)]

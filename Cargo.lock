@@ -529,6 +529,7 @@ name = "gathers-cli"
 version = "0.0.0"
 dependencies = [
  "aligned-vec",
+ "anyhow",
  "argh",
  "bytemuck",
  "gathers",

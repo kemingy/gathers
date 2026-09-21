@@ -6,6 +6,7 @@ mod kmeans;
 
 use std::io::{self, Write};
 
+use anyhow::{Result, ensure};
 use argh::FromArgs;
 use logforth::append;
 use logforth::filter::rustlog::RustLogFilterBuilder;
@@ -36,28 +37,26 @@ enum Command {
     Assign(assign::Args),
 }
 
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
-}
-
-fn ready(wait: bool) -> io::Result<()> {
+fn ready(wait: bool) -> Result<()> {
     eprintln!("ready: pid={}", std::process::id());
     if wait {
         eprintln!("Attach the sampler, then press Enter to start.");
-        if io::stdin().read_line(&mut String::new())? == 0 {
-            return Err(invalid("stdin closed while waiting for the profiler"));
-        }
+        ensure!(
+            io::stdin().read_line(&mut String::new())? != 0,
+            "stdin closed while waiting for the profiler"
+        );
     }
     Ok(())
 }
 
-fn report(value: serde_json::Value) -> io::Result<()> {
+fn report(value: serde_json::Value) -> Result<()> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &value)?;
-    writeln!(stdout)
+    writeln!(stdout)?;
+    Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args: Args = argh::from_env();
     if cfg!(debug_assertions) {
         eprintln!(

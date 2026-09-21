@@ -1,16 +1,16 @@
 //! Repeatable RaBitQ assignment timing and sampling with external fvecs data.
 
 use std::hint::black_box;
-use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result, ensure};
 use argh::FromArgs;
 use gathers::rabitq::RaBitQ;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::{fvecs, invalid, ready, report};
+use crate::{fvecs, ready, report};
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "assign")]
@@ -51,23 +51,23 @@ fn median_ms(times: &[Duration]) -> f64 {
     seconds * 1_000.0
 }
 
-pub(crate) fn run(args: &Args, common: &crate::Args) -> io::Result<()> {
-    if args.repeats == 0 {
-        return Err(invalid("repeats must be positive"));
-    }
+pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
+    ensure!(args.repeats > 0, "repeats must be positive");
     let min_duration = Duration::try_from_secs_f64(args.min_seconds)
-        .map_err(|_| invalid("min-seconds must be finite and nonnegative"))?;
+        .context("min-seconds must be finite and nonnegative")?;
     let vectors = fvecs::read(&args.vectors, args.num_vectors)?;
     let centroids = fvecs::read(&args.centroids, args.num_centroids)?;
-    if vectors.dim != centroids.dim {
-        return Err(invalid("query and centroid dimensions must match"));
-    }
+    ensure!(
+        vectors.dim == centroids.dim,
+        "query and centroid dimensions must match"
+    );
     let dim = vectors.dim;
     let num_vectors = vectors.len();
     let num_centroids = centroids.len();
-    if num_centroids > u32::MAX as usize {
-        return Err(invalid("centroid count exceeds the label representation"));
-    }
+    ensure!(
+        num_centroids <= u32::MAX as usize,
+        "centroid count exceeds the label representation"
+    );
     let mut labels = vec![0; num_vectors];
     let mut rng = StdRng::seed_from_u64(common.seed);
     let start = Instant::now();

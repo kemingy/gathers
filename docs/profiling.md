@@ -1,24 +1,23 @@
 # Clustering and assignment profiling
 
 The non-published `gathers-cli` package in `crates/cli` builds the `gathers` executable.
-It calls the library's K-means and RaBitQ APIs without adding hot-loop instrumentation.
+It provides K-means training and RaBitQ assignment profiling.
 Inputs and profiling artifacts stay outside the repository; tests use tiny local fixtures.
 
 ## Build and run
 
 ```sh
 cargo build --profile perf -p gathers-cli
-target/perf/gathers --threads 16 --seed 42 --cpu 'Apple M3 Max' kmeans \
+target/perf/gathers --threads 16 --seed 42 kmeans \
   -i /path/to/gist.fvecs -o /path/to/centroids.fvecs -n 4096 -m 25
-target/perf/gathers --threads 16 --seed 42 --cpu 'Apple M3 Max' assign \
+target/perf/gathers --threads 16 --seed 42 assign \
   --vectors /path/to/gist.fvecs --centroids /path/to/centroids.fvecs \
   --warmup 1 --repeats 5
 ```
 
 Global options (`--threads`, `--seed`, `--cpu`, `--wait-for-profiler`) go **before** the subcommand.
 Use `gathers --help`, `gathers kmeans --help`, or `gathers assign --help` for options.
-The old root binary's training flags now belong to `kmeans`; Cargo commands need `-p gathers-cli`.
-For local installation, use `cargo install --path crates/cli`, not `cargo install gathers`.
+For local installation, use `cargo install --path crates/cli`.
 
 Only **fvecs** is supported: each row starts with a little-endian u32 dimension followed by that
 many little-endian float32 coordinates. Dimensions must be positive and consistent, and coordinates

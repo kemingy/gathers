@@ -80,11 +80,17 @@ fn assignment_rejects_mismatched_dimensions_and_invalid_options() {
     let centroids = dir.path().join("centroids.fvecs");
     fixture(&vectors, 3, 2);
     fixture(&centroids, 2, 2);
-    for extra in [
-        vec![],
-        vec!["--repeats", "0"],
-        vec!["--min-seconds", "NaN"],
-        vec!["--num-vectors", "0"],
+    for (extra, message) in [
+        (vec![], "query and centroid dimensions must match"),
+        (vec!["--repeats", "0"], "repeats must be positive"),
+        (
+            vec!["--min-seconds", "NaN"],
+            "min-seconds must be finite and nonnegative",
+        ),
+        (
+            vec!["--num-vectors", "0"],
+            "requested row count must be positive",
+        ),
     ] {
         let output = cli()
             .args(["assign", "--vectors"])
@@ -96,6 +102,38 @@ fn assignment_rejects_mismatched_dimensions_and_invalid_options() {
             .unwrap();
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("InvalidInput"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
     }
+}
+
+#[test]
+fn input_errors_identify_the_file_and_invalid_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&centroids, 2, 2);
+    let run = || {
+        cli()
+            .args(["assign", "--vectors"])
+            .arg(&vectors)
+            .arg("--centroids")
+            .arg(&centroids)
+            .output()
+            .unwrap()
+    };
+    let missing = run();
+    assert!(!missing.status.success());
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(error.contains("cannot open"));
+    assert!(error.contains(vectors.to_str().unwrap()));
+
+    fixture(&vectors, 2, 2);
+    let mut bytes = std::fs::read(&vectors).unwrap();
+    bytes[12..16].copy_from_slice(&3_u32.to_le_bytes());
+    std::fs::write(&vectors, bytes).unwrap();
+    let malformed = run();
+    assert!(!malformed.status.success());
+    let error = String::from_utf8_lossy(&malformed.stderr);
+    assert!(error.contains(vectors.to_str().unwrap()));
+    assert!(error.contains("row 2 has a different dimension"));
 }

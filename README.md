@@ -36,6 +36,5 @@ cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
   --vectors vectors.fvecs --centroids centroids.fvecs
 ```
 
-This replaces the root binary: use `-p gathers-cli` and the `kmeans` subcommand for the old
-training workflow. To install the binary from a checkout, run `cargo install --path crates/cli`.
+To install the binary from a checkout, run `cargo install --path crates/cli`.
 For timing scope and CPU sampling, see the [profiling guide](./docs/profiling.md).

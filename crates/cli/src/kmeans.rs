@@ -1,12 +1,12 @@
-use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use anyhow::{Result, ensure};
 use argh::FromArgs;
 use gathers::distance::Distance;
 use gathers::kmeans::KMeans;
 
-use crate::{fvecs, invalid, ready, report};
+use crate::{fvecs, ready, report};
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "kmeans")]
@@ -26,10 +26,11 @@ pub(crate) struct Args {
     max_iter: u32,
 }
 
-pub(crate) fn run(args: &Args, common: &crate::Args) -> io::Result<()> {
-    if args.n_cluster == 0 || args.max_iter == 0 {
-        return Err(invalid("n-cluster and max-iter must be positive"));
-    }
+pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
+    ensure!(
+        args.n_cluster > 0 && args.max_iter > 0,
+        "n-cluster and max-iter must be positive"
+    );
     let vectors = fvecs::read(&args.input, None)?;
     let num_vectors = vectors.len();
     let dim = vectors.dim;
