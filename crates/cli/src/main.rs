@@ -37,15 +37,13 @@ enum Command {
     Assign(assign::Args),
 }
 
-fn ready(wait: bool) -> Result<()> {
+fn wait_for_profiler() -> Result<()> {
     eprintln!("ready: pid={}", std::process::id());
-    if wait {
-        eprintln!("Attach the sampler, then press Enter to start.");
-        ensure!(
-            io::stdin().read_line(&mut String::new())? != 0,
-            "stdin closed while waiting for the profiler"
-        );
-    }
+    eprintln!("Attach the sampler, then press Enter to start.");
+    ensure!(
+        io::stdin().read_line(&mut String::new())? != 0,
+        "stdin closed while waiting for the profiler"
+    );
     Ok(())
 }
 

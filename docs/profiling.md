@@ -39,7 +39,8 @@ and report `debug_assertions: true`; do not use their times for performance comp
 
 ## Reports and reproducibility
 
-Each command prints one JSON object to stdout; logging, warnings, and readiness go to stderr.
+Each command prints one JSON object to stdout; logging and warnings go to stderr.
+The PID and attachment prompt are printed to stderr only with `--wait-for-profiler`.
 Reports include shape, paths, seed, workers, CPU description, architecture, and OS. Hardware details
 are supplied externally, not detected through a backend-name API.
 

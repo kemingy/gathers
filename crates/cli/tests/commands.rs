@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn fixture(path: &Path, dim: u32, rows: usize) {
     let mut file = File::create(path).unwrap();
@@ -27,7 +27,68 @@ fn json(command: &mut Command) -> serde_json::Value {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("ready: pid="));
+    assert!(!stderr.contains("Attach the sampler"));
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn profiler_wait_accepts_enter_and_rejects_closed_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let trained = dir.path().join("trained.fvecs");
+    fixture(&vectors, 2, 64);
+    fixture(&centroids, 2, 2);
+    for name in ["kmeans", "assign"] {
+        let command = || {
+            let mut command = cli();
+            command.arg("--wait-for-profiler").arg(name);
+            if name == "kmeans" {
+                command
+                    .arg("-i")
+                    .arg(&vectors)
+                    .arg("-o")
+                    .arg(&trained)
+                    .args(["-n", "1", "-m", "1"]);
+            } else {
+                command
+                    .arg("--vectors")
+                    .arg(&vectors)
+                    .arg("--centroids")
+                    .arg(&centroids)
+                    .args(["--warmup", "0", "--repeats", "1"]);
+            }
+            command
+        };
+        let closed = command().stdin(Stdio::null()).output().unwrap();
+        assert!(!closed.status.success());
+        assert!(closed.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&closed.stderr)
+                .contains("stdin closed while waiting for the profiler")
+        );
+
+        let mut child = command()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["command"], name);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("ready: pid="));
+        assert!(stderr.contains("Attach the sampler"));
+    }
 }
 
 #[test]

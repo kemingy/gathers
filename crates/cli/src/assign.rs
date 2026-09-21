@@ -9,7 +9,7 @@ use gathers::rabitq::RaBitQ;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
-use crate::{fvecs, ready, report};
+use crate::{fvecs, report, wait_for_profiler};
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "assign")]
@@ -75,7 +75,9 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     for _ in 0..args.warmup {
         index.retrieve_top_one_batch(&vectors.data, dim, &mut labels);
     }
-    ready(common.wait_for_profiler)?;
+    if common.wait_for_profiler {
+        wait_for_profiler()?;
+    }
     let mut times = Vec::with_capacity(args.repeats);
     let phase_start = Instant::now();
     while times.len() < args.repeats || phase_start.elapsed() < min_duration {

@@ -6,7 +6,7 @@ use argh::FromArgs;
 use gathers::distance::Distance;
 use gathers::kmeans::KMeans;
 
-use crate::{fvecs, ready, report};
+use crate::{fvecs, report, wait_for_profiler};
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "kmeans")]
@@ -42,7 +42,9 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         false,
     )
     .seed(common.seed);
-    ready(common.wait_for_profiler)?;
+    if common.wait_for_profiler {
+        wait_for_profiler()?;
+    }
     let start = Instant::now();
     let centroids = kmeans.fit(vectors.data, dim);
     let fit_ms = start.elapsed().as_secs_f64() * 1_000.0;
