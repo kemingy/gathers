@@ -78,6 +78,7 @@ perf = []
 [dev-dependencies]
 criterion = "0.8.0"
 seed-rand = { path = "crates/seed_rand" }
+serde_json = "1.0"
 
 [[bench]]
 name = "bench"

@@ -508,6 +508,7 @@ dependencies = [
  "rand",
  "rayon",
  "seed-rand",
+ "serde_json",
 ]
 
 [[package]]

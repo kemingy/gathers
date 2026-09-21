@@ -26,3 +26,5 @@ cargo add gathers
 ## Usage
 
 Check the [docs](https://docs.rs/gathers) and [main.rs](./src/main.rs).
+
+For repeatable assignment timing and CPU sampling, see [Profiling RaBitQ](./docs/profiling.md).

@@ -290,6 +290,15 @@ impl RaBitQ {
 
     /// Create a new RaBitQ instance.
     pub fn new(centroids: &[f32], dim: usize) -> Self {
+        Self::new_with_rng(centroids, dim, &mut rand::rng())
+    }
+
+    /// Create an index using the supplied random generator for rotation.
+    ///
+    /// Reuse the same seed and centroid order to reproduce an index within the same
+    /// build and target. Random streams and floating-point results can change across
+    /// dependency versions or architectures.
+    pub fn new_with_rng<R: rand::Rng + ?Sized>(centroids: &[f32], dim: usize, rng: &mut R) -> Self {
         assert!(dim > 0, "dimension must be greater than zero");
         assert_eq!(centroids.len() % dim, 0, "centroids must be complete");
         assert!(!centroids.is_empty(), "at least one centroid is required");
@@ -303,8 +312,7 @@ impl RaBitQ {
         });
         let dim_sqrt = (dim_pad as f32).sqrt();
 
-        let mut rng = rand::rng();
-        let rotator = FhtKacRotator::new(dim, dim_pad, &mut rng);
+        let rotator = FhtKacRotator::new(dim, dim_pad, rng);
         let mut projected_data = vec![0.0; num_centroids * dim_pad];
         for (centroid, projected) in centroids
             .chunks_exact(dim)
@@ -725,7 +733,8 @@ impl RaBitQ {
 
 #[cfg(test)]
 mod tests {
-    use rand::RngExt;
+    use rand::rngs::StdRng;
+    use rand::{RngExt, SeedableRng};
     use seed_rand::seeded_rng;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64"))]
@@ -737,6 +746,36 @@ mod tests {
         compute_rough_distances, min_max_residual, min_max_residual_native, squared_euclidean,
     };
     use crate::simd;
+
+    #[test]
+    fn seeded_construction_reproduces_assignments_and_refinements() {
+        let mut rng = seeded_rng();
+        for (dim, num_centroids) in [(1, 16), (65, 257), (960, 256)] {
+            let centroids = (0..dim * num_centroids)
+                .map(|_| rng.random::<f32>())
+                .collect::<Vec<_>>();
+            let queries = (0..dim * 13)
+                .map(|_| rng.random::<f32>())
+                .collect::<Vec<_>>();
+            let seed = rng.random();
+            let first = RaBitQ::new_with_rng(&centroids, dim, &mut StdRng::seed_from_u64(seed));
+            let second = RaBitQ::new_with_rng(&centroids, dim, &mut StdRng::seed_from_u64(seed));
+            let mut first_projection = vec![0.0; first.dim()];
+            let mut second_projection = vec![0.0; second.dim()];
+            first.rotator.rotate(&queries[..dim], &mut first_projection);
+            second
+                .rotator
+                .rotate(&queries[..dim], &mut second_projection);
+            assert_eq!(first_projection, second_projection);
+
+            let mut first_labels = vec![0; 13];
+            let mut second_labels = vec![0; 13];
+            first.retrieve_top_one_batch(&queries, dim, &mut first_labels);
+            second.retrieve_top_one_batch(&queries, dim, &mut second_labels);
+            assert_eq!(first_labels, second_labels);
+            assert_eq!(first.metrics.counts(), second.metrics.counts());
+        }
+    }
 
     #[test]
     fn test_metrics_display_reads_current_counts() {
