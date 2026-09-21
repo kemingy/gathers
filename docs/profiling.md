@@ -9,9 +9,9 @@ Inputs and profiling artifacts stay outside the repository; tests use tiny local
 ```sh
 cargo build --profile perf -p gathers-cli
 target/perf/gathers --threads 16 --seed 42 kmeans \
-  -i /path/to/gist.fvecs -o /path/to/centroids.fvecs -n 4096 -m 25
+  -i /path/to/dataset.fvecs -o /path/to/centroids.fvecs -n 4096 -m 25
 target/perf/gathers --threads 16 --seed 42 assign \
-  --vectors /path/to/gist.fvecs --centroids /path/to/centroids.fvecs \
+  --vectors /path/to/dataset.fvecs --centroids /path/to/centroids.fvecs \
   --warmup 1 --repeats 5
 ```
 
@@ -80,7 +80,7 @@ Profile separately from benchmarking: sampling adds overhead. For an assignment 
 
 ```sh
 target/perf/gathers --threads 16 --seed 42 --wait-for-profiler assign \
-  --vectors /path/to/gist.fvecs --centroids /path/to/centroids.fvecs \
+  --vectors /path/to/dataset.fvecs --centroids /path/to/centroids.fvecs \
   --warmup 1 --repeats 5 --min-seconds 30
 ```
 

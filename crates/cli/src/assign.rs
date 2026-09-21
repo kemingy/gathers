@@ -1,6 +1,5 @@
 //! Repeatable RaBitQ assignment timing and sampling with external fvecs data.
 
-use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -81,7 +80,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     let phase_start = Instant::now();
     while times.len() < args.repeats || phase_start.elapsed() < min_duration {
         let start = Instant::now();
-        index.retrieve_top_one_batch(black_box(&vectors.data), dim, black_box(&mut labels));
+        index.retrieve_top_one_batch(&vectors.data, dim, &mut labels);
         times.push(start.elapsed());
     }
     let total_seconds: f64 = times.iter().map(Duration::as_secs_f64).sum();
