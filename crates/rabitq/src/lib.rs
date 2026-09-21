@@ -1,6 +1,7 @@
 //! A minimal RaBitQ implementation for top-1 retrieval.
 
 use core::f32;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use faer::{Col, Mat, MatRef, Row};
@@ -126,6 +127,7 @@ pub fn project(vec: &[f32], orthogonal: &MatRef<f32>) -> Col<f32> {
     pulp::Arch::new().dispatch(Impl { vec, orthogonal })
 }
 
+// Shared counters updated after retrieval; reporting uses a plain RaBitQMetrics snapshot.
 #[derive(Debug, Default)]
 struct AtomicMetrics {
     queries: AtomicU64,
@@ -138,18 +140,32 @@ struct AtomicMetrics {
 /// every query evaluates one rough bound per centroid, including rejected candidates.
 /// A snapshot may observe concurrent updates at slightly different instants; read after
 /// retrieval has finished for consistent totals and rates.
+///
+/// Formatting with [`fmt::Display`] prints the counts and refinement rate (as a fraction).
+/// When there are no comparisons, the rate is displayed as `n/a`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct RaBitQMetrics {
-    /// Number of queries represented by this snapshot.
-    pub queries: u64,
-    /// Number of approximate comparisons evaluated before pruning.
-    pub rough_comparisons: u64,
-    /// Number of candidates refined with an exact distance computation.
-    pub precise_comparisons: u64,
+    queries: u64,
+    rough_comparisons: u64,
+    precise_comparisons: u64,
 }
 
 impl RaBitQMetrics {
+    /// Number of queries represented by this snapshot.
+    pub fn queries(self) -> u64 {
+        self.queries
+    }
+
+    /// Number of approximate comparisons evaluated before pruning.
+    pub fn rough_comparisons(self) -> u64 {
+        self.rough_comparisons
+    }
+
+    /// Number of candidates refined with an exact distance computation.
+    pub fn precise_comparisons(self) -> u64 {
+        self.precise_comparisons
+    }
+
     /// Return the saturating difference from an earlier cumulative snapshot.
     pub fn saturating_sub(self, earlier: Self) -> Self {
         Self {
@@ -190,6 +206,20 @@ impl RaBitQMetrics {
     /// Returns `None` when the snapshot contains no queries.
     pub fn precise_comparisons_per_query(self) -> Option<f64> {
         (self.queries != 0).then(|| self.precise_comparisons as f64 / self.queries as f64)
+    }
+}
+
+impl fmt::Display for RaBitQMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "queries({}), rough_cmp({}), precise_cmp({}), refinement_rate(",
+            self.queries, self.rough_comparisons, self.precise_comparisons,
+        )?;
+        match self.refinement_rate() {
+            Some(rate) => write!(f, "{rate:.6})"),
+            None => f.write_str("n/a)"),
+        }
     }
 }
 
@@ -773,6 +803,13 @@ mod tests {
             precise_comparisons: 25,
         };
 
+        assert_eq!(metrics.queries(), 4);
+        assert_eq!(metrics.rough_comparisons(), 1_000);
+        assert_eq!(metrics.precise_comparisons(), 25);
+        assert_eq!(
+            metrics.to_string(),
+            "queries(4), rough_cmp(1000), precise_cmp(25), refinement_rate(0.025000)"
+        );
         assert_eq!(metrics.pruned_comparisons(), 975);
         assert_eq!(metrics.refinement_rate(), Some(0.025));
         assert_eq!(metrics.pruning_rate(), Some(0.975));
@@ -791,6 +828,10 @@ mod tests {
         );
 
         let empty = RaBitQMetrics::default();
+        assert_eq!(
+            empty.to_string(),
+            "queries(0), rough_cmp(0), precise_cmp(0), refinement_rate(n/a)"
+        );
         assert_eq!(empty.refinement_rate(), None);
         assert_eq!(empty.pruning_rate(), None);
         assert_eq!(empty.precise_comparisons_per_query(), None);

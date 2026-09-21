@@ -141,14 +141,7 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
     }
     rabitq.record_queries(labels.len(), precise);
 
-    let metrics = rabitq.metrics();
-    debug!(
-        "RaBitQ: queries({}), rough_cmp({}), precise_cmp({}), refinement_rate({:.6})",
-        metrics.queries,
-        metrics.rough_comparisons,
-        metrics.precise_comparisons,
-        metrics.refinement_rate().unwrap_or_default(),
-    )
+    debug!("RaBitQ: {}", rabitq.metrics());
 }
 
 /// Assign vectors to centroids with RaBitQ in multi-threads.
@@ -160,14 +153,7 @@ pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, label
     let rabitq = RaBitQ::new(centroids, dim);
     rabitq.retrieve_top_one_batch(vecs, dim, labels);
 
-    let metrics = rabitq.metrics();
-    debug!(
-        "RaBitQ: queries({}), rough_cmp({}), precise_cmp({}), refinement_rate({:.6})",
-        metrics.queries,
-        metrics.rough_comparisons,
-        metrics.precise_comparisons,
-        metrics.refinement_rate().unwrap_or_default(),
-    )
+    debug!("RaBitQ: {}", rabitq.metrics());
 }
 
 /// Update centroids to the mean of assigned vectors.
