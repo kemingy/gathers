@@ -715,12 +715,6 @@ impl RaBitQ {
         );
     }
 
-    /// Return rough and precise comparison counts for compatibility with the tuple API.
-    pub fn get_metrics(&self) -> (u64, u64) {
-        let (queries, precise) = self.metrics.counts();
-        (self.metrics.rough_comparisons(queries), precise)
-    }
-
     /// Borrow the cumulative query statistics for reporting with [`fmt::Display`].
     ///
     /// This is a live reference: formatting it reads the current counters.
@@ -789,19 +783,15 @@ mod tests {
             assert_eq!(metrics.counts(), (0, 0));
             index.record_queries(3, precise);
             assert_eq!(metrics.counts(), (3, precise));
-            let recorded = index.get_metrics();
-            assert_eq!(recorded, (3 * num_centroids as u64, precise));
+            assert_eq!(metrics.rough_comparisons(3), 3 * num_centroids as u64);
 
             index.retrieve_top_one_batch(&[], dim, &mut []);
-            assert_eq!(index.get_metrics(), recorded);
+            assert_eq!(metrics.counts(), (3, precise));
             index.retrieve_top_one(&centroids[..dim]);
             let (queries, updated_precise) = metrics.counts();
             assert_eq!(queries, 4);
             assert!(updated_precise > precise);
-            assert_eq!(
-                index.get_metrics(),
-                (4 * num_centroids as u64, updated_precise)
-            );
+            assert_eq!(metrics.rough_comparisons(queries), 4 * num_centroids as u64);
         }
     }
 
@@ -1077,10 +1067,10 @@ mod tests {
                 .chunks_exact(dim)
                 .map(|query| rabitq.retrieve_top_one_with_workspace(query, &mut workspace))
                 .collect::<Vec<_>>();
-            let before = rabitq.get_metrics();
+            let before = rabitq.metrics().counts();
             let mut actual = vec![0; count];
             rabitq.retrieve_top_one_batch(&queries, dim, &mut actual);
-            let after = rabitq.get_metrics();
+            let after = rabitq.metrics().counts();
 
             assert_eq!(
                 actual,
@@ -1089,7 +1079,7 @@ mod tests {
                     .map(|&(index, _)| index as u32)
                     .collect::<Vec<_>>()
             );
-            assert_eq!(after.0 - before.0, (count * num_centroids) as u64);
+            assert_eq!(after.0 - before.0, count as u64);
             assert_eq!(
                 after.1 - before.1,
                 expected.iter().map(|&(_, precise)| precise).sum::<u64>()
