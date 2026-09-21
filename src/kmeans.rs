@@ -139,19 +139,9 @@ pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [
         *label = index as u32;
         precise += count;
     }
-    let rough = u64::try_from(labels.len())
-        .expect("label count exceeds u64")
-        .checked_mul(u64::try_from(rabitq.len()).expect("centroid count exceeds u64"))
-        .expect("comparison count exceeds u64");
-    rabitq.update_metrics(rough, precise);
+    rabitq.record_queries(labels.len(), precise);
 
-    let (rough, precise) = rabitq.get_metrics();
-    debug!(
-        "RaBitQ: rough_cmp({}), precise_cmp({}), ratio({})",
-        rough,
-        precise,
-        rough as f32 / precise as f32
-    )
+    debug!("RaBitQ: {}", rabitq.metrics());
 }
 
 /// Assign vectors to centroids with RaBitQ in multi-threads.
@@ -163,13 +153,7 @@ pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, label
     let rabitq = RaBitQ::new(centroids, dim);
     rabitq.retrieve_top_one_batch(vecs, dim, labels);
 
-    let (rough, precise) = rabitq.get_metrics();
-    debug!(
-        "RaBitQ: rough_cmp({}), precise_cmp({}), ratio({})",
-        rough,
-        precise,
-        rough as f32 / precise as f32
-    )
+    debug!("RaBitQ: {}", rabitq.metrics());
 }
 
 /// Update centroids to the mean of assigned vectors.
