@@ -2,7 +2,7 @@
 
 ## Project Structure and Ownership
 
-The root Cargo workspace contains the public `gathers` crate and two internal crates:
+The root Cargo workspace contains the public `gathers` crate and three internal crates:
 
 - `src/lib.rs`: public Rust library surface. The crate denies missing documentation, so every new
   public item needs rustdoc.
@@ -11,7 +11,8 @@ The root Cargo workspace contains the public `gathers` crate and two internal cr
 - `src/distance.rs`: scalar reference implementations and runtime-dispatched distance operations.
 - `src/simd.rs` and `src/simd/`: SIMD dispatch and portable kernels implemented with `pulp`.
 - `src/{sampling,utils}.rs`: shared sampling and vector-layout helpers.
-- `src/main.rs`: small executable/example entrypoint, not a second implementation of the library.
+- `crates/cli/`: non-published `gathers` executable. Owns fvecs I/O, CLI options, and profiling
+  reports; calls library algorithms rather than implementing them again.
 - `crates/rabitq/`: internal, non-published RaBitQ implementation. Keep its quantization, retrieval,
   workspace, and specialized SIMD code here; the root crate re-exports its public API.
 - `crates/seed_rand/`: internal test/benchmark helper for reproducible randomized workloads. It
@@ -46,8 +47,9 @@ Targeted commands are useful while iterating:
 - `cargo test test_name -- --nocapture`: run one Rust test and display captured output.
 - `cargo test -p rabitq`: test only the RaBitQ crate.
 - `cargo bench --bench bench` or `cargo bench --bench kmeans`: run optimized Criterion benchmarks.
-- `cargo build --profile perf --features perf`: build the single-threaded profiling configuration
-  with debug symbols.
+- `cargo build --profile perf -p gathers-cli`: build the profiling CLI with debug symbols.
+  Select worker count using `gathers --threads N`; do not enable the library's separate `perf`
+  feature, which changes K-means assignment paths.
 
 The repository defaults to stable Rust, but formatting explicitly uses nightly. Install both
 toolchains when running the full checks. Do not hand-edit generated lockfile changes; regenerate

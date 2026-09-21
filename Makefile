@@ -1,7 +1,6 @@
 format-rust:
-	@cargo +nightly fmt
-	@cd python
-	@cargo +nightly fmt
+	@cargo +nightly fmt --all
+	@cargo +nightly fmt --manifest-path python/Cargo.toml
 
 format-python:
 	@ruff check --fix python
@@ -9,11 +8,10 @@ format-python:
 format: format-rust format-python
 
 lint-rust:
-	@cargo +nightly fmt --check
-	@cargo clippy -- -D warnings
-	@cd python
-	@cargo +nightly fmt --check
-	@cargo clippy -- -D warnings
+	@cargo +nightly fmt --all --check
+	@cargo clippy --workspace --all-targets -- -D warnings
+	@cargo +nightly fmt --manifest-path python/Cargo.toml --check
+	@cargo clippy --manifest-path python/Cargo.toml -- -D warnings
 
 lint-ast:
 	@ast-grep scan $(AST_GREP_SCAN_ARGS)
@@ -40,7 +38,7 @@ lint-python:
 lint: lint-rust lint-python
 
 test-rust:
-	@cargo test --verbose
+	@cargo test --workspace --verbose
 
 install-python:
 	@cd python && pip install -e .

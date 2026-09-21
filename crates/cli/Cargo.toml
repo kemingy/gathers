@@ -1,0 +1,26 @@
+[package]
+name = "gathers-cli"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "gathers"
+path = "src/main.rs"
+
+[dependencies]
+aligned-vec = "0.6.4"
+argh = "0.1.19"
+bytemuck.workspace = true
+gathers = { path = "../.." }
+logforth = { version = "0.30.0", features = ["starter-log"] }
+rand.workspace = true
+rayon.workspace = true
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

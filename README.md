@@ -25,6 +25,17 @@ cargo add gathers
 
 ## Usage
 
-Check the [docs](https://docs.rs/gathers) and [main.rs](./src/main.rs).
+Check the [library docs](https://docs.rs/gathers).
 
-For repeatable assignment timing and CPU sampling, see [Profiling RaBitQ](./docs/profiling.md).
+The non-published CLI in [`crates/cli`](./crates/cli) supports fvecs input and output:
+
+```sh
+cargo run --release -p gathers-cli -- --threads 16 --seed 42 kmeans \
+  -i vectors.fvecs -o centroids.fvecs -n 4096 -m 25
+cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
+  --vectors vectors.fvecs --centroids centroids.fvecs
+```
+
+This replaces the root binary: use `-p gathers-cli` and the `kmeans` subcommand for the old
+training workflow. To install the binary from a checkout, run `cargo install --path crates/cli`.
+For timing scope and CPU sampling, see the [profiling guide](./docs/profiling.md).
