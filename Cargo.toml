@@ -17,6 +17,10 @@ pulp = "0.22.0"
 rand = "0.10.0"
 rayon = "1.12.0"
 
+[patch.crates-io]
+# Temporary backport until the compact-mask first_true fix is released upstream.
+pulp = { git = "https://github.com/kemingy/pulp", rev = "120f46b0fce6d255dba91fd837bb79d8cfd4ea13" }
+
 [package]
 name = "gathers"
 version = "0.3.1"
