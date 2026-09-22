@@ -57,9 +57,11 @@ are supplied externally, not detected through a backend-name API.
 For comparisons, keep inputs (including centroid order), seed, workers, build flags, and machine
 the same. Record `git rev-parse HEAD`, `rustc -Vv`, and any local diff beside the report.
 For `assign`, `--seed` fixes the rotation within the same build/target, not across dependency
-versions or architectures. For `kmeans`, the seed controls sampling and empty-cluster repair;
-internal RaBitQ assignments still use random rotations, so a seed alone does not guarantee
-bit-identical trained centroids. No algorithm behavior is changed by the CLI.
+versions or architectures. For `kmeans`, the seed controls sampling, every internal RaBitQ
+rotation, and empty-cluster repair. Repeated training with identical input order, configuration,
+worker count, build, and target reproduces the trained centroids. Results are not guaranteed
+to be bitwise identical across dependency versions, architectures, or worker counts.
+Without a library seed, training still uses fresh randomness.
 
 Capture hardware information with shell tools:
 

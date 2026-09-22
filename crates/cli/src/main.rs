@@ -17,7 +17,7 @@ struct Args {
     /// rayon workers; zero selects the Rayon default
     #[argh(option, default = "0")]
     threads: usize,
-    /// random seed (training: sampling/repair; assignment: rotation)
+    /// random seed (training: sampling/rotations/repair; assignment: rotation)
     #[argh(option, default = "42")]
     seed: u64,
     /// machine/CPU description included in the report

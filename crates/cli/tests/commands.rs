@@ -97,14 +97,21 @@ fn trained_fvecs_feed_reproducible_assignment() {
     let vectors = dir.path().join("vectors.fvecs");
     let centroids = dir.path().join("centroids.fvecs");
     fixture(&vectors, 3, 129);
-    let trained = json(
-        cli()
-            .args(["kmeans", "-i"])
-            .arg(&vectors)
-            .arg("-o")
-            .arg(&centroids)
-            .args(["-n", "2", "-m", "2"]),
-    );
+    let train = || {
+        json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args(["-n", "2", "-m", "2"]),
+        )
+    };
+    let trained = train();
+    let first_centroids = std::fs::read(&centroids).unwrap();
+    let repeated = train();
+    assert_eq!(trained["seed"], repeated["seed"]);
+    assert_eq!(first_centroids, std::fs::read(&centroids).unwrap());
     assert_eq!(trained["command"], "kmeans");
     assert_eq!(trained["num_centroids"], 2);
     assert_eq!(trained["dim"], 3);
