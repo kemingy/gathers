@@ -12,10 +12,9 @@ For Python users, check the [Python README](./python/README.md).
 - [x] PyO3 binding
 - [x] RaBitQ assignment
 - [x] Parallel with Rayon
-- [x] `x86` & `x86_64` SIMD acceleration
+- [x] SIMD acceleration on `x86_64` and `aarch64` via [`pulp`](https://github.com/sarah-quinones/pulp)
 - [ ] mini batch K-means
 - [ ] Hierarchical K-means
-- [ ] `arm` & `aarch64` SIMD acceleration
 
 ## Installation
 
@@ -26,6 +25,9 @@ cargo add gathers
 ## Usage
 
 Check the [library docs](https://docs.rs/gathers).
+
+Beyond k-means assignment, the RaBitQ index is exposed as a standalone module, `gathers::rabitq`,
+for approximate top-1 vector retrieval.
 
 The non-published CLI in [`crates/cli`](./crates/cli) supports fvecs input and output:
 
