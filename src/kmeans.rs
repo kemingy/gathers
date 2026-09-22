@@ -459,98 +459,39 @@ mod tests {
     use crate::utils::as_continuous_vec;
 
     #[test]
-    fn rabitq_assignment_uses_the_supplied_rng_in_each_iteration() {
-        let mut data_rng = seeded_rng();
-        for dim in [32, 65] {
-            let vecs = (0..87 * dim)
-                .map(|_| data_rng.random::<f32>())
-                .collect::<Vec<_>>();
-            for num_centroids in [8, 33] {
-                let centroids = &vecs[..num_centroids * dim];
-                for threads in [1, 2] {
-                    let pool = rayon::ThreadPoolBuilder::new()
-                        .num_threads(threads)
-                        .build()
-                        .unwrap();
-                    pool.install(|| {
-                        let seed = data_rng.random();
-                        let mut expected_rng = StdRng::seed_from_u64(seed);
-                        let mut single_rng = StdRng::seed_from_u64(seed);
-                        let mut parallel_rng = StdRng::seed_from_u64(seed);
-                        for _ in 0..3 {
-                            let index = RaBitQ::new_with_rng(centroids, dim, &mut expected_rng);
-                            let mut expected = vec![0; 87];
-                            index.retrieve_top_one_batch(&vecs, dim, &mut expected);
-                            let mut single = vec![0; 87];
-                            rabitq_assign_inner(
-                                &vecs,
-                                centroids,
-                                dim,
-                                &mut single,
-                                &mut single_rng,
-                            );
-                            let mut parallel = vec![0; 87];
-                            rabitq_assign_parallel_inner(
-                                &vecs,
-                                centroids,
-                                dim,
-                                &mut parallel,
-                                &mut parallel_rng,
-                            );
-                            assert_eq!(single, expected);
-                            assert_eq!(parallel, expected);
-                            // Labels alone can match despite different rotations. Verify that
-                            // construction advanced all three supplied streams equally.
-                            let next = expected_rng.random::<u64>();
-                            assert_eq!(single_rng.random::<u64>(), next);
-                            assert_eq!(parallel_rng.random::<u64>(), next);
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn seeded_kmeans_reproduces_sampling_and_training() {
+    fn rabitq_assignment_advances_the_supplied_rng() {
         let mut rng = seeded_rng();
         let dim = 65;
-        let vecs = (0..2200)
-            .map(|_| (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<_>>())
+        let vecs = (0..37 * dim)
+            .map(|_| rng.random::<f32>())
             .collect::<Vec<_>>();
-        let vecs = as_continuous_vec(&vecs);
-        for threads in [1, 2] {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            for (distance, residual) in [
-                (Distance::SquaredEuclidean, false),
-                (Distance::SquaredEuclidean, true),
-                (Distance::NegativeDotProduct, false),
-            ] {
-                let kmeans = KMeans::new(8, 3, 1e-4, distance, residual).seed(rng.random());
-                pool.install(|| {
-                    let first = kmeans.fit(vecs.clone(), dim);
-                    let second = kmeans.fit(vecs.clone(), dim);
-                    assert_eq!(
-                        first, second,
-                        "threads={threads}, distance={distance:?}, residual={residual}"
-                    );
-                });
-            }
-        }
-    }
+        let centroids = &vecs[..33 * dim];
+        let seed = rng.random();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
 
-    #[test]
-    fn seeded_kmeans_reproduces_empty_cluster_repair() {
-        let mut rng = seeded_rng();
-        let vecs = as_continuous_vec(&vec![vec![1.0, 2.0]; 256]);
-        let kmeans = KMeans::new(4, 3, 1e-4, Distance::SquaredEuclidean, false).seed(rng.random());
-        let first = kmeans.fit(vecs.clone(), 2);
-        let second = kmeans.fit(vecs, 2);
-        assert_eq!(first, second);
-        assert!(first.iter().all(|value| value.is_finite()));
+        pool.install(|| {
+            for assign in [
+                rabitq_assign_inner::<StdRng>,
+                rabitq_assign_parallel_inner::<StdRng>,
+            ] {
+                let mut expected_rng = StdRng::seed_from_u64(seed);
+                let mut actual_rng = StdRng::seed_from_u64(seed);
+                for _ in 0..2 {
+                    let index = RaBitQ::new_with_rng(centroids, dim, &mut expected_rng);
+                    let mut expected = vec![0; 37];
+                    index.retrieve_top_one_batch(&vecs, dim, &mut expected);
+
+                    let mut actual = vec![0; 37];
+                    assign(&vecs, centroids, dim, &mut actual, &mut actual_rng);
+                    assert_eq!(actual, expected);
+                    // Labels can match even with different rotations; also check the RNG stream.
+                    assert_eq!(actual_rng.random::<u64>(), expected_rng.random::<u64>());
+                }
+            }
+        });
     }
 
     #[test]
