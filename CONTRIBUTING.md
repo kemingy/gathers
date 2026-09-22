@@ -20,7 +20,6 @@ identical.
 
 Local benchmarks generate fresh representative inputs intentionally. They measure performance over
 the input distribution rather than one permanently fixed sample; benchmark conclusions should be
-confirmed across multiple samples or runs. CodSpeed sets `GATHERS_RANDOM_SEED` so base and change
-measurements use the same input and K-means initialization. Set that variable locally to reproduce a
-CodSpeed workload. Input preparation and cloning belong in Criterion setup, outside the timed
-routine.
+confirmed across multiple samples or runs. Pin `GATHERS_RANDOM_SEED` locally to reproduce a
+workload or to compare two implementations on identical generated data. Input preparation and
+cloning belong in Criterion setup, outside the timed routine.
