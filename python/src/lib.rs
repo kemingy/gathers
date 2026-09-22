@@ -1,20 +1,16 @@
 use core::f32;
 
+use gathers::distance::{Distance, argmin, squared_euclidean};
+use gathers::kmeans::{KMeans, rabitq_assign_parallel};
+use gathers::utils::{as_continuous_vec, as_matrix};
 use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::types::{PyModule, PyModuleMethods};
 use pyo3::{Bound, PyResult, pyfunction, pymodule, wrap_pyfunction};
 
-use gathers::distance::{Distance, argmin, squared_euclidean};
-use gathers::kmeans::{KMeans, rabitq_assign_parallel};
-use gathers::utils::{as_matrix, as_continuous_vec};
-
 /// assign the vector to the nearest centroid.
 #[pyfunction]
 #[pyo3(signature = (vec, centroids))]
-fn assign<'py>(
-    vec: PyReadonlyArray1<'py, f32>,
-    centroids: PyReadonlyArray2<'py, f32>,
-) -> u32 {
+fn assign<'py>(vec: PyReadonlyArray1<'py, f32>, centroids: PyReadonlyArray2<'py, f32>) -> u32 {
     let v = vec.as_array();
     let c = centroids.as_array();
     let num = c.nrows();
@@ -38,7 +34,13 @@ fn batch_assign<'py>(
     let mut labels = vec![0; vectors.nrows()];
     rabitq_assign_parallel(
         vectors.as_slice().expect("failed to get the vecs slice"),
-        centroids.as_array().as_slice().expect("failed to get the centroids slice"), vectors.ncols(), &mut labels);
+        centroids
+            .as_array()
+            .as_slice()
+            .expect("failed to get the centroids slice"),
+        vectors.ncols(),
+        &mut labels,
+    );
     labels
 }
 
@@ -53,7 +55,10 @@ fn kmeans_fit<'py>(
     let vecs = source.as_array();
     let dim = vecs.ncols();
     let kmeans = KMeans::new(n_cluster, max_iter, 1e-4, Distance::SquaredEuclidean, false);
-    let centroids = kmeans.fit(as_continuous_vec(&as_matrix(vecs.as_slice().unwrap(), dim)), dim);
+    let centroids = kmeans.fit(
+        as_continuous_vec(&as_matrix(vecs.as_slice().unwrap(), dim)),
+        dim,
+    );
     let matrix = as_matrix(&centroids, dim);
     Ok(PyArray2::from_vec2(source.py(), &matrix)?)
 }

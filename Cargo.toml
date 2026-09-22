@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rabitq", "crates/seed_rand"]
+members = ["crates/cli", "crates/rabitq", "crates/seed_rand"]
 exclude = ["python"]
 resolver = "3"
 
@@ -40,11 +40,9 @@ workspace = true
 
 [dependencies]
 aligned-vec = "0.6.4"
-argh = "0.1.19"
 bytemuck.workspace = true
 faer.workspace = true
 log = "0.4.34"
-logforth = { version = "0.30.0", features = ["starter-log"] }
 num-traits = "0.2.19"
 pulp.workspace = true
 rabitq = { path = "crates/rabitq" }
