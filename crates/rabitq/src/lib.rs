@@ -901,33 +901,89 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_scalar_quantize() {
+    // Compare exactly with the selected backend's rule, not with a loose +/-1 tolerance.
+    fn assert_scalar_quantization(input: &[f32], lower_bound: f32, multiplier: f32) {
+        let mut expected = vec![0; input.len()];
+        simd::native::scalar_quantize(&mut expected, input, lower_bound, multiplier);
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-        if !simd::x86::Avx2::is_available() {
-            return;
+        if simd::x86::Avx2Fma::is_available() {
+            for (output, &value) in expected.iter_mut().zip(input) {
+                *output = (value - lower_bound).mul_add(multiplier, 0.5) as u8;
+            }
         }
 
+        let mut actual = vec![0; input.len()];
+        let sum = simd::scalar_quantize(&mut actual, input, lower_bound, multiplier);
+        assert_eq!(actual, expected);
+        assert_eq!(sum, expected.iter().map(|&value| u32::from(value)).sum());
+    }
+
+    #[test]
+    fn scalar_quantize_rounds_nonnegative_halfways_up_in_blocks_and_tails() {
+        for code in 0..15 {
+            for len in [0, 1, 7, 8, 9, 15, 16, 17, 33] {
+                let input = vec![code as f32 + 0.5; len];
+                let mut output = vec![0; len];
+                let sum = simd::scalar_quantize(&mut output, &input, 0.0, 1.0);
+                assert_eq!(output, vec![code + 1; len], "code={code}, len={len}");
+                assert_eq!(sum, u32::from(code + 1) * len as u32);
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_quantize_matches_backend_rule_near_boundaries() {
+        for lower_bound in [-1.0, 0.0] {
+            for multiplier in [1.0, 3.0, 15.0] {
+                let input = (0..15)
+                    .flat_map(|code| {
+                        let value = (code as f32 + 0.5) / multiplier + lower_bound;
+                        [value.next_down(), value, value.next_up()]
+                    })
+                    .collect::<Vec<_>>();
+                // Every prefix exercises a different SIMD block/tail split.
+                for len in 0..=input.len() {
+                    assert_scalar_quantization(&input[..len], lower_bound, multiplier);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_quantize_documents_backend_difference_just_below_half() {
+        let input = [0.5_f32.next_down(); 17];
+        let mut native = [0; 17];
+        let sum = simd::native::scalar_quantize(&mut native, &input, 0.0, 1.0);
+        assert_eq!(native, [0; 17]);
+        assert_eq!(sum, 0);
+
+        let expected_code = {
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                u8::from(simd::x86::Avx2Fma::is_available())
+            }
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            {
+                0
+            }
+        };
+        let mut output = [0; 17];
+        let sum = simd::scalar_quantize(&mut output, &input, 0.0, 1.0);
+        assert_eq!(output, [expected_code; 17]);
+        assert_eq!(sum, 17 * u32::from(expected_code));
+    }
+
+    #[test]
+    fn test_scalar_quantize() {
         let mut rng = seeded_rng();
         for _ in 0..100 {
             for dim in [1, 15, 16, 17, 64, 128, 256, 320, 1024] {
                 let x = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
                 let y = (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>();
-                let mut quantized = vec![0u8; dim];
                 let mut residual = vec![0.0; dim];
-                let (upper_bound, lower_bound) = min_max_residual_native(&mut residual, &x, &y);
+                let (lower_bound, upper_bound) = min_max_residual_native(&mut residual, &x, &y);
                 let multiplier = ((upper_bound - lower_bound) * SCALAR).recip();
-                let sum = simd::native::scalar_quantize(
-                    &mut quantized,
-                    &residual,
-                    lower_bound,
-                    multiplier,
-                );
-                let mut quantized_simd = vec![0u8; dim];
-                let sum_simd =
-                    simd::scalar_quantize(&mut quantized_simd, &residual, lower_bound, multiplier);
-                assert_eq!(quantized, quantized_simd);
-                assert_eq!(sum, sum_simd);
+                assert_scalar_quantization(&residual, lower_bound, multiplier);
             }
         }
     }
