@@ -227,6 +227,22 @@ mod tests {
     }
 
     #[test]
+    fn test_argmin_each_lane_and_tail() {
+        for len in [1, 8, 12, 16, 25, 32, 64, 65, 128, 140] {
+            let mut values = vec![1.0; len];
+            for expected in 0..len {
+                values[expected] = -1.0;
+                assert_eq!(
+                    argmin(&values),
+                    expected,
+                    "length {len}, minimum at {expected}"
+                );
+                values[expected] = 1.0;
+            }
+        }
+    }
+
+    #[test]
     fn test_argmin() {
         let mut rng = seeded_rng();
         for _ in 0..100 {

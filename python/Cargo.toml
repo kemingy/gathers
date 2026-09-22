@@ -19,3 +19,7 @@ numpy = "0.29.0"
 unsafe_code = "deny"
 
 [workspace]
+
+[patch.crates-io]
+# Keep this standalone workspace on the same Pulp backport as the root workspace.
+pulp = { git = "https://github.com/kemingy/pulp", rev = "120f46b0fce6d255dba91fd837bb79d8cfd4ea13" }
