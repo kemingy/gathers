@@ -17,13 +17,25 @@ pub mod legacy;
     }
 );
 
-/// Compute the u8 scalar quantization of a f32 vector.
+::pulp::simd_type!(
+    pub(crate) struct Avx2Fma {
+        avx: "avx",
+        avx2: "avx2",
+        fma: "fma",
+    }
+);
+
+/// Compute the u8 scalar quantization of a f32 vector, rounding nonnegative
+/// halfway values upward.
 ///
-/// This function doesn't need `bias` because it *round* the f32 to u32 instead of *floor*.
+/// Uses fused scaling with a 0.5 bias followed by truncation in both SIMD blocks
+/// and scalar tails. This can differ from separate multiplication and rounding
+/// close to half-integer boundaries.
 ///
 /// # Panics
 ///
-/// This function panics if the `sse2`, `avx` and `avx2` target features are not available.
+/// This function panics if the `avx`, `avx2` and `fma` target features are not available.
+/// It also panics if the input and output lengths differ.
 #[inline]
 pub fn scalar_quantize(
     quantized: &mut [u8],
@@ -33,9 +45,12 @@ pub fn scalar_quantize(
 ) -> u32 {
     use ::pulp;
 
-    let simd = Avx2::try_new().unwrap();
+    assert_eq!(quantized.len(), vec.len());
+
+    let simd = Avx2Fma::try_new().unwrap();
     let avx = simd.avx;
     let avx2 = simd.avx2;
+    let fma = simd.fma;
 
     simd.vectorize(
         #[inline(always)]
@@ -44,6 +59,7 @@ pub fn scalar_quantize(
 
             let lower = avx._mm256_set1_ps(lower_bound);
             let scalar = avx._mm256_set1_ps(multiplier);
+            let half = avx._mm256_set1_ps(0.5);
             let mut sum256 = avx._mm256_setzero_si256();
             let mask = avx._mm256_setr_epi8(
                 0, 4, 8, 12, -1, -1, -1, -1, //
@@ -56,9 +72,13 @@ pub fn scalar_quantize(
 
             for (q, &v) in iter::zip(quantize, vec) {
                 let v = pulp::cast(v);
-                // `avx._mm256_cvtps_epi32` is *round* instead of *floor*, so we don't need the bias here
-                quantize8xi32 =
-                    avx._mm256_cvtps_epi32(avx._mm256_mul_ps(avx._mm256_sub_ps(v, lower), scalar));
+                // CVTPS2DQ normally uses ties-to-even, unlike the scalar .round().
+                // A fused bias plus truncation rounds nonnegative halfways upward.
+                quantize8xi32 = avx._mm256_cvttps_epi32(fma._mm256_fmadd_ps(
+                    avx._mm256_sub_ps(v, lower),
+                    scalar,
+                    half,
+                ));
                 sum256 = avx2._mm256_add_epi32(sum256, quantize8xi32);
                 // extract the lower 8 bits of each 32-bit integer and save them to [0..32] and [128..160]
                 let shuffled = avx2._mm256_shuffle_epi8(quantize8xi32, mask);
@@ -79,7 +99,7 @@ pub fn scalar_quantize(
             let mut sum = avx2._mm256_cvtsi256_si32(combined) as u32;
 
             for (q, &v) in iter::zip(quantize_tail, vec_tail) {
-                *q = ((v - lower_bound) * multiplier).round() as u8;
+                *q = (v - lower_bound).mul_add(multiplier, 0.5) as u8;
                 sum += *q as u32;
             }
 

@@ -30,6 +30,12 @@ pub fn min_max_residual(res: &mut [f32], x: &[f32], y: &[f32]) -> (f32, f32) {
 }
 
 /// Scale a vector to `u8` values.
+///
+/// Inputs are scaled to the nonnegative four-bit range. AArch64 and the scalar
+/// fallback round the scaled value to nearest, with ties upward. AVX2+FMA uses
+/// fused scaling with a 0.5 bias followed by truncation, including scalar tails.
+/// Codes can differ by one near rounding boundaries across these backends;
+/// bitwise-identical quantization across architectures is not guaranteed.
 #[inline]
 pub fn scalar_quantize(
     quantized: &mut [u8],
@@ -38,7 +44,7 @@ pub fn scalar_quantize(
     multiplier: f32,
 ) -> u32 {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    if crate::simd::x86::Avx2::is_available() {
+    if crate::simd::x86::Avx2Fma::is_available() {
         return crate::simd::x86::scalar_quantize(quantized, vec, lower_bound, multiplier);
     }
 

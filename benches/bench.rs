@@ -200,7 +200,7 @@ pub fn scalar_quantize_benchmark(c: &mut Criterion) {
             b.iter(|| scalar_quantize_native(&mut quantized, input, lower_bound, multiplier));
         });
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        if std::is_x86_feature_detected!("avx2") {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
             group.bench_with_input(BenchmarkId::new("pulp_x86", dim), &input, |b, input| {
                 let mut quantized = vec![0; input.len()];
                 b.iter(|| {

@@ -98,6 +98,9 @@ fn scalar_quantize_neon(
         let offset = i * 16;
         let quantize = |lane_offset| {
             let values = unsafe { simd.neon.vld1q_f32(vec.as_ptr().add(offset + lane_offset)) };
+            // FCVTAU already rounds nonnegative halfways upward, so no 0.5 bias is
+            // needed. Adding FMA + FCVTZU regressed the measured NEON kernel.
+            // Separate multiplication can differ from x86's fused bias near ties.
             simd.neon.vcvtaq_u32_f32(
                 simd.neon
                     .vmulq_f32(simd.neon.vsubq_f32(values, lower), multiplier_vector),
