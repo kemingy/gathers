@@ -84,3 +84,7 @@ harness = false
 [[bench]]
 name = "kmeans"
 harness = false
+
+[[bench]]
+name = "sampling"
+harness = false

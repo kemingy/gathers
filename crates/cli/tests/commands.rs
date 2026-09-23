@@ -34,6 +34,85 @@ fn json(command: &mut Command) -> serde_json::Value {
 }
 
 #[test]
+fn training_samples_before_loading_and_is_batch_size_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 3, 1000);
+    let mut previous = None;
+    for batch in ["1", "37", "4096"] {
+        let result = json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args(["-n", "2", "-m", "2", "--batch-rows", batch]),
+        );
+        assert_eq!(result["num_vectors"], 1000);
+        assert_eq!(result["training_rows"], 512);
+        let actual = std::fs::read(&centroids).unwrap();
+        if let Some(expected) = previous {
+            assert_eq!(actual, expected);
+        }
+        previous = Some(actual);
+    }
+    let rejected = cli()
+        .args(["kmeans", "-i"])
+        .arg(&vectors)
+        .arg("-o")
+        .arg(dir.path().join("rejected.fvecs"))
+        .args(["-n", "2", "--memory-budget-gb", "1"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("exceeds budget"));
+    assert!(!dir.path().join("rejected.fvecs").exists());
+}
+
+#[test]
+fn explicit_training_sample_size_is_validated_and_independent_of_read_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 3, 1000);
+    let command = |samples: &str| {
+        let mut command = cli();
+        command
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args(["-n", "2", "-m", "1", "--training-samples", samples]);
+        command
+    };
+    for (samples, message) in [
+        ("0", "must be positive"),
+        ("77", "at least 39"),
+        ("1001", "no larger than the source"),
+    ] {
+        let output = command(samples).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+        assert!(!centroids.exists());
+    }
+    // An explicit size may be below or above the default 256 * K, without resampling.
+    for samples in [78, 700, 1000] {
+        let report = json(&mut command(&samples.to_string()));
+        assert_eq!(report["num_vectors"], 1000);
+        assert_eq!(report["training_rows"], samples);
+        assert_eq!(report["validate_all"], false);
+        for field in ["index_sample_ms", "index_sort_ms", "sample_read_ms"] {
+            assert!(report[field].as_f64().unwrap() >= 0.0);
+        }
+        let expected = std::fs::read(&centroids).unwrap();
+        let report = json(command(&samples.to_string()).arg("--validate-all"));
+        assert_eq!(report["validate_all"], true);
+        assert_eq!(std::fs::read(&centroids).unwrap(), expected);
+    }
+}
+
+#[test]
 fn profiler_wait_accepts_enter_and_rejects_closed_stdin() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");

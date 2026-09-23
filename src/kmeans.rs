@@ -15,8 +15,8 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
-use crate::sampling::subsample_inner;
-use crate::utils::{as_continuous_vec, centroid_residual, normalize};
+use crate::sampling::subsample_flat;
+use crate::utils::{centroid_residual, normalize};
 
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
@@ -345,16 +345,60 @@ impl KMeans {
     /// Fit the KMeans configurations to the given vectors and return the centroids.
     pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
         if let Some(seed) = self.seed {
-            self.fit_inner(vecs, dim, &mut StdRng::seed_from_u64(seed))
+            self.fit_inner(vecs, dim, true, &mut StdRng::seed_from_u64(seed))
         } else {
-            self.fit_inner(vecs, dim, &mut rand::rng())
+            self.fit_inner(vecs, dim, true, &mut rand::rng())
         }
+    }
+
+    /// Train on every row of an already-prepared sample, without further subsampling.
+    ///
+    /// Uses the same layout and preprocessing as [`Self::fit`]. Configure the cluster count
+    /// with [`Self::new`] based on the original dataset size; a default configuration derives
+    /// it from the sample size. The seed controls initialization, rotations and empty-cluster
+    /// repair. Source sampling is the caller's responsibility. Requires at least 39 rows per
+    /// cluster, even when the original dataset is larger.
+    pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
+        if let Some(seed) = self.seed {
+            self.fit_inner(vecs, dim, false, &mut StdRng::seed_from_u64(seed))
+        } else {
+            self.fit_inner(vecs, dim, false, &mut rand::rng())
+        }
+    }
+
+    /// Number of rows [`Self::fit`] retains, capped at 256 per cluster.
+    ///
+    /// Use this before loading vectors to prepare an external sample. Panics if the dataset
+    /// has fewer than 39 rows per cluster. Does not allocate or change the configuration.
+    pub fn training_sample_size(&self, num_vectors: usize) -> usize {
+        num_vectors
+            .min((self.cluster_count(num_vectors) as usize).saturating_mul(MAX_POINTS_PER_CENTROID))
+    }
+
+    fn cluster_count(&self, num_vectors: usize) -> u32 {
+        let num_clusters = if self.use_default_config {
+            (((num_vectors as f32).sqrt() as u32) * 4)
+                .min((num_vectors / MIN_POINTS_PER_CENTROID) as u32)
+        } else {
+            self.num_clusters
+        };
+        assert!(num_vectors > 0, "at least one vector is required");
+        assert!(
+            num_vectors >= num_clusters as usize,
+            "number of samples must be greater than num_clusters"
+        );
+        assert!(
+            num_clusters > 0 && num_vectors / MIN_POINTS_PER_CENTROID >= num_clusters as usize,
+            "too few samples for num_clusters"
+        );
+        num_clusters
     }
 
     fn fit_inner<R: Rng + ?Sized>(
         &self,
         mut vecs: AVec<f32>,
         dim: usize,
+        subsample: bool,
         rng: &mut R,
     ) -> AVec<f32> {
         validate_vectors(&vecs, dim);
@@ -363,19 +407,8 @@ impl KMeans {
         let num_vectors = vecs.len() / dim;
 
         // auto-config `num_clusters` when initialized with `default()`
-        let num_clusters = match self.use_default_config {
-            true => (((num_vectors as f32).sqrt() as u32) * 4)
-                .min((num_vectors / MIN_POINTS_PER_CENTROID) as u32),
-            false => self.num_clusters,
-        };
+        let num_clusters = self.cluster_count(num_vectors);
         debug!("num of points: {num_vectors}, num of clusters: {num_clusters}");
-
-        if num_vectors < num_clusters as usize {
-            panic!("number of samples must be greater than num_clusters");
-        }
-        if num_vectors < num_clusters as usize * MIN_POINTS_PER_CENTROID {
-            panic!("too few samples for num_clusters");
-        }
 
         // use residual for more accurate L2 distance computations
         if self.distance == Distance::SquaredEuclidean && self.use_residual {
@@ -384,14 +417,13 @@ impl KMeans {
         }
 
         // subsample
-        if num_vectors > MAX_POINTS_PER_CENTROID * num_clusters as usize {
-            let n_sample = MAX_POINTS_PER_CENTROID * num_clusters as usize;
+        let n_sample = self.training_sample_size(num_vectors);
+        if subsample && num_vectors > n_sample {
             debug!("subsample to {n_sample} points");
-            vecs = as_continuous_vec(&subsample_inner(n_sample, &vecs, dim, rng));
+            vecs = subsample_flat(n_sample, &vecs, dim, rng);
         }
 
-        let mut centroids =
-            as_continuous_vec(&subsample_inner(num_clusters as usize, &vecs, dim, rng));
+        let mut centroids = subsample_flat(num_clusters as usize, &vecs, dim, rng);
         if self.distance == Distance::NegativeDotProduct {
             centroids.chunks_mut(dim).for_each(normalize);
         }
@@ -457,6 +489,20 @@ mod tests {
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    fn prepared_sample_uses_all_rows_above_the_automatic_cap() {
+        let values = (0..600).map(|value| vec![value as f32]).collect::<Vec<_>>();
+        let model = KMeans::new(1, 1, 0.01, Distance::SquaredEuclidean, false).seed(42);
+        assert_eq!(model.training_sample_size(600), 256);
+        assert_eq!(&*model.fit_sample(as_continuous_vec(&values), 1), &[299.5]);
+        let small = &values[..128];
+        assert_eq!(model.training_sample_size(128), 128);
+        assert_eq!(
+            model.fit_sample(as_continuous_vec(small), 1),
+            model.fit(as_continuous_vec(small), 1)
+        );
+    }
 
     #[test]
     fn rabitq_assignment_advances_the_supplied_rng() {
