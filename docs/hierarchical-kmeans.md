@@ -11,12 +11,12 @@ traversal and training rules.
 
 ## Goal
 
-Flat assignment compares every vector against all `k` centroids. Instead,
-organize the centroids into a tree: level 0 holds `B` top centroids, every
-internal node has up to `B` children, and the leaves are cells of fine
-centroids. A query scans `B` candidates at each of `L` routing levels plus
-the `m` fine centroids in the leaf cell it reaches — `O(B·L + m)` distance
-computations instead of `O(k)` for greedy descent.
+Flat assignment compares every vector against all `k` fine centroids. Instead,
+organize them into a tree. Each routing centroid represents at least 196
+centroids from the immediately lower layer; a new routing layer must contain
+at least 16 centroids. A query scans the top layer, then one child list per
+layer down to a cell of fine centroids. Its greedy-descent cost is the top
+layer size plus the sizes of those child lists, instead of `k` comparisons.
 
 This composes with the existing accelerators rather than replacing them: every
 per-node scan is an ordinary flat scan (SIMD and/or RaBitQ), just over a small
@@ -24,12 +24,16 @@ candidate set.
 
 ## Structure
 
-1. Train fine centroids as today (`kmeans.fit`), producing `k` centroids.
+1. For `n` input rows, choose about `k = n^0.8 / 16` fine centroids and train
+   them with `kmeans.fit`. This is the proposed leaf-count rule; the current
+   `KMeans::default()` uses a different automatic count.
 2. Build the hierarchy bottom-up: cluster the fine centroids into the first
    routing layer, then cluster that layer's centroids into the next coarser
-   layer. Repeat until the top has at most `B` centroids. Record which
-   previous-layer centroids belong to each parent. The first routing layer
-   requires at least 196 fine centroids per routing centroid.
+   layer. Given `m` centroids in the previous layer, propose about `√m` new
+   centroids, capped at `⌊m / 196⌋` so each can have at least 196 immediate
+   children. Create the layer only if that count is at least 16. Record which
+   previous-layer centroids belong to each parent and verify the actual
+   assignments meet the 196-child minimum.
 3. Store each node's children contiguously with per-level offset arrays — one
    contiguous `&[f32]` plus `dim` per level, matching the existing flat layout
    contract. Store a `u32` leaf-to-original-index map when outputs must keep
@@ -39,19 +43,18 @@ candidate set.
    rule below. A radius over immediate child centers alone is insufficient
    for that rule.
 
-Assignment cost: `B·L + (fine centroids scanned)` vs `k` flat. Balanced
-routing levels grow by a factor of `B` toward the leaves, but the minimum of
-196 fine centroids per routing centroid limits depth. For `B = 16` and
-`k ≈ 1M`, three routing levels leave about 244 fine centroids per leaf cell:
-greedy descent makes about `3·16 + 244 = 292` comparisons vs 1,000,000.
-Four routing levels would leave only about 15 fine centroids per lowest cell
-and violate the 196-member rule.
+For 1,000,000 input rows, the proposed leaf count is about 3,943 fine
+centroids. Its square root is about 63, but the 196-child cap permits only
+`⌊3,943 / 196⌋ = 20` routing centroids. The next layer is impossible because
+20 centroids cannot form 16 groups of 196. With balanced cells, greedy descent
+scans about `20 + 3,943 / 20 ≈ 217` candidates versus 3,943 for flat
+assignment. These are comparison counts, not measured runtimes.
 
 ## Assignment algorithms
 
 ### Greedy descent
 
-At each level, compute distances to the current node's `B` children and follow
+At each level, compute distances to the current node's children and follow
 the argmin; at a leaf, scan its fine centroids. Minimal state, fully
 branch-predictable, trivially SIMD. This is the right default inside `fit`,
 where small boundary errors are tolerable and every Lloyd iteration re-assigns
@@ -97,9 +100,8 @@ roughly `ρ^L`. Consequences:
   perturb-and-copy) as in the existing training path.
 - Deeper trees need the backtracking search (or a larger scan budget) to hold
   recall; greedy descent alone favors shallow trees with larger fan-out.
-- Boundary loss grows with cell imbalance, so prefer balancing heuristics
-  (e.g. `k_{i+1} ≈ B·k_i` for global level sizes, or FLANN's autotuned
-  branching) over squeezing the last bit of k-means objective.
+- Boundary loss grows with cell imbalance, so balance child-list sizes while
+  preserving the minimum of 196 immediate children per routing centroid.
 
 ## Training the hierarchy
 
@@ -108,12 +110,11 @@ training each routing layer:
 
 - **Subsample for training**: when creating `k_i` centroids from the previous
   layer, cap its training set at `256 * k_i` previous-layer centroids. Faiss
-  warns below `39 * k_i`; it does not require 39 fine descendants per parent.
-- **Training-size constraint**: this repository's `KMeans::fit` panics below
-  39 input centroids per output centroid. A balanced layer with fan-out 16
-  supplies only about 16 previous-layer centroids per parent, even though
-  each parent represents far more than 196 fine centroids. Upper layers need
-  a dedicated routing-layer trainer that permits this ratio.
+  warns below `39 * k_i`.
+- **Training-size constraint**: this repository's `KMeans::fit` requires at
+  least 39 input centroids per output centroid, so the 196-child rule clears
+  its global training-size check at every layer. K-means does not guarantee
+  that each resulting cell has 196 members; verify and repair the assignments.
 - **Fewer iterations at the top**: Faiss uses `niter = 10` for the level-1
   quantizer vs 25 for ordinary clustering. Rough convergence is fine for
   routing layers; FLANN reports ~7 iterations retain >90% of tree quality at
@@ -121,25 +122,21 @@ training each routing layer:
 - **Empty-cluster repair**: split, or copy the largest cluster's centroid and
   apply symmetric `×(1 ± 1/1024)` perturbation (already the established
   pattern in this repository).
-- **Fan-out and depth**: FLANN's autotuner searches branching `B ∈ {16, 32,
-  64, 128, 256}` (OpenCV default 32); the vocabulary tree used `B = 8–16` at
-  1M leaves. A simple default is `B = 16`. Create the first routing layer only
-  when at least `196 * B` fine centroids are available, and ensure that each
-  resulting routing centroid owns at least 196 fine centroids. For `B = 16`,
-  the threshold is 3,136. Cluster about `B` previous-layer centroids per
-  parent at each subsequent layer; split oversized groups and merge undersized
-  groups as needed to enforce the fan-out and descendant minima. For a balanced
-  1M-centroid example, the routing layers have about 4,096, 256, and 16
-  centroids from bottom to top.
+- **Fan-out and depth**: from `m` previous-layer centroids, choose roughly
+  `min(√m, m / 196)` centroids for the new layer, rounding down and stopping
+  if the result is below 16. K-means can produce uneven cells, so rebalance
+  or reduce the new-layer count when a cell has fewer than 196 children. For
+  1,000,000 input rows, `m ≈ 3,943` gives one 20-centroid routing layer.
+  FLANN's smaller branching factors and the vocabulary tree's `B = 8–16`
+  are alternative design choices rather than this hierarchy's fan-out.
 
 ## When it pays, and how deep
 
 - Worth it when `k ≳ 4k–10k`. Below that, the flat SIMD scan is already cheap
   and the hierarchy is not amortized.
-- Depth 2 (one routing layer) is enough for `k` up to ~10^5. Go deeper when
-  `k` reaches 10^5–10^6 if each added routing centroid still owns at least
-  196 fine centroids; `B = 16` permits three routing levels for a balanced
-  1M-centroid dataset.
+- A routing layer needs at least `16 * 196 = 3,136` centroids below it, and
+  the square-root rule can stop construction earlier. Apply the rule at each
+  layer rather than inferring depth from the raw row count alone.
 - Deeper is not automatically better: recall compounds per level, and
   production IVF stacks typically stop at two routing layers plus at most one
   *accelerated* layer (an HNSW or second IVF over the top centroids) rather
@@ -156,12 +153,13 @@ training each routing layer:
 | Method | Distance computations per assignment | Extra state |
 | --- | --- | --- |
 | Flat SIMD | `k` | centroids |
-| Greedy descent | `B·L + leaf_size` | hierarchy centroids, offsets |
+| Greedy descent | top-layer size + child-list sizes along one path | hierarchy centroids, offsets |
 | Best-first with radii | up to all routing nodes and all `k` fine centroids; exact when the minimum lower bound cannot improve the result | + heap, per-node radii |
 
-Each stored centroid uses `4 * dim` bytes. A balanced tree with `L` routing
-levels stores `k + Σ_{j=1}^{L} B^j` centroid vectors, plus offsets, radii,
-and any leaf-to-original-index map.
+Each stored centroid uses `4 * dim` bytes. With `k` fine centroids and routing
+layer sizes `k_1, …, k_L` from bottom to top, the tree stores
+`k + Σ_{i=1}^{L} k_i` centroid vectors, plus offsets, radii, and any
+leaf-to-original-index map.
 
 ## References
 
