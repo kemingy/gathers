@@ -234,10 +234,9 @@ fn read_row(reader: &mut impl Read, index: usize, row: &mut [f32]) -> Result<()>
 
 fn decode_row(raw: &[u8], index: usize, out: &mut [f32]) -> Result<()> {
     let (header, coords) = raw.split_at(4);
-    for (value, chunk) in out.iter_mut().zip(coords.chunks_exact(4)) {
-        *value = f32::from_bits(u32::from_le_bytes(
-            chunk.try_into().expect("fvecs coordinate"),
-        ));
+    let (chunks, _) = coords.as_chunks::<4>();
+    for (value, chunk) in out.iter_mut().zip(chunks) {
+        *value = f32::from_bits(u32::from_le_bytes(*chunk));
     }
     check_row(header.try_into().expect("fvecs header"), out, index)
 }
