@@ -62,11 +62,11 @@ fn training_samples_before_loading_and_is_batch_size_independent() {
         .arg(&vectors)
         .arg("-o")
         .arg(dir.path().join("rejected.fvecs"))
-        .args(["-n", "2", "--memory-budget-gb", "1"])
+        .args(["-n", "2", "--memory-limit-gb", "1"])
         .output()
         .unwrap();
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("exceeds budget"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("exceeds limit"));
     assert!(!dir.path().join("rejected.fvecs").exists());
 }
 

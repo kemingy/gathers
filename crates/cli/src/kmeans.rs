@@ -36,9 +36,10 @@ pub(crate) struct Args {
     /// scan and validate every source row instead of reading only the selected sample
     #[argh(switch)]
     validate_all: bool,
-    /// preflight memory budget in decimal GB; includes conservative workspace headroom
-    #[argh(option, default = "48")]
-    memory_budget_gb: u64,
+    /// optional preflight memory limit in decimal GB; includes conservative workspace
+    /// headroom. Unset means no limit
+    #[argh(option)]
+    memory_limit_gb: Option<u64>,
 }
 
 fn cluster_count(rows: usize, explicit: Option<u32>) -> Result<u32> {
@@ -65,12 +66,12 @@ fn check_memory(
     dim: usize,
     clusters: u32,
     batch_rows: usize,
-    budget_gb: u64,
+    limit_gb: Option<u64>,
 ) -> Result<u64> {
-    ensure!(
-        batch_rows > 0 && budget_gb > 0,
-        "batch-rows and memory-budget-gb must be positive"
-    );
+    ensure!(batch_rows > 0, "batch-rows must be positive");
+    if let Some(limit_gb) = limit_gb {
+        ensure!(limit_gb > 0, "memory-limit-gb must be positive");
+    }
     let padded_dim = (dim as u128).div_ceil(64) * 64;
     let threads = rayon::current_num_threads() as u128;
     let sample_bytes = samples as u128 * dim as u128 * 4;
@@ -86,12 +87,14 @@ fn check_memory(
     // the fixed runtime margin also covers the small-sample algorithm variants.
     let sampling_bytes = samples as u128 * 256;
     let estimated = training_bytes.max(sampling_bytes) + (4_u128 << 30);
-    ensure!(
-        estimated <= budget_gb as u128 * 1_000_000_000,
-        "estimated memory {:.2} GB exceeds budget {budget_gb} GB; reduce --training-samples or \
-         --n-cluster, or prepare lower-dimensional data",
-        estimated as f64 / 1e9
-    );
+    if let Some(limit_gb) = limit_gb {
+        ensure!(
+            estimated <= limit_gb as u128 * 1_000_000_000,
+            "estimated memory {:.2} GB exceeds limit {limit_gb} GB; reduce --training-samples or \
+             --n-cluster, or prepare lower-dimensional data",
+            estimated as f64 / 1e9
+        );
+    }
     u64::try_from(estimated).context("memory estimate exceeds supported address space")
 }
 
@@ -126,7 +129,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         dim,
         num_clusters,
         args.batch_rows,
-        args.memory_budget_gb,
+        args.memory_limit_gb,
     )?;
     let prepare_start = Instant::now();
     let mut indices = sample_indices(
@@ -161,7 +164,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         "training_rows": training_rows,
         "batch_rows": args.batch_rows,
         "validate_all": args.validate_all,
-        "memory_budget_gb": args.memory_budget_gb,
+        "memory_limit_gb": args.memory_limit_gb,
         "estimated_memory_bytes": estimated_memory_bytes,
         "prepare_ms": prepare_ms,
         "index_sample_ms": index_sample_ms,
@@ -194,9 +197,12 @@ mod tests {
         let model = KMeans::new(clusters, 1, 0.01, Distance::SquaredEuclidean, false);
         let samples = model.training_sample_size(10_000_000);
         assert_eq!(samples, 6_369_536);
-        assert!(check_memory(samples, 768, clusters, 4096, 48).unwrap() < 30_000_000_000);
-        assert!(check_memory(samples, 4096, clusters, 4096, 48).is_err());
-        assert!(check_memory(100, 2, 1, 0, 48).is_err());
+        assert!(check_memory(samples, 768, clusters, 4096, Some(48)).unwrap() < 30_000_000_000);
+        assert!(check_memory(samples, 4096, clusters, 4096, Some(48)).is_err());
+        // No limit accepts the same workload that Some(48) rejects.
+        assert!(check_memory(samples, 4096, clusters, 4096, None).is_ok());
+        assert!(check_memory(100, 2, 1, 0, Some(48)).is_err());
+        assert!(check_memory(100, 2, 1, 1, Some(0)).is_err());
         assert!(cluster_count(100, Some(0)).is_err());
         assert!(cluster_count(100, Some(3)).is_err());
         if let Ok(rows) = usize::try_from(10_000_000_000_u64) {
@@ -204,7 +210,7 @@ mod tests {
             assert_eq!(clusters, 6_250_000);
             // Even the minimum permitted sample is too large; fast index selection
             // does not make this default clustering configuration fit in local RAM.
-            assert!(check_memory(clusters as usize * 39, 768, clusters, 4096, 48).is_err());
+            assert!(check_memory(clusters as usize * 39, 768, clusters, 4096, Some(48)).is_err());
         }
     }
 }

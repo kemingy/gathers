@@ -40,17 +40,20 @@ are always checked; use `--validate-all` to scan and validate every row, includi
 Training keeps the sample in one flat aligned RAM buffer, not the full corpus. Coordinates are
 preserved: this command does not normalize or apply PCA.
 
-`--memory-budget-gb` defaults to **48 decimal GB**. Before selecting indices or allocating the
+`--memory-limit-gb` sets an optional preflight limit in decimal GB; there is **no limit by
+default**. Before selecting indices or allocating the
 sample, a conservative estimate includes the sample, batch, row metadata, centroid/index buffers,
 worker scratch and 4 GiB of runtime headroom. The separate index-selection phase includes
-conservative scratch for the adaptive sampler. An over-budget workload is rejected, not silently
+conservative scratch for the adaptive sampler. An over-limit workload is rejected, not silently
 subsampled further. This is an admission check, **not an OS-enforced RSS cap**; measure peak RSS
 and leave room for other processes. For 10M rows at dimension 768, the default K is 24,881 and
-the training sample has 6,369,536 rows (19.57 GB of coordinates). Original and projected samples
+the training sample has 6,369,536 rows (19.57 GB of coordinates) — pass `--memory-limit-gb` to
+reject such workloads before loading. Original and projected samples
 are not needed simultaneously when an external batch projection prepares training input.
 Sampling alone does not make arbitrary K fit: at 10B source rows the default K is 6.25M, and
-even the minimum 39 rows per cluster would require about 749 GB at dimension 768. Such a
-configuration is rejected under the default budget; reduce K or dimension explicitly.
+even the minimum 39 rows per cluster would require about 749 GB at dimension 768. Use
+`--memory-limit-gb` to bound training before it starts; otherwise reduce K or dimension
+explicitly.
 
 Library callers preparing data externally can use `sampling::sample_indices` and
 `KMeans::training_sample_size`, then pass a flat aligned sample to `KMeans::fit_sample`.
@@ -60,7 +63,7 @@ enabled, its mean is computed from the supplied sample. File formats stay in the
 
 `assign` still loads data into RAM. It accepts `--num-vectors` and `--num-centroids` to load
 prefixes; omitted limits read all rows. Its per-row headers and values are checked for the loaded
-prefix, not unread rows. The training memory budget does not apply to this profiling command.
+prefix, not unread rows. The training memory limit does not apply to this profiling command.
 Streaming full-corpus assignment and PCA are separate follow-up steps.
 
 The index-sampling ablation needs no vector dataset:
@@ -94,7 +97,8 @@ are supplied externally, not detected through a backend-name API.
   `index_sample_ms`, `index_sort_ms`, and `sample_read_ms` isolate those stages.
   `fit_ms` measures `fit_sample`, including initialization and internal allocations, but no
   source sampling or I/O. Their sum includes preparation and training, excluding centroid output.
-  Reports include `training_rows`, `batch_rows`, `validate_all`, the budget and `estimated_memory_bytes`.
+  Reports include `training_rows`, `batch_rows`, `validate_all`, `memory_limit_gb` and
+  `estimated_memory_bytes`.
   Centroids are saved as fvecs.
 - `assign`: builds one RaBitQ index, warms it up, then reuses the index and labels. `build_ms` is
   one construction. `query_ms` and `query_median_ms` measure complete public batch calls, including
