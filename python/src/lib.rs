@@ -46,7 +46,7 @@ fn batch_assign<'py>(
 
 /// Train a K-means and return the centroids.
 #[pyfunction]
-#[pyo3(signature = (source, n_cluster, max_iter = 25))]
+#[pyo3(signature = (source, n_cluster, max_iter = 10))]
 fn kmeans_fit<'py>(
     source: PyReadonlyArray2<'py, f32>,
     n_cluster: u32,
