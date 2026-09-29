@@ -25,8 +25,8 @@ finite. Query and centroid dimensions must match. There is no `--dim` option or 
 HDF5 datasets must be converted externally first (use `uv` for Python conversion scripts).
 
 `kmeans` reads the source shape before allocating training data. Without `-n`, it chooses
-`max(1, floor(rows^0.8 / 16))` clusters from the **full source row count**. Explicit `-n` overrides
-this CLI policy; the library's default cluster-count policy is unchanged. By default it selects
+`max(1, floor(rows^0.8 / 16))` clusters from the **full source row count**, the same formula as the
+library's automatic configuration. Explicit `-n` overrides it. By default it selects
 up to 256 rows per cluster uniformly without replacement. `--training-samples N` sets an explicit
 sample size independently of K: it must fit the source and provide at least 39 rows per cluster.
 Invalid requests are rejected rather than clamped.

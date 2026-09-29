@@ -377,7 +377,7 @@ impl KMeans {
 
     fn cluster_count(&self, num_vectors: usize) -> u32 {
         let num_clusters = if self.use_default_config {
-            (((num_vectors as f32).sqrt() as u32) * 4)
+            (((num_vectors as f64).powf(0.8) / 16.0).floor().max(1.0) as u32)
                 .min((num_vectors / MIN_POINTS_PER_CENTROID) as u32)
         } else {
             self.num_clusters
