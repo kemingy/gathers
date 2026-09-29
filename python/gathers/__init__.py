@@ -47,7 +47,7 @@ class Gathers:
         )
         return batch_assign(vecs, centroids)
 
-    def fit(self, vecs: np.ndarray, n_cluster: int, max_iter: int = 25) -> np.ndarray:
+    def fit(self, vecs: np.ndarray, n_cluster: int, max_iter: int = 10) -> np.ndarray:
         """
         Cluster the vectors into `n_cluster` clusters with max iteration `max_iter`.
 
