@@ -368,8 +368,9 @@ impl KMeans {
 
     /// Number of rows [`Self::fit`] retains, capped at 256 per cluster.
     ///
-    /// Use this before loading vectors to prepare an external sample. Panics if the dataset
-    /// has fewer than 39 rows per cluster. Does not allocate or change the configuration.
+    /// Use this before loading vectors to prepare an external sample. Panics if the input
+    /// is empty, has fewer rows than clusters, or has fewer than 39 rows per cluster. Does
+    /// not allocate or change the configuration.
     pub fn training_sample_size(&self, num_vectors: usize) -> usize {
         num_vectors
             .min((self.cluster_count(num_vectors) as usize).saturating_mul(MAX_POINTS_PER_CENTROID))
