@@ -1,9 +1,9 @@
 # Hierarchical assignment: a centroid hierarchy for fast assign
 
 Design note for replacing flat nearest-centroid assignment with a multilayer
-hierarchy built **over the centroids themselves**. Each level clusters the
-centroids of the level below, so assignment descends from a small top level to
-the fine centroids at the leaves, scanning only a fraction of the `k` centroids.
+hierarchy built **over the centroids themselves**. Each routing level groups
+fine centroids into nested cells, so assignment descends from a small top level
+to the fine centroids at the leaves, scanning only a fraction of the `k` centroids.
 The two-level IVF-style scheme (one coarse layer over the fine centroids) is
 the depth-2 special case; the k-means-tree literature is the source of the
 traversal and training rules.
@@ -12,10 +12,10 @@ traversal and training rules.
 
 Flat assignment compares every vector against all `k` centroids. Instead,
 organize the centroids into a tree: level 0 holds `B` top centroids, every
-internal node has up to `B` children, and the leaves are the fine centroids
-(`B^L ≈ k` for depth `L`). A query scans `B` candidates at each level plus the
-fine centroids in the leaf cell(s) it reaches — `O(B·L + B)` distance
-computations instead of `O(k)`.
+internal node has up to `B` children, and the leaves are cells of fine
+centroids. A query scans `B` candidates at each of `L` routing levels plus
+the `m` fine centroids in the leaf cell it reaches — `O(B·L + m)` distance
+computations instead of `O(k)` for greedy descent.
 
 This composes with the existing accelerators rather than replacing them: every
 per-node scan is an ordinary flat scan (SIMD and/or RaBitQ), just over a small
@@ -25,8 +25,9 @@ candidate set.
 
 1. Train fine centroids as today (`kmeans.fit`), producing `k` centroids.
 2. Build the hierarchy top-down, one level at a time: run k-means **over the
-   centroids of the current level** (not the data) to group them into cells,
-   then recurse within each cell until cells are small enough to be leaves.
+   fine centroids in each current cell** (not the original data),
+   then recurse within each cell while every new routing centroid can own at
+   least 196 fine centroids.
 3. Store each node's children contiguously with per-level offset arrays — one
    contiguous `&[f32]` plus `dim` per level, matching the existing flat layout
    contract. Store a `u32` leaf-to-original-index map when outputs must keep
@@ -36,10 +37,12 @@ candidate set.
    below. Radii only need members one level down if the scan budget, not
    exactness, is the stopping criterion.
 
-Assignment cost: `B·L + (fine centroids scanned)` vs `k` flat. With balanced
-levels (`k_i ≈ √k_{i+1}` per level) and greedy descent, that is roughly
-`B·log_B(k)` comparisons — e.g. `B = 16, L = 5` for `k ≈ 1M` gives ~85
-comparisons vs 1,000,000.
+Assignment cost: `B·L + (fine centroids scanned)` vs `k` flat. Balanced
+routing levels grow by a factor of `B` toward the leaves, but the minimum of
+196 fine centroids per routing centroid limits depth. For `B = 16` and
+`k ≈ 1M`, three routing levels leave about 244 fine centroids per leaf cell:
+greedy descent makes about `3·16 + 244 = 292` comparisons vs 1,000,000.
+A fourth level would leave only about 15 per cell and is disallowed.
 
 ## Assignment algorithms
 
@@ -54,24 +57,28 @@ all points.
 ### Priority-queue backtracking (best-node-first)
 
 Generalize best-bin-first search (FLANN's priority-queue traversal on k-means
-trees) to any depth:
+trees) to any depth. For exact Euclidean search:
 
-1. Start with the root's children on a min-heap keyed by `||q - node_centroid||`.
-2. Pop the closest node. If it is internal, compute distances to its children
-   and push them. If it is a leaf, scan its fine centroids and update the best
-   candidate.
-3. **Early termination (radii rule):** if `||q - node_centroid|| - r_n ≥
-   best_dist` for the next node (triangle inequality), no fine centroid in its
-   subtree can beat the current best; prune it and every node behind it in the
-   heap. Without radii, fall back to a scan budget (`max_nodes`, the analogue
-   of FLANN's `checks`).
+1. Compute each root child's lower bound
+   `lb_n = max(0, ||q - node_centroid|| - r_n)` and push it on a min-heap
+   keyed by `lb_n`.
+2. Pop the node with the smallest bound. If it is internal, compute exact
+   distances and bounds for its children and push them. If it is a leaf, scan
+   its fine centroids exactly and update the best distance.
+3. **Early termination (radii rule):** stop when the heap's smallest bound is
+   at least the best distance. By the triangle inequality, no remaining
+   subtree can improve the result. Ordering by center distance alone cannot
+   justify this stop because a farther center can have a larger radius and a
+   smaller bound.
 
-Greedy descent is the special case "follow one path, budget = 1 leaf."
-Best-first ordering opens the subtrees most likely to contain the true nearest
-centroid first, so it reaches equal recall with fewer fine scans, or better
-recall at equal scans — at the cost of a heap and per-node radii. In the
-depth-2 special case this reduces to multi-probe IVF with `nprobe` replaced by
-a provable stopping rule.
+The bound uses Euclidean distances. With `SquaredEuclidean` scores, compare
+`lb_n²` with the best squared distance. `NegativeDotProduct` and approximate
+RaBitQ scores do not support this exact stopping rule; use a scan budget
+(`max_nodes`, the analogue of FLANN's `checks`) for those paths. Greedy descent
+is a separate one-path search. Budgeted best-first search can revisit sibling
+subtrees to improve recall, at the cost of a heap and extra scans. In the
+depth-2 special case, this resembles multi-probe IVF, with a provable stop
+only for the exact Euclidean path.
 
 ### Recall failure mode (both variants)
 
@@ -88,17 +95,16 @@ roughly `ρ^L`. Consequences:
 - Deeper trees need the backtracking search (or a larger scan budget) to hold
   recall; greedy descent alone favors shallow trees with larger fan-out.
 - Boundary loss grows with cell imbalance, so prefer balancing heuristics
-  (e.g. `k_i ≈ √k_{i+1}` per level, or FLANN's autotuned branching) over
-  squeezing the last bit of k-means objective.
+  (e.g. `k_{i+1} ≈ B·k_i` for global level sizes, or FLANN's autotuned
+  branching) over squeezing the last bit of k-means objective.
 
 ## Training the hierarchy
 
 Follow the Faiss `Clustering` conventions, confirmed against its source, at
 every node:
 
-- **Subsample for training**: cap each node's training set at `256 * B` points
-  (children centroids of the level below); warn below `39 * B`. Never train on
-  more than a sample.
+- **Subsample for training**: cap each node's training set at `256 * B` fine
+  centroids from its cell; warn below `39 * B`. Subsample only above the cap.
 - **Fewer iterations at the top**: Faiss uses `niter = 10` for the level-1
   quantizer vs 25 for ordinary clustering. Rough convergence is fine for
   routing layers; FLANN reports ~7 iterations retain >90% of tree quality at
@@ -108,18 +114,20 @@ every node:
   pattern in this repository).
 - **Fan-out and depth**: FLANN's autotuner searches branching `B ∈ {16, 32,
   64, 128, 256}` (OpenCV default 32); the vocabulary tree used `B = 8–16` at
-  1M leaves. A simple default is balanced levels, `k_i ≈ √k_{i+1}`, which keeps
-  every per-node scan the same size and SIMD-friendly. Stop deepening when a
-  cell has fewer than `B` members or `B^L ≥ k`.
+  1M leaves. A simple default is `B = 16`. Add a routing layer to a cell only
+  when it contains at least `196 * B` fine centroids, and keep the cell as a
+  leaf if any proposed child would own fewer than 196. For `B = 16`, the
+  threshold is 3,136 fine centroids. This also exceeds the current
+  `KMeans::fit` minimum of `39 * B` training points.
 
 ## When it pays, and how deep
 
 - Worth it when `k ≳ 4k–10k`. Below that, the flat SIMD scan is already cheap
   and the hierarchy is not amortized.
-- Depth 2 (one routing layer) is enough for `k` up to ~10^5. Go deeper
-  (`L = 3–6`, vocabulary-tree style, e.g. `B = 10, L = 6` for 1M centroids)
-  when `k` reaches 10^5–10^6, because per-level scans stay small only if the
-  fan-out stays moderate.
+- Depth 2 (one routing layer) is enough for `k` up to ~10^5. Go deeper when
+  `k` reaches 10^5–10^6 if each added routing centroid still owns at least
+  196 fine centroids; `B = 16` permits three routing levels for a balanced
+  1M-centroid dataset.
 - Deeper is not automatically better: recall compounds per level, and
   production IVF stacks typically stop at two routing layers plus at most one
   *accelerated* layer (an HNSW or second IVF over the top centroids) rather
@@ -128,21 +136,20 @@ every node:
 - Inside `fit`, the saving multiplies by `max_iter * n`; this is the strongest
   use case. Use greedy descent there.
 - For the public assign API, expose the recall/cost knob (`max_nodes` scan
-  budget, or radii-based exact stop) and default to best-first with radii,
-  which is near-exact for a small scan overhead.
+  budget, or radii-based exact stop for Euclidean distance) and default to
+  best-first with radii where the exact bound applies.
 
 ## Complexity summary
 
 | Method | Distance computations per assignment | Extra state |
 | --- | --- | --- |
 | Flat SIMD | `k` | centroids |
-| Greedy descent | `B·L + B ≈ B·log_B(k)` | hierarchy centroids (`< k·B/(B-1)` floats), offsets |
-| Best-first with radii | bounded by `B·L + scanned_leaves * leaf_size`; exact when the radii rule empties the heap | + heap, per-node radii |
+| Greedy descent | `B·L + leaf_size` | hierarchy centroids, offsets |
+| Best-first with radii | up to all routing nodes and all `k` fine centroids; exact when the minimum lower bound cannot improve the result | + heap, per-node radii |
 
-Total hierarchy memory is `4 * dim` bytes per node; the node count is
-`(k·B/(B-1) - B)/(B - 1) + …`, i.e. the fine centroids plus a `B/(B-1)`
-factor — comparable to storing the centroids themselves, plus `4` bytes of
-offsets per node.
+Each stored centroid uses `4 * dim` bytes. A balanced tree with `L` routing
+levels stores `k + Σ_{j=1}^{L} B^j` centroid vectors, plus offsets, radii,
+and any leaf-to-original-index map.
 
 ## References
 
