@@ -1,7 +1,7 @@
 //! Validated fvecs I/O into a flat aligned buffer shared by CLI commands.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use aligned_vec::AVec;
@@ -206,8 +206,8 @@ impl<R: Read + Seek> Reader<R> {
                 let offset = (index - start) * row_bytes;
                 let output_start = data.len();
                 data.resize(output_start + self.dim, 0.0);
-                read_row(
-                    &mut Cursor::new(&bytes[offset..offset + row_bytes]),
+                decode_row(
+                    &bytes[offset..offset + row_bytes],
                     index,
                     &mut data[output_start..],
                 )?;
@@ -223,17 +223,33 @@ fn read_row(reader: &mut impl Read, index: usize, row: &mut [f32]) -> Result<()>
     reader
         .read_exact(&mut header)
         .with_context(|| format!("cannot read dimension for row {}", index + 1))?;
+    reader
+        .read_exact(bytemuck::cast_slice_mut(row))
+        .with_context(|| format!("cannot read coordinates for row {}", index + 1))?;
+    for value in row.iter_mut() {
+        *value = f32::from_bits(u32::from_le(value.to_bits()));
+    }
+    check_row(&header, row, index)
+}
+
+fn decode_row(raw: &[u8], index: usize, out: &mut [f32]) -> Result<()> {
+    let (header, coords) = raw.split_at(4);
+    for (value, chunk) in out.iter_mut().zip(coords.chunks_exact(4)) {
+        *value = f32::from_bits(u32::from_le_bytes(
+            chunk.try_into().expect("fvecs coordinate"),
+        ));
+    }
+    check_row(header.try_into().expect("fvecs header"), out, index)
+}
+
+fn check_row(header: &[u8; 4], row: &[f32], index: usize) -> Result<()> {
     ensure!(
-        u32::from_le_bytes(header) as usize == row.len(),
+        u32::from_le_bytes(*header) as usize == row.len(),
         "fvecs row {} has a different dimension (expected {})",
         index + 1,
         row.len()
     );
-    reader
-        .read_exact(bytemuck::cast_slice_mut(row))
-        .with_context(|| format!("cannot read coordinates for row {}", index + 1))?;
     for value in row {
-        *value = f32::from_bits(u32::from_le(value.to_bits()));
         ensure!(
             value.is_finite(),
             "fvecs row {} contains a non-finite coordinate",
@@ -293,6 +309,15 @@ mod tests {
         }
     }
 
+    impl CountedReader {
+        // Reader::new reads the header before counting should start.
+        fn reset(&mut self) {
+            self.bytes = 0;
+            self.reads = 0;
+            self.seeks = 0;
+        }
+    }
+
     impl Seek for CountedReader {
         fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
             self.seeks += 1;
@@ -323,9 +348,7 @@ mod tests {
                     seeks: 0,
                 };
                 let mut reader = Reader::new(counted, bytes.len() as u64).unwrap();
-                reader.reader.bytes = 0;
-                reader.reader.reads = 0;
-                reader.reader.seeks = 0;
+                reader.reader.reset();
                 let sample = reader
                     .read_sample(&indices, batch_rows, validate_all)
                     .unwrap();
