@@ -1,9 +1,10 @@
 # Hierarchical assignment: a centroid hierarchy for fast assign
 
 Design note for replacing flat nearest-centroid assignment with a multilayer
-hierarchy built **over the centroids themselves**. Each routing level groups
-fine centroids into nested cells, so assignment descends from a small top level
-to the fine centroids at the leaves, scanning only a fraction of the `k` centroids.
+hierarchy built **over the centroids themselves**. Construction groups fine
+centroids into a routing layer, then groups that layer into successively
+coarser layers. Assignment traverses the finished hierarchy in reverse, from
+the small top layer down to the fine centroids, scanning only a fraction of `k`.
 The two-level IVF-style scheme (one coarse layer over the fine centroids) is
 the depth-2 special case; the k-means-tree literature is the source of the
 traversal and training rules.
@@ -24,25 +25,27 @@ candidate set.
 ## Structure
 
 1. Train fine centroids as today (`kmeans.fit`), producing `k` centroids.
-2. Build the hierarchy top-down, one level at a time: run k-means **over the
-   fine centroids in each current cell** (not the original data),
-   then recurse within each cell while every new routing centroid can own at
-   least 196 fine centroids.
+2. Build the hierarchy bottom-up: cluster the fine centroids into the first
+   routing layer, then cluster that layer's centroids into the next coarser
+   layer. Repeat until the top has at most `B` centroids. Record which
+   previous-layer centroids belong to each parent. The first routing layer
+   requires at least 196 fine centroids per routing centroid.
 3. Store each node's children contiguously with per-level offset arrays — one
    contiguous `&[f32]` plus `dim` per level, matching the existing flat layout
    contract. Store a `u32` leaf-to-original-index map when outputs must keep
    the original centroid order.
 4. Precompute each node's radius `r_n = max ||member - node_centroid||` over
-   the centroids in its subtree; this enables the early-termination rule
-   below. Radii only need members one level down if the scan budget, not
-   exactness, is the stopping criterion.
+   all fine centroids in its subtree; this enables the exact early-termination
+   rule below. A radius over immediate child centers alone is insufficient
+   for that rule.
 
 Assignment cost: `B·L + (fine centroids scanned)` vs `k` flat. Balanced
 routing levels grow by a factor of `B` toward the leaves, but the minimum of
 196 fine centroids per routing centroid limits depth. For `B = 16` and
 `k ≈ 1M`, three routing levels leave about 244 fine centroids per leaf cell:
 greedy descent makes about `3·16 + 244 = 292` comparisons vs 1,000,000.
-A fourth level would leave only about 15 per cell and is disallowed.
+Four routing levels would leave only about 15 fine centroids per lowest cell
+and violate the 196-member rule.
 
 ## Assignment algorithms
 
@@ -100,11 +103,17 @@ roughly `ρ^L`. Consequences:
 
 ## Training the hierarchy
 
-Follow the Faiss `Clustering` conventions, confirmed against its source, at
-every node:
+Follow the Faiss `Clustering` conventions, confirmed against its source, when
+training each routing layer:
 
-- **Subsample for training**: cap each node's training set at `256 * B` fine
-  centroids from its cell; warn below `39 * B`. Subsample only above the cap.
+- **Subsample for training**: when creating `k_i` centroids from the previous
+  layer, cap its training set at `256 * k_i` previous-layer centroids. Faiss
+  warns below `39 * k_i`; it does not require 39 fine descendants per parent.
+- **Training-size constraint**: this repository's `KMeans::fit` panics below
+  39 input centroids per output centroid. A balanced layer with fan-out 16
+  supplies only about 16 previous-layer centroids per parent, even though
+  each parent represents far more than 196 fine centroids. Upper layers need
+  a dedicated routing-layer trainer that permits this ratio.
 - **Fewer iterations at the top**: Faiss uses `niter = 10` for the level-1
   quantizer vs 25 for ordinary clustering. Rough convergence is fine for
   routing layers; FLANN reports ~7 iterations retain >90% of tree quality at
@@ -114,11 +123,14 @@ every node:
   pattern in this repository).
 - **Fan-out and depth**: FLANN's autotuner searches branching `B ∈ {16, 32,
   64, 128, 256}` (OpenCV default 32); the vocabulary tree used `B = 8–16` at
-  1M leaves. A simple default is `B = 16`. Add a routing layer to a cell only
-  when it contains at least `196 * B` fine centroids, and keep the cell as a
-  leaf if any proposed child would own fewer than 196. For `B = 16`, the
-  threshold is 3,136 fine centroids. This also exceeds the current
-  `KMeans::fit` minimum of `39 * B` training points.
+  1M leaves. A simple default is `B = 16`. Create the first routing layer only
+  when at least `196 * B` fine centroids are available, and ensure that each
+  resulting routing centroid owns at least 196 fine centroids. For `B = 16`,
+  the threshold is 3,136. Cluster about `B` previous-layer centroids per
+  parent at each subsequent layer; split oversized groups and merge undersized
+  groups as needed to enforce the fan-out and descendant minima. For a balanced
+  1M-centroid example, the routing layers have about 4,096, 256, and 16
+  centroids from bottom to top.
 
 ## When it pays, and how deep
 
