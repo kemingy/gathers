@@ -285,7 +285,7 @@ impl Default for KMeans {
     fn default() -> Self {
         Self {
             num_clusters: 8,
-            max_iter: 25,
+            max_iter: 10,
             tolerance: 1e-4,
             distance: Distance::default(),
             use_residual: false,
@@ -300,7 +300,7 @@ impl KMeans {
     ///
     /// # Arguments
     ///
-    /// * `num_clusters` - number of clusters, recommend to be a number in [sqrt(n) * 4, sqrt(n) * 8]
+    /// * `num_clusters` - number of clusters; [`KMeans::default`] derives it from the input size
     /// * `max_iter` - max number of iterations
     /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
     /// * `distance` - distance metric

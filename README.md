@@ -33,7 +33,7 @@ The non-published CLI in [`crates/cli`](./crates/cli) supports fvecs input and o
 
 ```sh
 cargo run --release -p gathers-cli -- --threads 16 --seed 42 kmeans \
-  -i vectors.fvecs -o centroids.fvecs -n 4096 -m 25
+  -i vectors.fvecs -o centroids.fvecs -n 4096
 cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
   --vectors vectors.fvecs --centroids centroids.fvecs
 ```

@@ -25,7 +25,7 @@ pub(crate) struct Args {
     #[argh(option, short = 'n')]
     n_cluster: Option<u32>,
     /// maximum number of iterations
-    #[argh(option, short = 'm', default = "25")]
+    #[argh(option, short = 'm', default = "10")]
     max_iter: u32,
     /// exact training sample size; defaults to min(input rows, 256 * clusters)
     #[argh(option)]

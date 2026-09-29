@@ -9,7 +9,7 @@ Inputs and profiling artifacts stay outside the repository; tests use tiny local
 ```sh
 cargo build --profile perf -p gathers-cli
 target/perf/gathers --threads 16 --seed 42 kmeans \
-  -i /path/to/dataset.fvecs -o /path/to/centroids.fvecs -n 4096 -m 25
+  -i /path/to/dataset.fvecs -o /path/to/centroids.fvecs -n 4096
 target/perf/gathers --threads 16 --seed 42 assign \
   --vectors /path/to/dataset.fvecs --centroids /path/to/centroids.fvecs \
   --warmup 1 --repeats 5
