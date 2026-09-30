@@ -3,7 +3,7 @@
 `gathers kmeans` supports `--reduction raw|pca|srht` (default `raw`). PCA and SRHT reduce the
 dimension used for centroid assignment. The CLI writes centroids in the **original** dimension, so
 the existing `assign` command needs no projection. The Rust transforms are also available as
-`gathers::reduction::{Pca, Srht}`.
+`gathers::reduction::{PCA, SRHT}`.
 
 ## Choosing a method
 
@@ -51,16 +51,22 @@ the [profiling guide](./profiling.md) for sampling and memory details.
 K-means returns its final reduced-space labels. The CLI averages the corresponding **original**
 sample rows to produce each occupied full-dimensional centroid. Inverting a projected centroid
 would lose its null-space component, particularly with SRHT. An inverse projection is used only
-for an empty final cluster. For `cos` and `dot`, a zero original-space mean uses an assigned
-nonzero row as a direction; a dot cluster containing only zero rows may remain zero.
+for an empty final cluster. SRHT reconstructs in padded space and discards padding; with a
+non-power-of-two input dimension, projecting that approximation again may change its coordinates.
+For `cos` and `dot`, a zero original-space mean uses an assigned nonzero row as a direction;
+a dot cluster containing only zero rows may remain zero.
 
-`--distance cos` normalizes sampled original rows before projection and projected rows during
-K-means fitting. `dot` preserves input magnitudes. Both use negative-dot-product assignment and
-unit nonzero centroids; `l2` may use approximate RaBitQ assignment for large samples, while `cos`
-and `dot` use exact assignment. Do not compare their timings as if only the metric changed.
+`--distance cos` requires finite nonzero original rows and normalizes them before projection.
+Nonzero projected rows are normalized before dot training; rows that become zero through
+centering or projection are preserved and contribute a tied dot score to every centroid.
+Raw cosine training normalizes rows inside K-means fitting. `dot` preserves input magnitudes.
+Both use negative-dot-product assignment and unit nonzero centroids. For large samples, `l2`
+may use approximate RaBitQ assignment; `cos` and `dot` use exact assignment. Do not compare their
+timings as if only the metric changed.
 
 The JSON report separates `projection_fit_ms`, `projection_transform_ms`, `fit_ms`, and
-`reconstruction_ms`. `prepare_ms` includes sampling, reading, any preprojection normalization,
-projection fitting, and transformation. `fit_ms` includes K-means' internal normalization, but not
+`reconstruction_ms`. `prepare_ms` includes sampling, reading, projection fitting, transformation,
+and normalization of original and projected rows. `normalization_ms` measures both normalization
+steps in projected cosine runs. `fit_ms` includes raw cosine's internal normalization, but not
 source I/O. The reported training-stage total is `prepare_ms + fit_ms + reconstruction_ms`; it
 excludes writing the output fvecs file.

@@ -353,6 +353,98 @@ fn projected_cosine_writes_unit_original_space_centroids() {
 }
 
 #[test]
+fn projected_cosine_accepts_zero_projections() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let srht = gathers::reduction::SRHT::new(2, 1, 42).unwrap();
+    let coefficients = srht.transform(&[1.0, 0.0, 0.0, 1.0]).unwrap();
+    let null_row = [coefficients[1], -coefficients[0]];
+
+    for (method, directions) in [
+        ("pca", vec![[1.0_f32, 0.0]]),
+        ("pca", vec![[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]]),
+        ("srht", vec![null_row]),
+        ("srht", vec![null_row, [1.0, 0.0]]),
+    ] {
+        let rows = directions.repeat(39);
+        gathers::utils::write_vecs(&vectors, &rows).unwrap();
+        let report = json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args([
+                    "-n",
+                    "1",
+                    "-m",
+                    "1",
+                    "--distance",
+                    "cos",
+                    "--reduction",
+                    method,
+                    "--reduced-dim",
+                    "1",
+                ]),
+        );
+        assert_eq!(report["distance"], "cos");
+        let mut expected = [0.0_f32; 2];
+        for mut direction in directions {
+            gathers::utils::try_normalize_rows(&mut direction, 2, false).unwrap();
+            for (sum, value) in expected.iter_mut().zip(direction) {
+                *sum += value;
+            }
+        }
+        gathers::utils::try_normalize_rows(&mut expected, 2, false).unwrap();
+        let bytes = std::fs::read(&centroids).unwrap();
+        assert_eq!(bytes.len(), 12);
+        for (coordinate, expected) in bytes[4..].as_chunks::<4>().0.iter().zip(expected) {
+            let actual = f32::from_le_bytes(*coordinate);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "{method}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn projected_cosine_still_rejects_zero_original_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let mut rows = [[1.0_f32, 0.0]; 39];
+    rows[3] = [0.0, 0.0];
+    gathers::utils::write_vecs(&vectors, &rows).unwrap();
+
+    for method in ["pca", "srht"] {
+        let output = cli()
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args([
+                "-n",
+                "1",
+                "--distance",
+                "cos",
+                "--reduction",
+                method,
+                "--reduced-dim",
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("finite nonzero L2 norm"));
+        assert!(!stderr.contains("panicked"));
+        assert!(!centroids.exists());
+    }
+}
+
+#[test]
 fn assignment_rejects_mismatched_dimensions_and_invalid_options() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");

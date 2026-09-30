@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail, ensure};
 use argh::FromArgs;
 use gathers::distance::Distance;
 use gathers::kmeans::KMeans;
-use gathers::reduction::{Pca, Srht};
+use gathers::reduction::{PCA, SRHT};
 use gathers::sampling::sample_indices;
 use gathers::utils::try_normalize_rows;
 use rand::SeedableRng;
@@ -105,7 +105,7 @@ fn check_memory(
         let projected_centroids = clusters as u128 * (dim as u128 + reduced_dim as u128) * 4;
         let pca_workspace =
             projection_training_samples as u128 * dim as u128 * 4 + dim as u128 * dim as u128 * 4;
-        // Pca::transform holds a centered copy of the full sample alongside its input and output.
+        // PCA::transform holds a centered copy of the full sample alongside its input and output.
         let centered_sample = if projection_training_samples > 0 {
             sample_bytes
         } else {
@@ -130,16 +130,24 @@ fn check_memory(
     u64::try_from(estimated).context("memory estimate exceeds supported address space")
 }
 
+#[allow(
+    clippy::upper_case_acronyms,
+    reason = "Match the public reduction type names"
+)]
 enum Projection {
-    Pca(Pca),
-    Srht(Srht),
+    PCA(PCA),
+    SRHT(SRHT),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::upper_case_acronyms,
+    reason = "Match the public reduction type names"
+)]
 enum ReductionMethod {
     Raw,
-    Pca,
-    Srht,
+    PCA,
+    SRHT,
 }
 
 impl FromStr for ReductionMethod {
@@ -148,8 +156,8 @@ impl FromStr for ReductionMethod {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "raw" => Ok(Self::Raw),
-            "pca" => Ok(Self::Pca),
-            "srht" => Ok(Self::Srht),
+            "pca" => Ok(Self::PCA),
+            "srht" => Ok(Self::SRHT),
             _ => bail!("unknown reduction '{value}'; expected raw, pca, or srht"),
         }
     }
@@ -158,15 +166,15 @@ impl FromStr for ReductionMethod {
 impl Projection {
     fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>> {
         match self {
-            Self::Pca(model) => Ok(model.transform(vectors)?),
-            Self::Srht(model) => Ok(model.transform(vectors)?),
+            Self::PCA(model) => Ok(model.transform(vectors)?),
+            Self::SRHT(model) => Ok(model.transform(vectors)?),
         }
     }
 
     fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>> {
         match self {
-            Self::Pca(model) => Ok(model.inverse_transform(vectors)?),
-            Self::Srht(model) => Ok(model.inverse_transform(vectors)?),
+            Self::PCA(model) => Ok(model.inverse_transform(vectors)?),
+            Self::SRHT(model) => Ok(model.inverse_transform(vectors)?),
         }
     }
 }
@@ -277,7 +285,15 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     let num_clusters = cluster_count(num_vectors, args.n_cluster)?;
     let distance = args.distance.parse::<Distance>()?;
     let reduction = args.reduction.parse::<ReductionMethod>()?;
-    let kmeans = KMeans::new(num_clusters, args.max_iter, 0.01, distance, false).seed(common.seed);
+    // Projected zero rows have no preferred direction. Normalize nonzero projections below,
+    // then use dot training, which permits zero rows; original cosine rows are still validated.
+    let training_distance = if distance == Distance::Cosine && reduction != ReductionMethod::Raw {
+        Distance::NegativeDotProduct
+    } else {
+        distance
+    };
+    let kmeans =
+        KMeans::new(num_clusters, args.max_iter, 0.01, training_distance, false).seed(common.seed);
     let training_rows = args
         .training_samples
         .unwrap_or_else(|| kmeans.training_sample_size(num_vectors));
@@ -298,7 +314,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
             );
             None
         }
-        ReductionMethod::Pca | ReductionMethod::Srht => {
+        ReductionMethod::PCA | ReductionMethod::SRHT => {
             let reduced_dim = args
                 .reduced_dim
                 .context("--reduced-dim is required for pca and srht")?;
@@ -310,16 +326,16 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         }
     };
     ensure!(
-        reduction == ReductionMethod::Pca || args.projection_training_samples.is_none(),
+        reduction == ReductionMethod::PCA || args.projection_training_samples.is_none(),
         "projection-training-samples only applies to PCA"
     );
-    let projection_training_rows = if reduction == ReductionMethod::Pca {
+    let projection_training_rows = if reduction == ReductionMethod::PCA {
         args.projection_training_samples
             .unwrap_or_else(|| training_rows.min(100 * dim))
     } else {
         0
     };
-    if reduction == ReductionMethod::Pca {
+    if reduction == ReductionMethod::PCA {
         ensure!(
             (2..=training_rows).contains(&projection_training_rows),
             "projection-training-samples must be between 2 and training-samples"
@@ -360,16 +376,16 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     let projection_fit_start = Instant::now();
     let projection = match reduction {
         ReductionMethod::Raw => None,
-        ReductionMethod::Pca => {
+        ReductionMethod::PCA => {
             let training =
                 projection_training_data(&vectors.data, dim, projection_training_rows, common.seed);
-            Some(Projection::Pca(Pca::fit(
+            Some(Projection::PCA(PCA::fit(
                 &training,
                 dim,
                 reduced_dim.unwrap(),
             )?))
         }
-        ReductionMethod::Srht => Some(Projection::Srht(Srht::new(
+        ReductionMethod::SRHT => Some(Projection::SRHT(SRHT::new(
             dim,
             reduced_dim.unwrap(),
             common.seed,
@@ -377,18 +393,23 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     };
     let projection_fit_ms = projection_fit_start.elapsed().as_secs_f64() * 1_000.0;
     let preserved_variance = match &projection {
-        Some(Projection::Pca(model)) => Some(model.preserved_variance()),
+        Some(Projection::PCA(model)) => Some(model.preserved_variance()),
         _ => None,
     };
     let training_dim = reduced_dim.unwrap_or(dim);
     let projection_transform_start = Instant::now();
-    let (training_vectors, original_vectors) = if let Some(projection) = &projection {
+    let (mut training_vectors, original_vectors) = if let Some(projection) = &projection {
         let transformed = projection.transform(&vectors.data)?;
         (transformed, Some(vectors.data))
     } else {
         (vectors.data, None)
     };
     let projection_transform_ms = projection_transform_start.elapsed().as_secs_f64() * 1_000.0;
+    if distance == Distance::Cosine && projection.is_some() {
+        let start = Instant::now();
+        try_normalize_rows(&mut training_vectors, training_dim, true)?;
+        normalization_ms += start.elapsed().as_secs_f64() * 1_000.0;
+    }
     let prepare_ms = prepare_start.elapsed().as_secs_f64() * 1_000.0;
     if common.wait_for_profiler {
         wait_for_profiler()?;
@@ -454,7 +475,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
 mod tests {
     use gathers::distance::Distance;
     use gathers::kmeans::KMeans;
-    use gathers::reduction::Srht;
+    use gathers::reduction::SRHT;
 
     use super::{
         Projection, ReductionMethod, check_memory, cluster_count, reconstruct_original_centroids,
@@ -464,8 +485,8 @@ mod tests {
     fn reduction_method_names() {
         for (value, expected) in [
             ("raw", ReductionMethod::Raw),
-            ("pca", ReductionMethod::Pca),
-            ("srht", ReductionMethod::Srht),
+            ("pca", ReductionMethod::PCA),
+            ("srht", ReductionMethod::SRHT),
         ] {
             assert_eq!(value.parse::<ReductionMethod>().unwrap(), expected);
         }
@@ -477,7 +498,7 @@ mod tests {
 
     #[test]
     fn projected_assignments_reconstruct_original_space_means() {
-        let projection = Projection::Srht(Srht::new(2, 1, 42).unwrap());
+        let projection = Projection::SRHT(SRHT::new(2, 1, 42).unwrap());
         let original = [-1.0, 100.0, -2.0, 200.0, 1.0, 300.0, 2.0, 400.0];
         let reduced_centroids = [-1.5, 1.5, 7.0];
         let fallback = projection.inverse_transform(&reduced_centroids).unwrap();
@@ -499,7 +520,7 @@ mod tests {
 
     #[test]
     fn projected_antipodal_cluster_uses_an_assigned_unit_direction() {
-        let projection = Projection::Srht(Srht::new(2, 1, 42).unwrap());
+        let projection = Projection::SRHT(SRHT::new(2, 1, 42).unwrap());
         let original = [1.0, 0.0, -1.0, 0.0];
         let (centroids, empty) = reconstruct_original_centroids(
             &projection,
@@ -517,7 +538,7 @@ mod tests {
 
     #[test]
     fn projected_dot_training_can_preserve_zero_centroids() {
-        let projection = Projection::Srht(Srht::new(2, 1, 42).unwrap());
+        let projection = Projection::SRHT(SRHT::new(2, 1, 42).unwrap());
         let (centroids, empty) = reconstruct_original_centroids(
             &projection,
             &[0.0, 0.0, 0.0, 0.0],
