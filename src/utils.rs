@@ -7,16 +7,8 @@ use std::path::Path;
 use aligned_vec::{AVec, avec};
 use num_traits::{AsPrimitive, Float, FromBytes, FromPrimitive, Num, NumAssign, ToBytes};
 
-/// Calculate the centroid of a set of vectors and subtract it from each vector.
-pub fn centroid_residual<T>(vecs: &mut [T], dim: usize)
-where
-    T: Float + AsPrimitive<f64> + FromPrimitive + NumAssign + Copy,
-{
-    centroid_residual_with_mean(vecs, dim);
-}
-
 /// Center vectors in-place and return the mean subtracted from each vector.
-pub(crate) fn centroid_residual_with_mean<T>(vecs: &mut [T], dim: usize) -> Vec<T>
+pub fn centroid_residual<T>(vecs: &mut [T], dim: usize) -> Vec<T>
 where
     T: Float + AsPrimitive<f64> + FromPrimitive + NumAssign + Copy,
 {

@@ -16,7 +16,7 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
 use crate::sampling::subsample_flat;
-use crate::utils::{centroid_residual_with_mean, normalize};
+use crate::utils::{centroid_residual, normalize};
 
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
@@ -416,7 +416,7 @@ impl KMeans {
         // Center before sampling so the L2 assignment uses smaller coordinates.
         let residual_mean = if self.distance == Distance::SquaredEuclidean && self.use_residual {
             debug!("use residual");
-            Some(centroid_residual_with_mean(&mut vecs, dim))
+            Some(centroid_residual(&mut vecs, dim))
         } else {
             None
         };
