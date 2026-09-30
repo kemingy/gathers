@@ -12,6 +12,14 @@ pub fn centroid_residual<T>(vecs: &mut [T], dim: usize)
 where
     T: Float + AsPrimitive<f64> + FromPrimitive + NumAssign + Copy,
 {
+    centroid_residual_with_mean(vecs, dim);
+}
+
+/// Center vectors in-place and return the mean subtracted from each vector.
+pub(crate) fn centroid_residual_with_mean<T>(vecs: &mut [T], dim: usize) -> Vec<T>
+where
+    T: Float + AsPrimitive<f64> + FromPrimitive + NumAssign + Copy,
+{
     assert!(!vecs.is_empty());
     let n = vecs.len() / dim;
     let mut mean = vec![0.0f64; dim];
@@ -21,12 +29,16 @@ where
             *m += v.as_();
         }
     }
-    mean.iter_mut().for_each(|m| *m /= n as f64);
+    let mean = mean
+        .into_iter()
+        .map(|value| T::from_f64(value / n as f64).unwrap())
+        .collect::<Vec<_>>();
     for vec in vecs.chunks_mut(dim) {
         for (m, v) in mean.iter().zip(vec.iter_mut()) {
-            *v -= T::from_f64(*m).unwrap();
+            *v -= *m;
         }
     }
+    mean
 }
 
 /// Convert a 2-D `Vec<Vec<T>>` to a 1-D continuous aligned vector.

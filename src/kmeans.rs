@@ -16,7 +16,7 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
 use crate::sampling::subsample_flat;
-use crate::utils::{centroid_residual, normalize};
+use crate::utils::{centroid_residual_with_mean, normalize};
 
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
@@ -304,7 +304,8 @@ impl KMeans {
     /// * `max_iter` - max number of iterations
     /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
     /// * `distance` - distance metric
-    /// * `use_residual` - use residual for more accurate L2 distance computations, only work for L2
+    /// * `use_residual` - center vectors for more accurate L2 computations; returned
+    ///   centroids remain in the input coordinate space. Only applies to L2.
     pub fn new(
         num_clusters: u32,
         max_iter: u32,
@@ -342,7 +343,7 @@ impl KMeans {
         self
     }
 
-    /// Fit the KMeans configurations to the given vectors and return the centroids.
+    /// Fit the KMeans configurations and return centroids in the input coordinate space.
     pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
         if let Some(seed) = self.seed {
             self.fit_inner(vecs, dim, true, &mut StdRng::seed_from_u64(seed))
@@ -353,7 +354,8 @@ impl KMeans {
 
     /// Train on every row of an already-prepared sample, without further subsampling.
     ///
-    /// Uses the same layout and preprocessing as [`Self::fit`]. Configure the cluster count
+    /// Uses the same layout and preprocessing as [`Self::fit`] and returns centroids in the
+    /// input coordinate space. Configure the cluster count
     /// with [`Self::new`] based on the original dataset size; a default configuration derives
     /// it from the sample size. The seed controls initialization, rotations and empty-cluster
     /// repair. Source sampling is the caller's responsibility. Requires at least 39 rows per
@@ -411,11 +413,13 @@ impl KMeans {
         let num_clusters = self.cluster_count(num_vectors);
         debug!("num of points: {num_vectors}, num of clusters: {num_clusters}");
 
-        // use residual for more accurate L2 distance computations
-        if self.distance == Distance::SquaredEuclidean && self.use_residual {
+        // Center before sampling so the L2 assignment uses smaller coordinates.
+        let residual_mean = if self.distance == Distance::SquaredEuclidean && self.use_residual {
             debug!("use residual");
-            centroid_residual(&mut vecs, dim);
-        }
+            Some(centroid_residual_with_mean(&mut vecs, dim))
+        } else {
+            None
+        };
 
         // subsample
         let n_sample = self.training_sample_size(num_vectors);
@@ -473,6 +477,14 @@ impl KMeans {
             }
         }
 
+        if let Some(mean) = residual_mean {
+            for centroid in centroids.chunks_mut(dim) {
+                for (value, offset) in centroid.iter_mut().zip(&mean) {
+                    *value += *offset;
+                }
+            }
+        }
+
         centroids
     }
 }
@@ -503,6 +515,21 @@ mod tests {
             model.fit_sample(as_continuous_vec(small), 1),
             model.fit(as_continuous_vec(small), 1)
         );
+    }
+
+    #[test]
+    fn residual_fit_returns_centroids_in_input_coordinates() {
+        let rows = (0..40)
+            .map(|index| vec![10_000.0 + index as f32, -20_000.0 + 2.0 * index as f32])
+            .collect::<Vec<_>>();
+        let model = KMeans::new(1, 2, 1e-4, Distance::SquaredEuclidean, true).seed(42);
+
+        for centroids in [
+            model.fit(as_continuous_vec(&rows), 2),
+            model.fit_sample(as_continuous_vec(&rows), 2),
+        ] {
+            assert_eq!(&*centroids, &[10_019.5, -19_961.0]);
+        }
     }
 
     #[test]
