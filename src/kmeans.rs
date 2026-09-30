@@ -398,24 +398,14 @@ impl KMeans {
     /// Train on every row of an already-prepared sample, without further subsampling.
     ///
     /// Uses the same layout and preprocessing as [`Self::fit`] and returns centroids in the
-    /// input coordinate space. Configure the cluster count
-    /// with [`Self::new`] based on the original dataset size; a default configuration derives
+    /// input coordinate space together with the final assignment label for each input row.
+    /// Empty-cluster repair can produce a centroid with no matching label. Configure the cluster
+    /// count with [`Self::new`] based on the original dataset size; a default configuration derives
     /// it from the sample size. The seed controls initialization, rotations and empty-cluster
     /// repair. Source sampling is the caller's responsibility. Requires at least 39 rows per
     /// cluster, even when the original dataset is larger. Cosine training requires finite
     /// nonzero norms in every row of this prepared sample.
-    pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
-        self.fit_sample_with_labels(vecs, dim).0
-    }
-
-    /// Train on every row of an already-prepared sample and return centroids and final labels.
-    ///
-    /// The labels correspond one-for-one with input rows and are the assignments used to produce
-    /// the returned centroids. This is useful when caller-owned companion data must be aggregated
-    /// using the same partition. Empty-cluster repair can produce a centroid with no matching
-    /// label. Sampling, layout, and minimum-size requirements are the same as
-    /// [`Self::fit_sample`].
-    pub fn fit_sample_with_labels(&self, vecs: AVec<f32>, dim: usize) -> (AVec<f32>, Vec<u32>) {
+    pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> (AVec<f32>, Vec<u32>) {
         if let Some(seed) = self.seed {
             self.fit_inner(vecs, dim, false, &mut StdRng::seed_from_u64(seed))
         } else {
@@ -580,14 +570,13 @@ mod tests {
         let values = (0..600).map(|value| vec![value as f32]).collect::<Vec<_>>();
         let model = KMeans::new(1, 1, 0.01, Distance::SquaredEuclidean, false).seed(42);
         assert_eq!(model.training_sample_size(600), 256);
-        assert_eq!(&*model.fit_sample(as_continuous_vec(&values), 1), &[299.5]);
-        let (centroids, labels) = model.fit_sample_with_labels(as_continuous_vec(&values), 1);
+        let (centroids, labels) = model.fit_sample(as_continuous_vec(&values), 1);
         assert_eq!(&*centroids, &[299.5]);
         assert_eq!(labels, vec![0; 600]);
         let small = &values[..128];
         assert_eq!(model.training_sample_size(128), 128);
         assert_eq!(
-            model.fit_sample(as_continuous_vec(small), 1),
+            model.fit_sample(as_continuous_vec(small), 1).0,
             model.fit(as_continuous_vec(small), 1)
         );
     }
@@ -601,7 +590,7 @@ mod tests {
 
         for centroids in [
             model.fit(as_continuous_vec(&rows), 2),
-            model.fit_sample(as_continuous_vec(&rows), 2),
+            model.fit_sample(as_continuous_vec(&rows), 2).0,
         ] {
             assert_eq!(&*centroids, &[10_019.5, -19_961.0]);
         }
@@ -622,6 +611,7 @@ mod tests {
             KMeans::new(1, 1, 0.01, distance, false)
                 .seed(42)
                 .fit_sample(as_continuous_vec(&vectors), 2)
+                .0
         };
         let cosine = fit(Distance::Cosine);
         let dot = fit(Distance::NegativeDotProduct);
@@ -653,7 +643,8 @@ mod tests {
             .collect::<Vec<_>>();
         let centroids = KMeans::new(1, 3, 0.01, Distance::Cosine, false)
             .seed(42)
-            .fit_sample(as_continuous_vec(&vectors), 2);
+            .fit_sample(as_continuous_vec(&vectors), 2)
+            .0;
         assert!(centroids.iter().all(|value| value.is_finite()));
         assert_eq!(centroids[0].abs(), 1.0);
         assert_eq!(centroids[1], 0.0);
@@ -680,7 +671,8 @@ mod tests {
         let vectors = vec![vec![0.0, 0.0]; 40];
         let centroids = KMeans::new(1, 3, 0.01, Distance::NegativeDotProduct, false)
             .seed(42)
-            .fit_sample(as_continuous_vec(&vectors), 2);
+            .fit_sample(as_continuous_vec(&vectors), 2)
+            .0;
         assert_eq!(&*centroids, &[0.0, 0.0]);
     }
 

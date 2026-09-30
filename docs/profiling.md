@@ -59,9 +59,10 @@ explicitly.
 
 Library callers preparing data externally can use `sampling::sample_indices` and
 `KMeans::training_sample_size`, then pass a flat aligned sample to `KMeans::fit_sample`.
-`fit_sample` never subsamples again. Configure K from the original dataset size before sampling;
-the default library configuration only sees the supplied sample's size. If residual centering is
-enabled, its mean is computed from the supplied sample. File formats stay in the CLI.
+`fit_sample` returns centroids and final row labels without subsampling again. Configure K from
+the original dataset size before sampling; the default library configuration only sees the
+supplied sample's size. If residual centering is enabled, its mean is computed from the supplied
+sample. File formats stay in the CLI.
 
 `assign` still loads data into RAM. It accepts `--num-vectors` and `--num-centroids` to load
 prefixes; omitted limits read all rows. Its per-row headers and values are checked for the loaded

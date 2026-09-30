@@ -156,13 +156,6 @@ impl FromStr for ReductionMethod {
 }
 
 impl Projection {
-    fn output_dim(&self) -> usize {
-        match self {
-            Self::Pca(model) => model.output_dim(),
-            Self::Srht(model) => model.output_dim(),
-        }
-    }
-
     fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>> {
         match self {
             Self::Pca(model) => Ok(model.transform(vectors)?),
@@ -174,13 +167,6 @@ impl Projection {
         match self {
             Self::Pca(model) => Ok(model.inverse_transform(vectors)?),
             Self::Srht(model) => Ok(model.inverse_transform(vectors)?),
-        }
-    }
-
-    fn preserved_variance(&self) -> Option<f64> {
-        match self {
-            Self::Pca(model) => Some(model.preserved_variance()),
-            Self::Srht(_) => None,
         }
     }
 }
@@ -390,8 +376,11 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         )?)),
     };
     let projection_fit_ms = projection_fit_start.elapsed().as_secs_f64() * 1_000.0;
-    let preserved_variance = projection.as_ref().and_then(Projection::preserved_variance);
-    let training_dim = projection.as_ref().map_or(dim, Projection::output_dim);
+    let preserved_variance = match &projection {
+        Some(Projection::Pca(model)) => Some(model.preserved_variance()),
+        _ => None,
+    };
+    let training_dim = reduced_dim.unwrap_or(dim);
     let projection_transform_start = Instant::now();
     let (training_vectors, original_vectors) = if let Some(projection) = &projection {
         let transformed = projection.transform(&vectors.data)?;
@@ -405,12 +394,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         wait_for_profiler()?;
     }
     let start = Instant::now();
-    let (reduced_centroids, labels) = if original_vectors.is_some() {
-        let (centroids, labels) = kmeans.fit_sample_with_labels(training_vectors, training_dim);
-        (centroids, Some(labels))
-    } else {
-        (kmeans.fit_sample(training_vectors, training_dim), None)
-    };
+    let (reduced_centroids, labels) = kmeans.fit_sample(training_vectors, training_dim);
     let fit_ms = start.elapsed().as_secs_f64() * 1_000.0;
     let num_centroids = reduced_centroids.len() / training_dim;
     let reconstruction_start = Instant::now();
@@ -419,7 +403,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
             projection,
             &original_vectors,
             &reduced_centroids,
-            labels.as_deref().unwrap(),
+            &labels,
             dim,
             training_dim,
             distance,
