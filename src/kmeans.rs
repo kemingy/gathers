@@ -16,13 +16,34 @@ use rayon::slice::{ParallelSlice, ParallelSliceMut};
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
 use crate::sampling::subsample_flat;
-use crate::utils::{centroid_residual, normalize};
+use crate::utils::{centroid_residual, normalize_nonzero_row, try_normalize_rows};
 
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const MAX_POINTS_PER_CENTROID: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
+
+fn negative_cosine_similarity(lhs: &[f32], rhs: &[f32]) -> f32 {
+    let mut dot = 0.0_f64;
+    let mut lhs_squared_norm = 0.0_f64;
+    let mut rhs_squared_norm = 0.0_f64;
+    for (&left, &right) in lhs.iter().zip(rhs) {
+        let left = f64::from(left);
+        let right = f64::from(right);
+        dot += left * right;
+        lhs_squared_norm += left * left;
+        rhs_squared_norm += right * right;
+    }
+    assert!(
+        lhs_squared_norm.is_finite()
+            && lhs_squared_norm > 0.0
+            && rhs_squared_norm.is_finite()
+            && rhs_squared_norm > 0.0,
+        "cosine assignment requires finite nonzero vector norms"
+    );
+    -(dot / lhs_squared_norm.sqrt() / rhs_squared_norm.sqrt()) as f32
+}
 
 struct AssignBlock<'a> {
     vecs: &'a [f32],
@@ -56,6 +77,7 @@ impl pulp::WithSimd for AssignBlock<'_> {
                     Distance::NegativeDotProduct => {
                         -crate::simd::pulp::dot_product(simd, vector, centroid)
                     }
+                    Distance::Cosine => negative_cosine_similarity(vector, centroid),
                 };
                 if candidate < best_distance {
                     best_distance = candidate;
@@ -84,6 +106,8 @@ fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, label
 }
 
 /// Assign vectors to centroids in single thread.
+///
+/// Cosine assignment accepts unnormalized inputs and requires finite nonzero row norms.
 pub fn base_assign(
     vecs: &[f32],
     centroids: &[f32],
@@ -102,6 +126,8 @@ pub fn base_assign(
 }
 
 /// Assign vectors to centroids in multi-threads.
+///
+/// Cosine assignment accepts unnormalized inputs and requires finite nonzero row norms.
 pub fn base_assign_parallel(
     vecs: &[f32],
     centroids: &[f32],
@@ -179,7 +205,7 @@ fn rabitq_assign_parallel_inner<R: Rng + ?Sized>(
 /// Update centroids to the mean of assigned vectors.
 pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
     let mut rng = rand::rng();
-    update_centroids_inner(vecs, centroids, dim, labels, &mut rng)
+    update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng)
 }
 
 fn update_centroids_inner<R: Rng + ?Sized>(
@@ -187,6 +213,7 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     centroids: &mut [f32],
     dim: usize,
     labels: &[u32],
+    unit_directions: bool,
     rng: &mut R,
 ) -> f32 {
     validate_assignment_inputs(vecs, centroids, dim, labels);
@@ -261,6 +288,17 @@ fn update_centroids_inner<R: Rng + ?Sized>(
             cluster_sizes[donor_cluster] -= cluster_sizes[empty_cluster];
         }
     }
+    if unit_directions {
+        for (mean, previous) in means.chunks_exact_mut(dim).zip(centroids.chunks_exact(dim)) {
+            match normalize_nonzero_row(mean) {
+                Some(true) => {}
+                // With a zero cluster sum, every unit direction has the same dot objective.
+                // Retain the previous direction; dot training may also have a zero seed.
+                Some(false) => mean.copy_from_slice(previous),
+                None => panic!("centroid has a non-finite norm"),
+            }
+        }
+    }
     let diff = squared_euclidean(centroids, &means);
     centroids.copy_from_slice(&means);
     if empty_cluster_count != 0 {
@@ -302,8 +340,9 @@ impl KMeans {
     ///
     /// * `num_clusters` - number of clusters; [`KMeans::default`] derives it from the input size
     /// * `max_iter` - max number of iterations
-    /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
-    /// * `distance` - distance metric
+    /// * `tolerance` - convergence tolerance on the final centroid shift
+    /// * `distance` - distance metric; [`Distance::Cosine`] normalizes sampled training rows
+    ///   in place before assignment
     /// * `use_residual` - center vectors for more accurate L2 computations; returned
     ///   centroids remain in the input coordinate space. Only applies to L2.
     pub fn new(
@@ -344,11 +383,15 @@ impl KMeans {
     }
 
     /// Fit the KMeans configurations and return centroids in the input coordinate space.
+    ///
+    /// Cosine training requires finite nonzero norms in the sampled rows. When an occupied
+    /// cluster has a zero mean, it retains its previous unit direction.
     pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
         if let Some(seed) = self.seed {
             self.fit_inner(vecs, dim, true, &mut StdRng::seed_from_u64(seed))
+                .0
         } else {
-            self.fit_inner(vecs, dim, true, &mut rand::rng())
+            self.fit_inner(vecs, dim, true, &mut rand::rng()).0
         }
     }
 
@@ -359,8 +402,20 @@ impl KMeans {
     /// with [`Self::new`] based on the original dataset size; a default configuration derives
     /// it from the sample size. The seed controls initialization, rotations and empty-cluster
     /// repair. Source sampling is the caller's responsibility. Requires at least 39 rows per
-    /// cluster, even when the original dataset is larger.
+    /// cluster, even when the original dataset is larger. Cosine training requires finite
+    /// nonzero norms in every row of this prepared sample.
     pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
+        self.fit_sample_with_labels(vecs, dim).0
+    }
+
+    /// Train on every row of an already-prepared sample and return centroids and final labels.
+    ///
+    /// The labels correspond one-for-one with input rows and are the assignments used to produce
+    /// the returned centroids. This is useful when caller-owned companion data must be aggregated
+    /// using the same partition. Empty-cluster repair can produce a centroid with no matching
+    /// label. Sampling, layout, and minimum-size requirements are the same as
+    /// [`Self::fit_sample`].
+    pub fn fit_sample_with_labels(&self, vecs: AVec<f32>, dim: usize) -> (AVec<f32>, Vec<u32>) {
         if let Some(seed) = self.seed {
             self.fit_inner(vecs, dim, false, &mut StdRng::seed_from_u64(seed))
         } else {
@@ -403,7 +458,7 @@ impl KMeans {
         dim: usize,
         subsample: bool,
         rng: &mut R,
-    ) -> AVec<f32> {
+    ) -> (AVec<f32>, Vec<u32>) {
         validate_vectors(&vecs, dim);
         assert!(!vecs.is_empty(), "at least one vector is required");
 
@@ -428,14 +483,27 @@ impl KMeans {
             vecs = subsample_flat(n_sample, &vecs, dim, rng);
         }
 
+        let assignment_distance = if self.distance == Distance::Cosine {
+            try_normalize_rows(&mut vecs, dim, false)
+                .unwrap_or_else(|error| panic!("cannot fit cosine K-means: {error}"));
+            Distance::NegativeDotProduct
+        } else {
+            self.distance
+        };
+
         let mut centroids = subsample_flat(num_clusters as usize, &vecs, dim, rng);
-        if self.distance == Distance::NegativeDotProduct {
-            centroids.chunks_mut(dim).for_each(normalize);
+        if assignment_distance == Distance::NegativeDotProduct {
+            for centroid in centroids.chunks_exact_mut(dim) {
+                assert!(
+                    normalize_nonzero_row(centroid).is_some(),
+                    "centroid has a non-finite norm"
+                );
+            }
         }
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
-        let use_exact_assignment = self.distance == Distance::NegativeDotProduct
+        let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
             || training_num * dim <= LARGE_CLUSTER_THRESHOLD;
         #[cfg(not(feature = "perf"))]
         let mut matrix_workspace = if use_exact_assignment {
@@ -443,7 +511,7 @@ impl KMeans {
                 &vecs,
                 centroids.len() / dim,
                 dim,
-                self.distance,
+                assignment_distance,
             )
         } else {
             None
@@ -453,12 +521,12 @@ impl KMeans {
             let start_time = Instant::now();
             if use_exact_assignment {
                 #[cfg(feature = "perf")]
-                base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
+                base_assign(&vecs, &centroids, dim, assignment_distance, &mut labels);
                 #[cfg(not(feature = "perf"))]
                 if let Some(workspace) = &mut matrix_workspace {
                     workspace.assign(&vecs, &centroids, dim, &mut labels);
                 } else {
-                    base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
+                    base_assign_parallel(&vecs, &centroids, dim, assignment_distance, &mut labels);
                 }
             } else {
                 #[cfg(feature = "perf")]
@@ -466,10 +534,14 @@ impl KMeans {
                 #[cfg(not(feature = "perf"))]
                 rabitq_assign_parallel_inner(&vecs, &centroids, dim, &mut labels, rng);
             }
-            let diff = update_centroids_inner(&vecs, &mut centroids, dim, &labels, rng);
-            if self.distance == Distance::NegativeDotProduct {
-                centroids.chunks_mut(dim).for_each(normalize);
-            }
+            let diff = update_centroids_inner(
+                &vecs,
+                &mut centroids,
+                dim,
+                &labels,
+                assignment_distance == Distance::NegativeDotProduct,
+                rng,
+            );
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
             if diff < self.tolerance {
                 debug!("converged at iter {i}");
@@ -485,7 +557,7 @@ impl KMeans {
             }
         }
 
-        centroids
+        (centroids, labels)
     }
 }
 
@@ -497,7 +569,7 @@ mod tests {
 
     use super::{
         KMeans, base_assign, base_assign_parallel, rabitq_assign, rabitq_assign_inner,
-        rabitq_assign_parallel_inner, update_centroids,
+        rabitq_assign_parallel_inner, update_centroids, update_centroids_inner,
     };
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
@@ -509,6 +581,9 @@ mod tests {
         let model = KMeans::new(1, 1, 0.01, Distance::SquaredEuclidean, false).seed(42);
         assert_eq!(model.training_sample_size(600), 256);
         assert_eq!(&*model.fit_sample(as_continuous_vec(&values), 1), &[299.5]);
+        let (centroids, labels) = model.fit_sample_with_labels(as_continuous_vec(&values), 1);
+        assert_eq!(&*centroids, &[299.5]);
+        assert_eq!(labels, vec![0; 600]);
         let small = &values[..128];
         assert_eq!(model.training_sample_size(128), 128);
         assert_eq!(
@@ -530,6 +605,102 @@ mod tests {
         ] {
             assert_eq!(&*centroids, &[10_019.5, -19_961.0]);
         }
+    }
+
+    #[test]
+    fn cosine_training_normalizes_rows_but_dot_preserves_magnitudes() {
+        let vectors = (0..78)
+            .map(|row| {
+                if row % 2 == 0 {
+                    vec![100.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect::<Vec<_>>();
+        let fit = |distance| {
+            KMeans::new(1, 1, 0.01, distance, false)
+                .seed(42)
+                .fit_sample(as_continuous_vec(&vectors), 2)
+        };
+        let cosine = fit(Distance::Cosine);
+        let dot = fit(Distance::NegativeDotProduct);
+        let diagonal = 0.5_f32.sqrt();
+        assert!((cosine[0] - diagonal).abs() < 1e-5);
+        assert!((cosine[1] - diagonal).abs() < 1e-5);
+        assert!(dot[0] > 0.999);
+        assert!(dot[1] < 0.011);
+    }
+
+    #[test]
+    #[should_panic(expected = "finite nonzero L2 norm")]
+    fn cosine_training_rejects_zero_vectors() {
+        let mut vectors = vec![vec![1.0, 0.0]; 39];
+        vectors[38] = vec![0.0, 0.0];
+        KMeans::new(1, 1, 0.01, Distance::Cosine, false).fit_sample(as_continuous_vec(&vectors), 2);
+    }
+
+    #[test]
+    fn antipodal_cosine_cluster_keeps_a_unit_direction() {
+        let vectors = (0..40)
+            .map(|row| {
+                if row % 2 == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![-1.0, 0.0]
+                }
+            })
+            .collect::<Vec<_>>();
+        let centroids = KMeans::new(1, 3, 0.01, Distance::Cosine, false)
+            .seed(42)
+            .fit_sample(as_continuous_vec(&vectors), 2);
+        assert!(centroids.iter().all(|value| value.is_finite()));
+        assert_eq!(centroids[0].abs(), 1.0);
+        assert_eq!(centroids[1], 0.0);
+        let mut labels = [0];
+        base_assign(&[1.0, 0.0], &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [0]);
+
+        let mut previous = [1.0, 0.0];
+        let flat = vectors.iter().flatten().copied().collect::<Vec<_>>();
+        let diff = update_centroids_inner(
+            &flat,
+            &mut previous,
+            2,
+            &[0; 40],
+            true,
+            &mut StdRng::seed_from_u64(42),
+        );
+        assert_eq!(previous, [1.0, 0.0]);
+        assert_eq!(diff, 0.0);
+    }
+
+    #[test]
+    fn dot_training_preserves_zero_seeds_and_zero_means() {
+        let vectors = vec![vec![0.0, 0.0]; 40];
+        let centroids = KMeans::new(1, 3, 0.01, Distance::NegativeDotProduct, false)
+            .seed(42)
+            .fit_sample(as_continuous_vec(&vectors), 2);
+        assert_eq!(&*centroids, &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn cosine_assignment_accounts_for_centroid_magnitude() {
+        let vector = [1.0, 2.0];
+        let centroids = [100.0, 0.0, 1.0, 1.0];
+        let mut labels = [0];
+        base_assign(&vector, &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [1]);
+        base_assign_parallel(&vector, &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [1]);
+        base_assign(
+            &vector,
+            &centroids,
+            2,
+            Distance::NegativeDotProduct,
+            &mut labels,
+        );
+        assert_eq!(labels, [0]);
     }
 
     #[test]
