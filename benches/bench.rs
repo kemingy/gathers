@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use gathers::distance::{
     argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product, native_squared_euclidean,
     neg_dot_product, squared_euclidean,
@@ -12,6 +12,8 @@ use rabitq::{
     vector_binarize_query,
 };
 use rand::RngExt;
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::ParallelSliceMut;
 use seed_rand::seeded_rng;
 
 // Backend names are intentionally independent of instruction-set versions:
@@ -415,6 +417,67 @@ pub fn rotator_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+pub fn normalization_benchmark(c: &mut Criterion) {
+    let mut rng = seeded_rng();
+    let mut group = c.benchmark_group("normalize_rows");
+    for threads in [1, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for dim in [7, 15, 31, 128, 768, 960, 1024] {
+            let input = (0..4096 * dim)
+                .map(|_| rng.random_range(-1.0_f32..1.0))
+                .collect::<Vec<_>>();
+            for strict in [true, false] {
+                let name = if strict { "strict" } else { "optimized" };
+                group.bench_with_input(
+                    BenchmarkId::new(format!("{name}_{threads}t"), dim),
+                    &input,
+                    |b, input| {
+                        b.iter_batched_ref(
+                            || input.clone(),
+                            |rows| {
+                                pool.install(|| {
+                                    if strict {
+                                        rows.par_chunks_exact_mut(dim).enumerate().try_for_each(|(index, row)| {
+                                            let squared_norm = row
+                                                .iter()
+                                                .map(|&x| f64::from(x) * f64::from(x))
+                                                .sum::<f64>();
+                                            if !squared_norm.is_finite() {
+                                                return Err(gathers::utils::NormalizeRowsError::NonFiniteNorm(index));
+                                            }
+                                            if squared_norm == 0.0 {
+                                                return Ok(());
+                                            }
+                                            let inverse_norm = squared_norm.sqrt().recip();
+                                            let inverse_norm_f32 = inverse_norm as f32;
+                                            if inverse_norm_f32.is_finite() {
+                                                row.iter_mut().for_each(|x| *x *= inverse_norm_f32);
+                                            } else {
+                                                row.iter_mut().for_each(|x| {
+                                                    *x = (f64::from(*x) * inverse_norm) as f32;
+                                                });
+                                            }
+                                            Ok(())
+                                        }).unwrap();
+                                    } else {
+                                        gathers::utils::try_normalize_rows(rows, dim, true)
+                                            .unwrap();
+                                    }
+                                });
+                            },
+                            BatchSize::PerIteration,
+                        );
+                    },
+                );
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(l2_benches, l2_distance_benchmark);
 criterion_group!(ip_benches, ip_distance_benchmark);
 criterion_group!(norm_benches, l2_norm_benchmark);
@@ -427,6 +490,7 @@ criterion_group!(
 criterion_group!(scalar_quantize_benches, scalar_quantize_benchmark);
 criterion_group!(binary_ip_benches, binary_ip_benchmark);
 criterion_group!(rotator_benches, rotator_benchmark);
+criterion_group!(normalization_benches, normalization_benchmark);
 criterion_main!(
     l2_benches,
     ip_benches,
@@ -437,4 +501,5 @@ criterion_main!(
     scalar_quantize_benches,
     binary_ip_benches,
     rotator_benches,
+    normalization_benches,
 );

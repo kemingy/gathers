@@ -37,8 +37,9 @@ draw per source row, including for sources larger than u32. Sorted indices drive
 reads: nearby rows are coalesced across gaps of at most 64 KiB, bounded by `--batch-rows`
 (default 4096). Only selected rows are decoded and validated. File shape and the first dimension
 are always checked; use `--validate-all` to scan and validate every row, including unselected rows.
-Training keeps the sample in one flat aligned RAM buffer, not the full corpus. Coordinates are
-preserved: this command does not normalize or apply PCA.
+Training keeps the sample in flat aligned RAM, not the full corpus. The default `raw`/`l2` path
+does not project or normalize rows. `--distance cos` normalizes training rows, and
+`--reduction pca|srht` trains in reduced space; see the [reduction guide](./reduction.md).
 
 `--memory-limit-gb` sets an optional preflight limit in decimal GB; there is **no limit by
 default**. Before selecting indices or allocating the
@@ -48,8 +49,9 @@ conservative scratch for the adaptive sampler. An over-limit workload is rejecte
 subsampled further. This is an admission check, **not an OS-enforced RSS cap**; measure peak RSS
 and leave room for other processes. For 10M rows at dimension 768, the default K is 24,881 and
 the training sample has 6,369,536 rows (19.57 GB of coordinates) — pass `--memory-limit-gb` to
-reject such workloads before loading. Original and projected samples
-are not needed simultaneously when an external batch projection prepares training input.
+reject such workloads before loading. Projected training temporarily retains both original and
+reduced samples to reconstruct full-dimensional centroids. PCA transformation also holds a
+centered copy; the estimate includes these buffers.
 Sampling alone does not make arbitrary K fit: at 10B source rows the default K is 6.25M, and
 even the minimum 39 rows per cluster would require about 749 GB at dimension 768. Use
 `--memory-limit-gb` to bound training before it starts; otherwise reduce K or dimension
@@ -57,14 +59,16 @@ explicitly.
 
 Library callers preparing data externally can use `sampling::sample_indices` and
 `KMeans::training_sample_size`, then pass a flat aligned sample to `KMeans::fit_sample`.
-`fit_sample` never subsamples again. Configure K from the original dataset size before sampling;
-the default library configuration only sees the supplied sample's size. If residual centering is
-enabled, its mean is computed from the supplied sample. File formats stay in the CLI.
+`fit_sample` returns centroids and final row labels without subsampling again. Configure K from
+the original dataset size before sampling; the default library configuration only sees the
+supplied sample's size. If residual centering is enabled, its mean is computed from the supplied
+sample. File formats stay in the CLI.
 
 `assign` still loads data into RAM. It accepts `--num-vectors` and `--num-centroids` to load
 prefixes; omitted limits read all rows. Its per-row headers and values are checked for the loaded
 prefix, not unread rows. The training memory limit does not apply to this profiling command.
-Streaming full-corpus assignment and PCA are separate follow-up steps.
+Streaming full-corpus assignment remains a separate follow-up step. PCA and SRHT here transform
+the sampled training rows, not the full corpus.
 
 The index-sampling ablation needs no vector dataset:
 
@@ -93,10 +97,13 @@ The PID and attachment prompt are printed to stderr only with `--wait-for-profil
 Reports include shape, paths, seed, workers, CPU description, architecture, and OS. Hardware details
 are supplied externally, not detected through a backend-name API.
 
-- `kmeans`: `prepare_ms` measures index selection, sorting and sample loading. Separate
-  `index_sample_ms`, `index_sort_ms`, and `sample_read_ms` isolate those stages.
-  `fit_ms` measures `fit_sample`, including initialization and internal allocations, but no
-  source sampling or I/O. Their sum includes preparation and training, excluding centroid output.
+- `kmeans`: `prepare_ms` measures sample selection and loading plus any normalization and
+  projection. Separate `index_sample_ms`, `index_sort_ms`, and `sample_read_ms` isolate the
+  sampling stages. `fit_ms` measures K-means fitting, including initialization and internal
+  allocations, but no source sampling or I/O. Projected runs also report `projection_fit_ms`,
+  `projection_transform_ms`, and `reconstruction_ms`; the projection fields are included in
+  `prepare_ms`, while reconstruction is separate. Add `prepare_ms + fit_ms + reconstruction_ms`
+  for the reported training stages, excluding centroid output.
   Reports include `training_rows`, `batch_rows`, `validate_all`, `memory_limit_gb` and
   `estimated_memory_bytes`.
   Centroids are saved as fvecs.

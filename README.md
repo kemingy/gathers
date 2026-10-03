@@ -38,5 +38,18 @@ cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
   --vectors vectors.fvecs --centroids centroids.fvecs
 ```
 
+### Dimensionality reduction
+
+The CLI can train K-means in raw, PCA, or SRHT space and writes full-dimensional centroids for
+the existing `assign` command. Select `--distance l2|cos|dot` (default `l2`) and, for PCA or SRHT,
+set `--reduced-dim`:
+
+```console
+gathers kmeans -i vectors.fvecs -o centroids.fvecs -n 4096 \
+  --reduction pca --reduced-dim 128
+```
+
+See the [reduction guide](./docs/reduction.md) for method trade-offs and implementation details.
+
 To install the binary from a checkout, run `cargo install --path crates/cli`.
 For timing scope and CPU sampling, see the [profiling guide](./docs/profiling.md).

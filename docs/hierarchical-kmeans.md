@@ -78,7 +78,7 @@ trees) to any depth. For exact Euclidean search:
    smaller bound.
 
 The bound uses Euclidean distances. With `SquaredEuclidean` scores, compare
-`lb_n²` with the best squared distance. `NegativeDotProduct` and approximate
+`lb_n²` with the best squared distance. `NegativeDotProduct`, `Cosine`, and approximate
 RaBitQ scores do not support this exact stopping rule; use a scan budget
 (`max_nodes`, the analogue of FLANN's `checks`) for those paths. Greedy descent
 is a separate one-path search. Budgeted best-first search can revisit sibling

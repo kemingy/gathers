@@ -12,7 +12,7 @@ unsafe_code = "deny"
 
 [workspace.dependencies]
 bytemuck = "1.25.0"
-faer = { version = "0.24.0", default-features = false, features = ["linalg", "std"] }
+faer = { version = "0.24.0", default-features = false, features = ["linalg", "rayon", "std"] }
 pulp = "0.22.0"
 rand = "0.10.0"
 rayon = "1.12.0"
@@ -48,6 +48,7 @@ pulp.workspace = true
 rabitq = { path = "crates/rabitq" }
 rand.workspace = true
 rayon.workspace = true
+thiserror = "2.0.20"
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
 pulp = { workspace = true, features = ["x86-v4"] }

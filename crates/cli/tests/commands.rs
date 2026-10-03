@@ -214,6 +214,234 @@ fn trained_fvecs_feed_reproducible_assignment() {
 }
 
 #[test]
+fn reduction_methods_train_in_reduced_space_and_write_full_dimensional_centroids() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    fixture(&vectors, 4, 256);
+
+    for method in ["pca", "srht"] {
+        let centroids = dir.path().join(format!("{method}.fvecs"));
+        let mut command = cli();
+        command
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args([
+                "-n",
+                "2",
+                "-m",
+                "1",
+                "--training-samples",
+                "128",
+                "--reduction",
+                method,
+                "--reduced-dim",
+                "2",
+            ]);
+        if method == "pca" {
+            command.args(["--projection-training-samples", "64"]);
+        }
+        let report = json(&mut command);
+        assert_eq!(report["reduction"], method);
+        assert_eq!(report["dim"], 4);
+        assert_eq!(report["training_dim"], 2);
+        assert!(report["reconstruction_empty_clusters"].as_u64().is_some());
+        assert_eq!(
+            report["projection_training_rows"],
+            if method == "pca" { 64 } else { 0 }
+        );
+        assert_eq!(
+            std::fs::metadata(&centroids).unwrap().len(),
+            2 * (4 + 4 * 4)
+        );
+        for field in [
+            "projection_fit_ms",
+            "projection_transform_ms",
+            "reconstruction_ms",
+        ] {
+            assert!(report[field].as_f64().unwrap() >= 0.0);
+        }
+        if method == "pca" {
+            assert!(report["preserved_variance"].as_f64().unwrap() > 0.0);
+        } else {
+            assert!(report["preserved_variance"].is_null());
+        }
+    }
+}
+
+#[test]
+fn cosine_normalizes_inputs_while_dot_preserves_magnitudes() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let mut file = File::create(&vectors).unwrap();
+    for row in 0..78 {
+        file.write_all(&2_u32.to_le_bytes()).unwrap();
+        let vector = if row % 2 == 0 {
+            [100.0_f32, 0.0]
+        } else {
+            [0.0, 1.0]
+        };
+        for value in vector {
+            file.write_all(&value.to_le_bytes()).unwrap();
+        }
+    }
+
+    let train = |distance: &str| {
+        let centroids = dir.path().join(format!("{distance}.fvecs"));
+        let report = json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args(["-n", "1", "-m", "1", "--distance", distance]),
+        );
+        assert_eq!(report["distance"], distance);
+        let bytes = std::fs::read(centroids).unwrap();
+        [
+            f32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            f32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        ]
+    };
+    let cosine = train("cos");
+    let dot = train("dot");
+    let diagonal = 0.5_f32.sqrt();
+    assert!((cosine[0] - diagonal).abs() < 1e-5);
+    assert!((cosine[1] - diagonal).abs() < 1e-5);
+    assert!(dot[0] > 0.999);
+    assert!(dot[1] < 0.011);
+}
+
+#[test]
+fn projected_cosine_writes_unit_original_space_centroids() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 4, 128);
+    let report = json(
+        cli()
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args([
+                "-n",
+                "2",
+                "-m",
+                "1",
+                "--distance",
+                "cos",
+                "--reduction",
+                "srht",
+                "--reduced-dim",
+                "2",
+            ]),
+    );
+    assert_eq!(report["distance"], "cos");
+    let bytes = std::fs::read(centroids).unwrap();
+    for row in bytes.as_chunks::<{ 4 + 4 * 4 }>().0 {
+        let norm = row[4..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|value| f32::from_le_bytes(*value).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn projected_cosine_accepts_zero_projections() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let srht = gathers::reduction::SRHT::new(2, 1, 42).unwrap();
+    let coefficients = srht.transform(&[1.0, 0.0, 0.0, 1.0]).unwrap();
+    let null_row = [coefficients[1], -coefficients[0]];
+
+    for (method, directions) in [
+        ("pca", vec![[1.0_f32, 0.0]]),
+        ("pca", vec![[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0]]),
+        ("srht", vec![null_row]),
+        ("srht", vec![null_row, [1.0, 0.0]]),
+    ] {
+        let rows = directions.repeat(39);
+        gathers::utils::write_vecs(&vectors, &rows).unwrap();
+        let report = json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args([
+                    "-n",
+                    "1",
+                    "-m",
+                    "1",
+                    "--distance",
+                    "cos",
+                    "--reduction",
+                    method,
+                    "--reduced-dim",
+                    "1",
+                ]),
+        );
+        assert_eq!(report["distance"], "cos");
+        let mut expected = [0.0_f32; 2];
+        for mut direction in directions {
+            gathers::utils::try_normalize_rows(&mut direction, 2, false).unwrap();
+            for (sum, value) in expected.iter_mut().zip(direction) {
+                *sum += value;
+            }
+        }
+        gathers::utils::try_normalize_rows(&mut expected, 2, false).unwrap();
+        let bytes = std::fs::read(&centroids).unwrap();
+        assert_eq!(bytes.len(), 12);
+        for (coordinate, expected) in bytes[4..].as_chunks::<4>().0.iter().zip(expected) {
+            let actual = f32::from_le_bytes(*coordinate);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "{method}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cosine_rejects_zero_original_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let mut rows = [[1.0_f32, 0.0]; 39];
+    rows[3] = [0.0, 0.0];
+    gathers::utils::write_vecs(&vectors, &rows).unwrap();
+
+    let extra_args: [&[&str]; 3] = [
+        &["--reduction", "raw"],
+        &["--reduction", "pca", "--reduced-dim", "1"],
+        &["--reduction", "srht", "--reduced-dim", "1"],
+    ];
+    for extra in extra_args {
+        let output = cli()
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args(["-n", "1", "--distance", "cos"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("finite nonzero L2 norm"));
+        assert!(!stderr.contains("panicked"));
+        assert!(!centroids.exists());
+    }
+}
+
+#[test]
 fn assignment_rejects_mismatched_dimensions_and_invalid_options() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");
