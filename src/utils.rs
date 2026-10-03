@@ -86,10 +86,22 @@ pub enum NormalizeRowsError {
 
 // Return whether the row had a nonzero norm; None means its norm was non-finite.
 pub(crate) fn normalize_nonzero_row(vector: &mut [f32]) -> Option<bool> {
-    let squared_norm = vector
-        .iter()
-        .map(|&value| f64::from(value) * f64::from(value))
-        .sum::<f64>();
+    // Independent accumulators shorten the reduction's dependency chain without relaxing
+    // IEEE arithmetic. Squaring f32 values in f64 is exact, and NaN/infinity still propagate
+    // to the final validation. Eight accumulators outperformed two/four on Apple M3 Max.
+    let mut sums = [0.0_f64; 8];
+    let (chunks, tail) = vector.as_chunks::<8>();
+    for chunk in chunks {
+        for (sum, &value) in sums.iter_mut().zip(chunk) {
+            let value = f64::from(value);
+            *sum += value * value;
+        }
+    }
+    let mut squared_norm = sums.into_iter().sum::<f64>();
+    for &value in tail {
+        let value = f64::from(value);
+        squared_norm += value * value;
+    }
     if !squared_norm.is_finite() {
         return None;
     }
@@ -98,7 +110,7 @@ pub(crate) fn normalize_nonzero_row(vector: &mut [f32]) -> Option<bool> {
     }
     let inverse_norm = squared_norm.sqrt().recip();
     let inverse_norm_f32 = inverse_norm as f32;
-    if inverse_norm_f32.is_finite() {
+    if inverse_norm_f32.is_normal() {
         vector
             .iter_mut()
             .for_each(|value| *value *= inverse_norm_f32);
@@ -113,7 +125,9 @@ pub(crate) fn normalize_nonzero_row(vector: &mut [f32]) -> Option<bool> {
 /// Normalize complete `f32` rows in place, rejecting non-finite norms.
 ///
 /// Zero rows are preserved when `allow_zero` is true and rejected otherwise. Norms are
-/// accumulated in `f64` so finite `f32` components do not overflow the sum.
+/// accumulated in `f64` so finite `f32` components do not overflow the sum. The reduction
+/// uses independent accumulators, so results can differ slightly from a sequential sum.
+/// Rows whose inverse norm is not a normal `f32` are scaled in `f64` to avoid range loss.
 /// Rows are processed in parallel; on error, some other rows may already be normalized.
 pub fn try_normalize_rows(
     vecs: &mut [f32],
@@ -195,6 +209,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use rand::RngExt;
+    use seed_rand::seeded_rng;
+
     use super::{NormalizeRowsError, try_normalize_rows};
 
     #[test]
@@ -227,6 +244,11 @@ mod tests {
         let mut tiny = [f32::from_bits(1), 0.0];
         try_normalize_rows(&mut tiny, 2, false).unwrap();
         assert_eq!(tiny, [1.0, 0.0]);
+        // A subnormal f32 reciprocal loses precision even though the input is finite.
+        let mut huge = vec![f32::MAX; 768];
+        try_normalize_rows(&mut huge, 768, false).unwrap();
+        let expected = 768.0_f32.sqrt().recip();
+        assert!(huge.iter().all(|&value| (value - expected).abs() < 1e-8));
     }
 
     #[test]
@@ -240,5 +262,60 @@ mod tests {
             try_normalize_rows(&mut [f32::NAN, 0.0], 2, true),
             Err(NormalizeRowsError::NonFiniteNorm(0))
         );
+    }
+
+    #[test]
+    fn row_normalization_matches_strict_f64_reference() {
+        let mut rng = seeded_rng();
+        for dim in [1, 3, 7, 31, 128, 768, 960, 1025] {
+            for scale in [f32::from_bits(1), f32::MIN_POSITIVE, 1.0, f32::MAX] {
+                let input = (0..dim)
+                    .map(|_| rng.random_range(-1.0_f32..1.0) * scale)
+                    .collect::<Vec<_>>();
+                let squared_norm = input
+                    .iter()
+                    .map(|&value| f64::from(value) * f64::from(value))
+                    .sum::<f64>();
+                let mut actual = input.clone();
+                try_normalize_rows(&mut actual, dim, true).unwrap();
+                if squared_norm == 0.0 {
+                    assert_eq!(actual, input);
+                    continue;
+                }
+                let inverse_norm = squared_norm.sqrt().recip();
+                for (&actual, &input) in actual.iter().zip(&input) {
+                    let expected = (f64::from(input) * inverse_norm) as f32;
+                    assert!(
+                        (actual - expected).abs() <= 1e-7 + 1e-6 * expected.abs(),
+                        "dim={dim}, scale={scale}, actual={actual}, expected={expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn row_normalization_rejects_nonfinite_values_without_mutating_the_row() {
+        for dim in [7, 768] {
+            for index in [0, dim - 1] {
+                for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    for allow_zero in [false, true] {
+                        let mut row = vec![1.0_f32; dim];
+                        row[index] = invalid;
+                        let before = row.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+                        let expected = if allow_zero {
+                            NormalizeRowsError::NonFiniteNorm(0)
+                        } else {
+                            NormalizeRowsError::InvalidNorm(0)
+                        };
+                        assert_eq!(try_normalize_rows(&mut row, dim, allow_zero), Err(expected));
+                        assert_eq!(
+                            row.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                            before
+                        );
+                    }
+                }
+            }
+        }
     }
 }
