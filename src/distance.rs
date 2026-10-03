@@ -1,6 +1,5 @@
 //! Compute the distance between vectors.
 
-use core::f32;
 use std::str::FromStr;
 
 /// Distance metrics. Parse `"l2"`, `"cos"`, or `"dot"` with [`str::parse`].

@@ -1,5 +1,3 @@
-use core::f32;
-
 use gathers::distance::{Distance, argmin, squared_euclidean};
 use gathers::kmeans::{KMeans, rabitq_assign_parallel};
 use gathers::utils::{as_continuous_vec, as_matrix};
