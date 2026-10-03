@@ -368,7 +368,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     drop(indices);
     drop(reader);
     let mut normalization_ms = 0.0;
-    if distance == Distance::Cosine && reduced_dim.is_some() {
+    if distance == Distance::Cosine {
         let start = Instant::now();
         try_normalize_rows(&mut vectors.data, dim, false)?;
         normalization_ms += start.elapsed().as_secs_f64() * 1_000.0;

@@ -410,7 +410,7 @@ fn projected_cosine_accepts_zero_projections() {
 }
 
 #[test]
-fn projected_cosine_still_rejects_zero_original_rows() {
+fn cosine_rejects_zero_original_rows() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");
     let centroids = dir.path().join("centroids.fvecs");
@@ -418,22 +418,19 @@ fn projected_cosine_still_rejects_zero_original_rows() {
     rows[3] = [0.0, 0.0];
     gathers::utils::write_vecs(&vectors, &rows).unwrap();
 
-    for method in ["pca", "srht"] {
+    let extra_args: [&[&str]; 3] = [
+        &["--reduction", "raw"],
+        &["--reduction", "pca", "--reduced-dim", "1"],
+        &["--reduction", "srht", "--reduced-dim", "1"],
+    ];
+    for extra in extra_args {
         let output = cli()
             .args(["kmeans", "-i"])
             .arg(&vectors)
             .arg("-o")
             .arg(&centroids)
-            .args([
-                "-n",
-                "1",
-                "--distance",
-                "cos",
-                "--reduction",
-                method,
-                "--reduced-dim",
-                "1",
-            ])
+            .args(["-n", "1", "--distance", "cos"])
+            .args(extra)
             .output()
             .unwrap();
         assert!(!output.status.success());
