@@ -18,10 +18,24 @@ pub struct PCA {
     input_dim: usize,
     output_dim: usize,
     mean: Vec<f32>,
+    // The f64 mean used for centering; rounding the mean to f32 before subtraction can
+    // exceed the variance of large-offset data and bias the covariance.
+    mean64: Vec<f64>,
     // Principal directions in descending variance order, row-major output_dim x input_dim.
     components: Vec<f32>,
     explained_variance: Vec<f32>,
     total_variance: f64,
+}
+
+fn center_rows(input: &[f32], mean: &[f64], dim: usize, output: &mut [f32]) {
+    output
+        .par_chunks_mut(dim)
+        .zip(input.par_chunks(dim))
+        .for_each(|(output, input)| {
+            for ((output, &input), &mean) in output.iter_mut().zip(input).zip(mean) {
+                *output = (f64::from(input) - mean) as f32;
+            }
+        });
 }
 
 impl PCA {
@@ -50,14 +64,7 @@ impl PCA {
 
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        centered
-            .par_chunks_mut(input_dim)
-            .zip(vectors.par_chunks(input_dim))
-            .for_each(|(output, input)| {
-                for ((output, &input), &mean) in output.iter_mut().zip(input).zip(&mean) {
-                    *output = input - mean;
-                }
-            });
+        center_rows(vectors, &mean64, input_dim, &mut centered);
 
         let mut covariance = vec![0.0_f32; input_dim * input_dim];
         let centered = MatRef::from_row_major_slice(&centered, rows, input_dim);
@@ -90,6 +97,7 @@ impl PCA {
             input_dim,
             output_dim,
             mean,
+            mean64,
             components,
             explained_variance,
             total_variance,
@@ -106,7 +114,8 @@ impl PCA {
         self.output_dim
     }
 
-    /// Coordinate-wise training mean subtracted before projection.
+    /// Coordinate-wise training mean, rounded to `f32`. Centering internally subtracts the
+    /// `f64` mean, so this accessor may differ from the value actually used.
     pub fn mean(&self) -> &[f32] {
         &self.mean
     }
@@ -142,14 +151,7 @@ impl PCA {
         let rows = validate_shape(vectors, self.input_dim)?;
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        centered
-            .par_chunks_mut(self.input_dim)
-            .zip(vectors.par_chunks(self.input_dim))
-            .for_each(|(output, input)| {
-                for ((output, &input), &mean) in output.iter_mut().zip(input).zip(&self.mean) {
-                    *output = input - mean;
-                }
-            });
+        center_rows(vectors, &self.mean64, self.input_dim, &mut centered);
         let mut output = avec!(0.0_f32; rows * self.output_dim);
         matmul(
             MatMut::from_row_major_slice_mut(&mut output, rows, self.output_dim),
@@ -176,8 +178,8 @@ impl PCA {
             Par::rayon(0),
         );
         output.par_chunks_mut(self.input_dim).for_each(|row| {
-            for (value, &mean) in row.iter_mut().zip(&self.mean) {
-                *value += mean;
+            for (value, &mean) in row.iter_mut().zip(&self.mean64) {
+                *value = (f64::from(*value) + mean) as f32;
             }
         });
         Ok(output)
@@ -204,5 +206,19 @@ mod tests {
         for (&actual, &expected) in reconstructed.iter().zip(&vectors) {
             assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn pca_centers_large_offsets_with_the_f64_mean() {
+        // f32 rounds the 100_000_004.0 mean to 100_000_000.0; f32 centering would produce
+        // residuals [0, 8] and double the variance to 64.
+        let vectors = [100_000_000.0, 100_000_008.0];
+        let pca = PCA::fit(&vectors, 1, 1).unwrap();
+        assert!((pca.explained_variance()[0] - 32.0).abs() < 1e-3);
+        let projected = pca.transform(&vectors).unwrap();
+        assert!((projected[0].abs() - 4.0).abs() < 1e-4);
+        assert!((projected[1].abs() - 4.0).abs() < 1e-4);
+        let reconstructed = pca.inverse_transform(&projected).unwrap();
+        assert_eq!(&*reconstructed, &vectors);
     }
 }
