@@ -103,8 +103,12 @@ fn check_memory(
     let projection_bytes = reduced_dim.map_or(0, |reduced_dim| {
         let projected_sample = samples as u128 * reduced_dim as u128 * 4;
         let projected_centroids = clusters as u128 * (dim as u128 + reduced_dim as u128) * 4;
-        let pca_workspace =
-            projection_training_samples as u128 * dim as u128 * 4 + dim as u128 * dim as u128 * 4;
+        // Only PCA fits a projection: SRHT has no training copy or dim × dim covariance.
+        let pca_workspace = if projection_training_samples > 0 {
+            projection_training_samples as u128 * dim as u128 * 4 + dim as u128 * dim as u128 * 4
+        } else {
+            0
+        };
         // PCA::transform holds a centered copy of the full sample alongside its input and output.
         let centered_sample = if projection_training_samples > 0 {
             sample_bytes
@@ -564,6 +568,12 @@ mod tests {
             check_memory(samples, 768, clusters, 4096, None, 0, Some(48)).unwrap() < 30_000_000_000
         );
         assert!(check_memory(samples, 768, clusters, 4096, Some(128), 76_800, Some(48)).is_err());
+        // An SRHT run (no PCA training rows) is not charged for the covariance or the
+        // centered training copy; only the PCA run pays for those buffers.
+        let srht = check_memory(samples, 4096, clusters, 4096, Some(128), 0, None).unwrap();
+        let pca = check_memory(samples, 4096, clusters, 4096, Some(128), 76_800, None).unwrap();
+        let pca_only_bytes = (76_800 * 4096 + 4096 * 4096 + samples * 4096) as u64 * 4;
+        assert_eq!(pca - srht, pca_only_bytes);
         assert!(check_memory(samples, 4096, clusters, 4096, None, 0, Some(48)).is_err());
         // No limit accepts the same workload that Some(48) rejects.
         assert!(check_memory(samples, 4096, clusters, 4096, None, 0, None).is_ok());
