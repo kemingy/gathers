@@ -1,7 +1,11 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+use gathers::reduction::Reduction;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 fn fixture(path: &Path, dim: u32, rows: usize) {
     let mut file = File::create(path).unwrap();
@@ -71,6 +75,54 @@ fn training_samples_before_loading_and_is_batch_size_independent() {
 }
 
 #[test]
+fn automatic_pca_uses_source_metadata_and_raw_override_is_respected() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("large-sparse.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    let dim = 197_u32;
+    let row_bytes = u64::from(dim + 1) * 4;
+    let mut file = File::create(&vectors).unwrap();
+    file.set_len(1_000_000 * row_bytes).unwrap();
+    // Sparse storage avoids allocating a million-row fixture. Only the deterministic sample
+    // and first metadata row need valid headers; this test deliberately does not validate_all.
+    for row in std::iter::once(0).chain(gathers::sampling::sample_indices(
+        1_000_000,
+        40,
+        &mut StdRng::seed_from_u64(42),
+    )) {
+        file.seek(SeekFrom::Start(row as u64 * row_bytes)).unwrap();
+        file.write_all(&dim.to_le_bytes()).unwrap();
+    }
+    drop(file);
+    for (requested, expected, training_dim) in [("auto", "pca", 128), ("raw", "raw", 197)] {
+        let report = json(
+            cli()
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args([
+                    "-n",
+                    "1",
+                    "-m",
+                    "1",
+                    "--training-samples",
+                    "40",
+                    "--reduction",
+                    requested,
+                ]),
+        );
+        assert_eq!(report["num_vectors"], 1_000_000);
+        assert_eq!(report["training_rows"], 40);
+        assert_eq!(report["reduction"], expected);
+        assert_eq!(report["requested_reduction"], requested);
+        assert_eq!(report["training_dim"], training_dim);
+        let data = std::fs::read(&centroids).unwrap();
+        assert_eq!(u32::from_le_bytes(data[..4].try_into().unwrap()), dim);
+    }
+}
+
+#[test]
 fn explicit_training_sample_size_is_validated_and_independent_of_read_mode() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");
@@ -110,6 +162,54 @@ fn explicit_training_sample_size_is_validated_and_independent_of_read_mode() {
         assert_eq!(report["validate_all"], true);
         assert_eq!(std::fs::read(&centroids).unwrap(), expected);
     }
+}
+
+#[test]
+fn sampling_factor_and_explicit_total_share_the_same_training_sample() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 3, 1000);
+    let command = |factor: &str| {
+        let mut command = cli();
+        command
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args(["-n", "2", "-m", "1", "--samples-per-cluster", factor]);
+        command
+    };
+    for (factor, rows) in [("39", 78), ("128", 256), ("256", 512), ("512", 1000)] {
+        let factored = json(&mut command(factor));
+        assert_eq!(factored["training_rows"], rows);
+        assert_eq!(
+            factored["samples_per_cluster"],
+            factor.parse::<usize>().unwrap()
+        );
+        let expected = std::fs::read(&centroids).unwrap();
+        // The unused factor may be below the minimum when an explicit total overrides it.
+        let explicit = json(command("0").args(["--training-samples", &rows.to_string()]));
+        assert_eq!(explicit["training_rows"], rows);
+        assert_eq!(std::fs::read(&centroids).unwrap(), expected);
+    }
+    for factor in ["0", "38"] {
+        let rejected = command(factor).output().unwrap();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("at least 39"));
+    }
+    let automatic = json(
+        cli()
+            .args(["kmeans", "-i"])
+            .arg(&vectors)
+            .arg("-o")
+            .arg(&centroids)
+            .args(["-m", "1", "--samples-per-cluster", "39"]),
+    );
+    assert_eq!(
+        automatic["training_rows"].as_u64().unwrap(),
+        39 * automatic["num_centroids"].as_u64().unwrap()
+    );
 }
 
 #[test]

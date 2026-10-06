@@ -6,7 +6,7 @@ use rand::{RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::reduction::{ReductionError, validate_output_dimension, validate_shape};
+use crate::reduction::{Reduction, ReductionError, validate_output_dimension, validate_shape};
 use crate::sampling::sample_indices;
 
 /// Subsampled randomized Hadamard transform for dense vectors.
@@ -42,31 +42,21 @@ impl SRHT {
             indices,
         })
     }
+}
 
-    /// Input vector dimension before zero-padding.
-    pub fn input_dim(&self) -> usize {
+impl Reduction for SRHT {
+    fn input_dim(&self) -> usize {
         self.input_dim
     }
 
-    /// Number of sampled Hadamard coordinates.
-    pub fn output_dim(&self) -> usize {
+    fn output_dim(&self) -> usize {
         self.output_dim
-    }
-
-    /// Padded power-of-two dimension used by the Hadamard transform.
-    pub fn padded_dim(&self) -> usize {
-        self.padded_dim
-    }
-
-    /// Selected Hadamard-coordinate indices in ascending order.
-    pub fn sampled_indices(&self) -> &[usize] {
-        &self.indices
     }
 
     /// Project flat row-major vectors, allocating an aligned output buffer.
     ///
     /// A nonzero input row in the projection's null space maps to zero.
-    pub fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
+    fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.input_dim)?;
         let mut output = avec!(0.0_f32; rows * self.output_dim);
         let scale = 1.0 / (self.output_dim as f32).sqrt();
@@ -94,7 +84,7 @@ impl SRHT {
     /// Without padding, this is the minimum-norm inverse of the sampled projection. When the
     /// input dimension is not a power of two, truncation removes reconstructed coordinates and
     /// projecting the result again may differ from the supplied projected vectors.
-    pub fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
+    fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.output_dim)?;
         let mut output = avec!(0.0_f32; rows * self.input_dim);
         let scale = (self.output_dim as f32).sqrt() / self.padded_dim as f32;
@@ -140,6 +130,7 @@ fn hadamard_in_place(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::SRHT;
+    use crate::reduction::Reduction;
 
     fn squared_norm(values: &[f32]) -> f32 {
         values.iter().map(|value| value * value).sum()

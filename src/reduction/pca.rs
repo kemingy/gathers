@@ -3,10 +3,13 @@
 use aligned_vec::{AVec, avec};
 use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par, Side};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::reduction::{ReductionError, validate_output_dimension, validate_shape};
+use crate::reduction::{Reduction, ReductionError, validate_output_dimension, validate_shape};
+use crate::sampling::sample_indices;
 
 /// Principal component projection learned from dense `f32` vectors.
 ///
@@ -17,14 +20,12 @@ use crate::reduction::{ReductionError, validate_output_dimension, validate_shape
 pub struct PCA {
     input_dim: usize,
     output_dim: usize,
-    mean: Vec<f32>,
     // The f64 mean used for centering; rounding the mean to f32 before subtraction can
     // exceed the variance of large-offset data and bias the covariance.
-    mean64: Vec<f64>,
+    mean: Vec<f64>,
     // Principal directions in descending variance order, row-major output_dim x input_dim.
     components: Vec<f32>,
-    explained_variance: Vec<f32>,
-    total_variance: f64,
+    preserved_variance: f64,
 }
 
 fn center_rows(input: &[f32], mean: &[f64], dim: usize, output: &mut [f32]) {
@@ -39,6 +40,46 @@ fn center_rows(input: &[f32], mean: &[f64], dim: usize, output: &mut [f32]) {
 }
 
 impl PCA {
+    /// Fit PCA on a uniformly selected, bounded sample of the supplied rows.
+    ///
+    /// Requires at least two fitting rows and no more than the available rows. The seed controls
+    /// selection; selected rows retain their source order. No copy is made when all rows are used.
+    pub fn fit_sample(
+        vectors: &[f32],
+        input_dim: usize,
+        output_dim: usize,
+        training_rows: usize,
+        seed: u64,
+    ) -> Result<Self, ReductionError> {
+        validate_output_dimension(input_dim, output_dim)?;
+        let rows = validate_shape(vectors, input_dim)?;
+        if training_rows < 2 {
+            return Err(ReductionError::TooFewRows {
+                rows: training_rows,
+            });
+        }
+        if training_rows > rows {
+            return Err(ReductionError::InvalidSampleSize {
+                requested: training_rows,
+                available: rows,
+            });
+        }
+        if training_rows == rows {
+            return Self::fit(vectors, input_dim, output_dim);
+        }
+        let mut indices = sample_indices(
+            rows,
+            training_rows,
+            &mut StdRng::seed_from_u64(seed ^ 0x5043_415f_5341_4d50),
+        );
+        indices.sort_unstable();
+        let mut sample = Vec::with_capacity(training_rows * input_dim);
+        for index in indices {
+            sample.extend_from_slice(&vectors[index * input_dim..(index + 1) * input_dim]);
+        }
+        Self::fit(&sample, input_dim, output_dim)
+    }
+
     /// Fit PCA to flat row-major training vectors.
     pub fn fit(
         vectors: &[f32],
@@ -51,20 +92,19 @@ impl PCA {
             return Err(ReductionError::TooFewRows { rows });
         }
 
-        let mut mean64 = vec![0.0_f64; input_dim];
+        let mut mean = vec![0.0_f64; input_dim];
         for row in vectors.chunks_exact(input_dim) {
-            for (mean, &value) in mean64.iter_mut().zip(row) {
+            for (mean, &value) in mean.iter_mut().zip(row) {
                 *mean += f64::from(value);
             }
         }
-        for value in &mut mean64 {
+        for value in &mut mean {
             *value /= rows as f64;
         }
-        let mean = mean64.iter().map(|&value| value as f32).collect::<Vec<_>>();
 
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &mean64, input_dim, &mut centered);
+        center_rows(vectors, &mean, input_dim, &mut centered);
 
         let mut covariance = vec![0.0_f32; input_dim * input_dim];
         let centered = MatRef::from_row_major_slice(&centered, rows, input_dim);
@@ -83,12 +123,19 @@ impl PCA {
         let eigenvectors = eigen.U();
         let total_variance = (0..input_dim)
             .map(|index| f64::from((*eigenvalues.get(index)).max(0.0)))
-            .sum();
-        let mut explained_variance = Vec::with_capacity(output_dim);
+            .sum::<f64>();
+        let preserved_variance = if total_variance == 0.0 {
+            1.0
+        } else {
+            (input_dim - output_dim..input_dim)
+                .rev()
+                .map(|index| f64::from((*eigenvalues.get(index)).max(0.0)))
+                .sum::<f64>()
+                / total_variance
+        };
         let mut components = Vec::with_capacity(output_dim * input_dim);
         for component in 0..output_dim {
             let source = input_dim - 1 - component;
-            explained_variance.push((*eigenvalues.get(source)).max(0.0));
             for coordinate in 0..input_dim {
                 components.push(*eigenvectors.get(coordinate, source));
             }
@@ -97,61 +144,34 @@ impl PCA {
             input_dim,
             output_dim,
             mean,
-            mean64,
             components,
-            explained_variance,
-            total_variance,
+            preserved_variance,
         })
-    }
-
-    /// Input vector dimension.
-    pub fn input_dim(&self) -> usize {
-        self.input_dim
-    }
-
-    /// Projected vector dimension.
-    pub fn output_dim(&self) -> usize {
-        self.output_dim
-    }
-
-    /// Coordinate-wise training mean, rounded to `f32`. Centering internally subtracts the
-    /// `f64` mean, so this accessor may differ from the value actually used.
-    pub fn mean(&self) -> &[f32] {
-        &self.mean
-    }
-
-    /// Principal directions in descending variance order, as row-major
-    /// `output_dim × input_dim` values.
-    pub fn components(&self) -> &[f32] {
-        &self.components
-    }
-
-    /// Variance captured by each retained component, in descending order.
-    pub fn explained_variance(&self) -> &[f32] {
-        &self.explained_variance
     }
 
     /// Fraction of total training variance captured by the retained components.
     pub fn preserved_variance(&self) -> f64 {
-        if self.total_variance == 0.0 {
-            1.0
-        } else {
-            self.explained_variance
-                .iter()
-                .map(|&value| f64::from(value))
-                .sum::<f64>()
-                / self.total_variance
-        }
+        self.preserved_variance
+    }
+}
+
+impl Reduction for PCA {
+    fn input_dim(&self) -> usize {
+        self.input_dim
+    }
+
+    fn output_dim(&self) -> usize {
+        self.output_dim
     }
 
     /// Project flat row-major vectors, allocating an aligned output buffer.
     ///
     /// Centering or discarding components can map a nonzero input row to zero.
-    pub fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
+    fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.input_dim)?;
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &self.mean64, self.input_dim, &mut centered);
+        center_rows(vectors, &self.mean, self.input_dim, &mut centered);
         let mut output = avec!(0.0_f32; rows * self.output_dim);
         matmul(
             MatMut::from_row_major_slice_mut(&mut output, rows, self.output_dim),
@@ -166,7 +186,7 @@ impl PCA {
     }
 
     /// Approximately reconstruct flat row-major projected vectors in the input space.
-    pub fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
+    fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.output_dim)?;
         let mut output = avec!(0.0_f32; rows * self.input_dim);
         matmul(
@@ -178,7 +198,7 @@ impl PCA {
             Par::rayon(0),
         );
         output.par_chunks_mut(self.input_dim).for_each(|row| {
-            for (value, &mean) in row.iter_mut().zip(&self.mean64) {
+            for (value, &mean) in row.iter_mut().zip(&self.mean) {
                 *value = (f64::from(*value) + mean) as f32;
             }
         });
@@ -189,6 +209,39 @@ impl PCA {
 #[cfg(test)]
 mod tests {
     use super::PCA;
+    use crate::reduction::Reduction;
+
+    #[test]
+    fn pca_fitting_sample_is_bounded_reproducible_and_validated() {
+        let vectors = (0..40)
+            .flat_map(|row| [row as f32, (row % 3) as f32])
+            .collect::<Vec<_>>();
+        let sampled = PCA::fit_sample(&vectors, 2, 1, 12, 42).unwrap();
+        let repeated = PCA::fit_sample(&vectors, 2, 1, 12, 42).unwrap();
+        assert_eq!(
+            sampled.transform(&vectors).unwrap(),
+            repeated.transform(&vectors).unwrap()
+        );
+        let all = PCA::fit_sample(&vectors, 2, 1, 40, 42).unwrap();
+        assert_eq!(
+            all.transform(&vectors).unwrap(),
+            PCA::fit(&vectors, 2, 1)
+                .unwrap()
+                .transform(&vectors)
+                .unwrap()
+        );
+        assert!(matches!(
+            PCA::fit_sample(&vectors, 2, 1, 1, 42),
+            Err(crate::reduction::ReductionError::TooFewRows { rows: 1 })
+        ));
+        assert!(matches!(
+            PCA::fit_sample(&vectors, 2, 1, 41, 42),
+            Err(crate::reduction::ReductionError::InvalidSampleSize {
+                requested: 41,
+                available: 40
+            })
+        ));
+    }
 
     #[test]
     fn pca_orders_components_and_round_trips_full_rank_data() {
@@ -199,9 +252,17 @@ mod tests {
             4.0, 1.0,
         ];
         let pca = PCA::fit(&vectors, 2, 2).unwrap();
-        assert!(pca.explained_variance()[0] > pca.explained_variance()[1]);
         assert!((pca.preserved_variance() - 1.0).abs() < 1e-6);
         let projected = pca.transform(&vectors).unwrap();
+        let variance = |coordinate: usize| {
+            projected
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|row| f64::from(row[coordinate]).powi(2))
+                .sum::<f64>()
+        };
+        assert!(variance(0) > variance(1));
         let reconstructed = pca.inverse_transform(&projected).unwrap();
         for (&actual, &expected) in reconstructed.iter().zip(&vectors) {
             assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
@@ -214,11 +275,27 @@ mod tests {
         // residuals [0, 8] and double the variance to 64.
         let vectors = [100_000_000.0, 100_000_008.0];
         let pca = PCA::fit(&vectors, 1, 1).unwrap();
-        assert!((pca.explained_variance()[0] - 32.0).abs() < 1e-3);
         let projected = pca.transform(&vectors).unwrap();
+        let variance = projected.iter().map(|value| value * value).sum::<f32>();
+        assert!((variance - 32.0).abs() < 1e-3);
         assert!((projected[0].abs() - 4.0).abs() < 1e-4);
         assert!((projected[1].abs() - 4.0).abs() < 1e-4);
         let reconstructed = pca.inverse_transform(&projected).unwrap();
         assert_eq!(&*reconstructed, &vectors);
+
+        // The retained fraction also checks covariance centering, independently of transform.
+        // The centered coordinate sums of squares are 64 and 36, with zero cross-covariance.
+        let vectors = [
+            100_000_000.0,
+            -3.0,
+            100_000_008.0,
+            -3.0,
+            100_000_008.0,
+            3.0,
+            100_000_000.0,
+            3.0,
+        ];
+        let pca = PCA::fit(&vectors, 2, 1).unwrap();
+        assert!((pca.preserved_variance() - 0.64).abs() < 1e-6);
     }
 }

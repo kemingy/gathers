@@ -10,7 +10,7 @@ pub enum Distance {
     SquaredEuclidean,
     /// Dot Product distance
     NegativeDotProduct,
-    /// Cosine distance; K-means normalizes training rows before dot-product assignment.
+    /// Cosine distance; training and assignment normalize rows before dot-product scoring.
     Cosine,
 }
 

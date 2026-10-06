@@ -1,14 +1,41 @@
-//! Linear dimensionality reduction for dense row-major vectors.
+//! Dimensionality reduction for dense row-major vectors.
 //!
 //! [`PCA`] learns a data-dependent projection that maximizes preserved variance. [`SRHT`] is a
 //! training-free subsampled randomized Hadamard transform. Both expose approximate inverse
 //! transforms so reduced-space centroids can be materialized in the original vector space.
+//! Import [`Reduction`] to use the shared transform methods.
+
+use aligned_vec::AVec;
 
 mod pca;
 mod srht;
 
 pub use pca::PCA;
 pub use srht::SRHT;
+
+/// A dimensionality-reduction transform for flat row-major `f32` vectors.
+///
+/// Construction remains specific to each method: [`PCA::fit`] learns a projection, while
+/// [`SRHT::new`] constructs one from dimensions and a seed.
+pub trait Reduction {
+    /// Number of coordinates in each original input row.
+    fn input_dim(&self) -> usize;
+
+    /// Number of coordinates in each projected row.
+    fn output_dim(&self) -> usize;
+
+    /// Project nonempty, complete, finite input rows into an aligned output buffer.
+    ///
+    /// Input rows have [`Self::input_dim`] coordinates; output rows have [`Self::output_dim`]
+    /// coordinates. A nonzero input can project to zero.
+    fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError>;
+
+    /// Approximately reconstruct nonempty, complete, finite projected rows.
+    ///
+    /// Output rows have [`Self::input_dim`] coordinates. Discarded information cannot generally
+    /// be recovered; this operation is not necessarily an exact inverse or pseudoinverse.
+    fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError>;
+}
 
 /// Errors returned when constructing or applying a reduction transform.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -35,6 +62,14 @@ pub enum ReductionError {
         /// Number of supplied rows.
         rows: usize,
     },
+    /// The requested PCA fitting sample is larger than the supplied data.
+    #[error("PCA training sample {requested} exceeds available rows {available}")]
+    InvalidSampleSize {
+        /// Requested fitting rows.
+        requested: usize,
+        /// Available input rows.
+        available: usize,
+    },
     /// The input contains a NaN or infinity.
     #[error("input contains a non-finite coordinate")]
     NonFiniteInput,
@@ -43,7 +78,7 @@ pub enum ReductionError {
     DecompositionFailed,
 }
 
-fn validate_shape(values: &[f32], dim: usize) -> Result<usize, ReductionError> {
+pub(crate) fn validate_shape(values: &[f32], dim: usize) -> Result<usize, ReductionError> {
     if dim == 0 || values.is_empty() || !values.len().is_multiple_of(dim) {
         return Err(ReductionError::InvalidInputShape {
             len: values.len(),
@@ -56,7 +91,10 @@ fn validate_shape(values: &[f32], dim: usize) -> Result<usize, ReductionError> {
     Ok(values.len() / dim)
 }
 
-fn validate_output_dimension(input_dim: usize, output_dim: usize) -> Result<(), ReductionError> {
+pub(crate) fn validate_output_dimension(
+    input_dim: usize,
+    output_dim: usize,
+) -> Result<(), ReductionError> {
     if output_dim == 0 || output_dim > input_dim {
         return Err(ReductionError::InvalidOutputDimension {
             input_dim,
@@ -68,7 +106,7 @@ fn validate_output_dimension(input_dim: usize, output_dim: usize) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::{PCA, ReductionError, SRHT};
+    use super::{PCA, Reduction, ReductionError, SRHT};
 
     #[test]
     fn transforms_validate_shapes_and_dimensions() {
@@ -84,10 +122,18 @@ mod tests {
             Err(ReductionError::TooFewRows { rows: 1 })
         ));
         let srht = SRHT::new(3, 2, 1).unwrap();
-        assert!(matches!(
-            srht.transform(&[1.0, f32::NAN, 3.0]),
-            Err(ReductionError::NonFiniteInput)
-        ));
+        let pca = PCA::fit(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3, 2).unwrap();
+        for model in [&srht as &dyn Reduction, &pca] {
+            assert_eq!(model.input_dim(), 3);
+            assert_eq!(model.output_dim(), 2);
+            assert!(matches!(
+                model.transform(&[1.0, f32::NAN, 3.0]),
+                Err(ReductionError::NonFiniteInput)
+            ));
+            let projected = model.transform(&[1.0, 2.0, 3.0]).unwrap();
+            assert_eq!(projected.len(), 2);
+            assert_eq!(model.inverse_transform(&projected).unwrap().len(), 3);
+        }
     }
 
     #[test]
@@ -107,6 +153,13 @@ mod tests {
             (
                 ReductionError::TooFewRows { rows: 1 },
                 "PCA requires at least two rows, got 1",
+            ),
+            (
+                ReductionError::InvalidSampleSize {
+                    requested: 41,
+                    available: 40,
+                },
+                "PCA training sample 41 exceeds available rows 40",
             ),
             (
                 ReductionError::NonFiniteInput,
