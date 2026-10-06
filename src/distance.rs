@@ -1,8 +1,8 @@
 //! Compute the distance between vectors.
 
-use core::f32;
+use std::str::FromStr;
 
-/// Distance metrics.
+/// Distance metrics. Parse `"l2"`, `"cos"`, or `"dot"` with [`str::parse`].
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Distance {
     /// L2 distance
@@ -10,6 +10,30 @@ pub enum Distance {
     SquaredEuclidean,
     /// Dot Product distance
     NegativeDotProduct,
+    /// Cosine distance; training and assignment normalize rows before dot-product scoring.
+    Cosine,
+}
+
+/// Error returned when parsing a distance name.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown distance '{value}'; expected l2, cos, or dot")]
+pub struct ParseDistanceError {
+    value: String,
+}
+
+impl FromStr for Distance {
+    type Err = ParseDistanceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "l2" => Ok(Self::SquaredEuclidean),
+            "cos" => Ok(Self::Cosine),
+            "dot" => Ok(Self::NegativeDotProduct),
+            _ => Err(ParseDistanceError {
+                value: value.to_owned(),
+            }),
+        }
+    }
 }
 
 /// Native implementation of l2 norm.
@@ -137,7 +161,7 @@ mod tests {
     use seed_rand::seeded_rng;
 
     use super::{
-        argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
+        Distance, argmin, l2_norm, l2_norm_native, native_argmin, native_dot_product,
         native_squared_euclidean, neg_dot_product, squared_euclidean,
     };
 
@@ -150,6 +174,21 @@ mod tests {
         assert!(
             diff <= tolerance,
             "{implementation} diff: {diff}, tolerance: {tolerance} for dim: {dim}"
+        );
+    }
+
+    #[test]
+    fn parses_distance_names() {
+        for (value, expected) in [
+            ("l2", Distance::SquaredEuclidean),
+            ("cos", Distance::Cosine),
+            ("dot", Distance::NegativeDotProduct),
+        ] {
+            assert_eq!(value.parse::<Distance>().unwrap(), expected);
+        }
+        assert_eq!(
+            "angular".parse::<Distance>().unwrap_err().to_string(),
+            "unknown distance 'angular'; expected l2, cos, or dot"
         );
     }
 

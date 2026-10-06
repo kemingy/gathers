@@ -77,10 +77,10 @@ struct BestTwo {
 impl BestTwo {
     fn new() -> Self {
         Self {
-            best_score: f32::MAX,
-            second_best_score: f32::MAX,
+            best_score: f32::INFINITY,
+            second_best_score: f32::INFINITY,
             best_index: 0,
-            exact_best_distance: f32::MAX,
+            exact_best_distance: f32::INFINITY,
             exact_best_index: 0,
         }
     }
@@ -107,14 +107,14 @@ impl Distance {
     fn matrix_scale(self) -> f32 {
         match self {
             Self::SquaredEuclidean => -2.0,
-            Self::NegativeDotProduct => -1.0,
+            Self::NegativeDotProduct | Self::Cosine => -1.0,
         }
     }
 
     fn matrix_norm(self, values: &[f32]) -> f32 {
         match self {
             Self::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
-            Self::NegativeDotProduct => stable_l2_norm(values),
+            Self::NegativeDotProduct | Self::Cosine => stable_l2_norm(values),
         }
     }
 
@@ -134,7 +134,7 @@ impl Distance {
             }
             // Cauchy-Schwarz bounds the magnitude of the exact dot product by
             // ||x||₂ ||c||₂.
-            Self::NegativeDotProduct => {
+            Self::NegativeDotProduct | Self::Cosine => {
                 DOT_ERROR_BOUND_SAFETY_FACTOR
                     * (gamma * vector_norm * max_centroid_norm + underflow_error)
             }
@@ -155,6 +155,10 @@ impl MatrixAssignmentWorkspace {
         dim: usize,
         distance: Distance,
     ) -> Option<Self> {
+        // Cosine fitting normalizes rows and uses the dot-product workspace instead.
+        if distance == Distance::Cosine {
+            return None;
+        }
         let num_vectors = vecs.len() / dim;
         let comparison_count = num_vectors.checked_mul(num_centroids)?;
         let assignment_threshold = if dim < 64 {
@@ -278,7 +282,9 @@ impl MatrixAssignmentWorkspace {
                                     .enumerate()
                                     .for_each(|(index, ((&score, &centroid_norm), centroid))| {
                                         let score = match self.distance {
-                                            Distance::NegativeDotProduct => score,
+                                            Distance::NegativeDotProduct | Distance::Cosine => {
+                                                score
+                                            }
                                             Distance::SquaredEuclidean => {
                                                 score + vector_norm + centroid_norm
                                             }

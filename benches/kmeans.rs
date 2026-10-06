@@ -2,7 +2,9 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use gathers::distance::Distance;
-use gathers::kmeans::{KMeans, base_assign, base_assign_parallel, rabitq_assign_parallel};
+use gathers::kmeans::{
+    KMeans, KMeansConfig, base_assign, base_assign_parallel, rabitq_assign_parallel,
+};
 use rabitq::RaBitQ;
 use rand::RngExt;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
@@ -92,22 +94,18 @@ fn kmeans_benchmark(c: &mut Criterion) {
     let seed = rng.random();
     let source: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
     let vecs = gathers::utils::as_continuous_vec(&[source]);
-    let l2_kmeans = KMeans::new(
-        NUM_CENTROIDS as u32,
-        ITERATIONS as u32,
-        f32::MIN_POSITIVE,
-        Distance::SquaredEuclidean,
-        false,
-    )
-    .seed(seed);
-    let dot_kmeans = KMeans::new(
-        NUM_CENTROIDS as u32,
-        ITERATIONS as u32,
-        f32::MIN_POSITIVE,
-        Distance::NegativeDotProduct,
-        false,
-    )
-    .seed(seed);
+    let config = KMeansConfig {
+        n_clusters: Some(NUM_CENTROIDS as u32),
+        max_iter: ITERATIONS as u32,
+        tolerance: f32::MIN_POSITIVE,
+        seed: Some(seed),
+        ..Default::default()
+    };
+    let l2_kmeans = KMeans::new(config);
+    let dot_kmeans = KMeans::new(KMeansConfig {
+        distance: Distance::NegativeDotProduct,
+        ..config
+    });
 
     let mut group = c.benchmark_group("kmeans");
     group.sample_size(20);
@@ -117,14 +115,14 @@ fn kmeans_benchmark(c: &mut Criterion) {
     group.bench_function("fit_50176x256x128_5iter", |b| {
         b.iter_batched(
             || vecs.clone(),
-            |input| l2_kmeans.fit(black_box(input), DIM),
+            |input| l2_kmeans.fit(black_box(input), DIM).unwrap(),
             BatchSize::LargeInput,
         )
     });
     group.bench_function("fit_dot_50176x256x128_5iter", |b| {
         b.iter_batched(
             || vecs.clone(),
-            |input| dot_kmeans.fit(black_box(input), DIM),
+            |input| dot_kmeans.fit(black_box(input), DIM).unwrap(),
             BatchSize::LargeInput,
         )
     });

@@ -1,28 +1,44 @@
 //! K-means clustering implementation.
 
+mod config;
 #[cfg(not(feature = "perf"))]
 mod matrix;
+mod reduced;
 
 use core::panic;
+use std::borrow::Cow;
 use std::time::Instant;
 
 use aligned_vec::AVec;
+pub use config::{KMeansConfig, ReductionConfig};
 use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
+pub use reduced::{KMeansError, KMeansFit};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::rabitq::{RaBitQ, RaBitQWorkspace};
+use crate::reduction::validate_shape;
 use crate::sampling::subsample_flat;
-use crate::utils::{centroid_residual, normalize};
+use crate::utils::{centroid_residual, normalize_nonzero_row, try_normalize_rows};
 
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
-const MAX_POINTS_PER_CENTROID: usize = 256;
+const DEFAULT_SAMPLES_PER_CLUSTER: usize = 256;
 const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
+
+fn normalize_assignment_rows(vecs: &[f32], dim: usize, distance: Distance) -> Cow<'_, [f32]> {
+    if distance != Distance::Cosine {
+        return Cow::Borrowed(vecs);
+    }
+    let mut normalized = vecs.to_vec();
+    try_normalize_rows(&mut normalized, dim, false)
+        .unwrap_or_else(|error| panic!("cannot assign cosine vectors: {error}"));
+    Cow::Owned(normalized)
+}
 
 struct AssignBlock<'a> {
     vecs: &'a [f32],
@@ -46,14 +62,15 @@ impl pulp::WithSimd for AssignBlock<'_> {
         } = self;
 
         for (label, vector) in labels.iter_mut().zip(vecs.chunks_exact(dim)) {
-            let mut best_distance = f32::MAX;
+            let mut best_distance = f32::INFINITY;
             let mut best_index = 0;
             for (index, centroid) in centroids.chunks_exact(dim).enumerate() {
                 let candidate = match distance {
                     Distance::SquaredEuclidean => {
                         crate::simd::pulp::l2_squared_distance(simd, vector, centroid)
                     }
-                    Distance::NegativeDotProduct => {
+                    // Cosine inputs are normalized once at the public assignment boundary.
+                    Distance::NegativeDotProduct | Distance::Cosine => {
                         -crate::simd::pulp::dot_product(simd, vector, centroid)
                     }
                 };
@@ -83,7 +100,13 @@ fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, label
     assert!(!centroids.is_empty(), "at least one centroid is required");
 }
 
-/// Assign vectors to centroids in single thread.
+/// Assign vectors to centroids with single-threaded scoring.
+///
+/// Cosine assignment requires finite nonzero row norms and normalizes copies of the inputs
+/// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
+/// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
+/// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
+/// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn base_assign(
     vecs: &[f32],
     centroids: &[f32],
@@ -92,9 +115,11 @@ pub fn base_assign(
     labels: &mut [u32],
 ) {
     validate_assignment_inputs(vecs, centroids, dim, labels);
+    let vecs = normalize_assignment_rows(vecs, dim, distance);
+    let centroids = normalize_assignment_rows(centroids, dim, distance);
     pulp::Arch::new().dispatch(AssignBlock {
-        vecs,
-        centroids,
+        vecs: &vecs,
+        centroids: &centroids,
         dim,
         distance,
         labels,
@@ -102,6 +127,12 @@ pub fn base_assign(
 }
 
 /// Assign vectors to centroids in multi-threads.
+///
+/// Cosine assignment requires finite nonzero row norms and normalizes copies of the inputs
+/// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
+/// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
+/// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
+/// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn base_assign_parallel(
     vecs: &[f32],
     centroids: &[f32],
@@ -110,13 +141,15 @@ pub fn base_assign_parallel(
     labels: &mut [u32],
 ) {
     validate_assignment_inputs(vecs, centroids, dim, labels);
+    let vecs = normalize_assignment_rows(vecs, dim, distance);
+    let centroids = normalize_assignment_rows(centroids, dim, distance);
     labels
         .par_chunks_mut(RAYON_BLOCK_SIZE)
         .zip(vecs.par_chunks(dim * RAYON_BLOCK_SIZE))
         .for_each(|(labels, vecs)| {
             pulp::Arch::new().dispatch(AssignBlock {
                 vecs,
-                centroids,
+                centroids: &centroids,
                 dim,
                 distance,
                 labels,
@@ -124,7 +157,9 @@ pub fn base_assign_parallel(
         });
 }
 
-/// Assign vectors to centroids with RaBitQ in single thread.
+/// Assign finite vectors to finite centroids with RaBitQ in single thread.
+///
+/// Rotation and scoring use ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
     rabitq_assign_inner(vecs, centroids, dim, labels, &mut rand::rng());
 }
@@ -154,7 +189,9 @@ fn rabitq_assign_inner<R: Rng + ?Sized>(
     debug!("RaBitQ: {}", rabitq.metrics());
 }
 
-/// Assign vectors to centroids with RaBitQ in multi-threads.
+/// Assign finite vectors to finite centroids with RaBitQ in multi-threads.
+///
+/// Rotation and scoring use ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 ///
 /// TODO: support dot product distance
 pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
@@ -176,10 +213,66 @@ fn rabitq_assign_parallel_inner<R: Rng + ?Sized>(
     debug!("RaBitQ: {}", rabitq.metrics());
 }
 
-/// Update centroids to the mean of assigned vectors.
-pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
+/// Update centroids to the mean of assigned vectors, returning their squared shift in `f64`.
+///
+/// Finite inputs are required. Overflowing sums are retried in `f64` before averaging.
+/// Returns an error if empty-cluster perturbation overflows; centroids are unchanged on error.
+/// Returns an error for incomplete or non-finite vectors/centroids. Panics for invalid label
+/// counts, out-of-range labels, or more centroids than vectors.
+pub fn update_centroids(
+    vecs: &[f32],
+    centroids: &mut [f32],
+    dim: usize,
+    labels: &[u32],
+) -> Result<f64, KMeansError> {
+    validate_shape(vecs, dim)?;
+    validate_shape(centroids, dim)?;
     let mut rng = rand::rng();
-    update_centroids_inner(vecs, centroids, dim, labels, &mut rng)
+    update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng)
+}
+
+// Inputs and label bounds are validated by the caller. Keep ordinary f32 accumulation unchanged,
+// but divide overflowing sums in f64 before casting: a mean of finite inputs is representable.
+fn cluster_means(vecs: &[f32], labels: &[u32], dim: usize, means: &mut [f32]) -> Vec<usize> {
+    means.fill(0.0);
+    let mut counts = vec![0usize; means.len() / dim];
+    for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
+        let label = label as usize;
+        counts[label] += 1;
+        for (sum, &value) in means[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
+            *sum += value;
+        }
+    }
+    if means.iter().all(|value| value.is_finite()) {
+        for (mean, &count) in means.chunks_exact_mut(dim).zip(&counts) {
+            if count != 0 {
+                let inverse = (count as f32).recip();
+                mean.iter_mut().for_each(|value| *value *= inverse);
+            }
+        }
+    } else {
+        let mut sums = vec![0.0_f64; means.len()];
+        for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
+            let label = label as usize;
+            for (sum, &value) in sums[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
+                *sum += f64::from(value);
+            }
+        }
+        for ((mean, sum), &count) in means
+            .chunks_exact_mut(dim)
+            .zip(sums.chunks_exact(dim))
+            .zip(&counts)
+        {
+            if count != 0 {
+                for (mean, &sum) in mean.iter_mut().zip(sum) {
+                    *mean = (sum / count as f64) as f32;
+                }
+            } else {
+                mean.fill(0.0);
+            }
+        }
+    }
+    counts
 }
 
 fn update_centroids_inner<R: Rng + ?Sized>(
@@ -187,8 +280,9 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     centroids: &mut [f32],
     dim: usize,
     labels: &[u32],
+    unit_directions: bool,
     rng: &mut R,
-) -> f32 {
+) -> Result<f64, KMeansError> {
     validate_assignment_inputs(vecs, centroids, dim, labels);
     let num_centroids = centroids.len() / dim;
     assert!(
@@ -201,24 +295,8 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     );
 
     let mut means = vec![0.0; centroids.len()];
-    let mut cluster_sizes = vec![0usize; num_centroids];
-    for (i, vec) in vecs.chunks(dim).enumerate() {
-        let label = labels[i] as usize;
-        cluster_sizes[label] += 1;
-        means[label * dim..(label + 1) * dim]
-            .iter_mut()
-            .zip(vec.iter())
-            .for_each(|(m, &v)| *m += v);
-    }
+    let mut cluster_sizes = cluster_means(vecs, labels, dim, &mut means);
     let mut empty_cluster_count = 0;
-    for i in 0..cluster_sizes.len() {
-        if cluster_sizes[i] != 0 {
-            let divider = (cluster_sizes[i] as f32).recip();
-            means[i * dim..(i + 1) * dim]
-                .iter_mut()
-                .for_each(|value| *value *= divider);
-        }
-    }
 
     for empty_cluster in 0..cluster_sizes.len() {
         if cluster_sizes[empty_cluster] == 0 {
@@ -261,140 +339,100 @@ fn update_centroids_inner<R: Rng + ?Sized>(
             cluster_sizes[donor_cluster] -= cluster_sizes[empty_cluster];
         }
     }
+    if !means.iter().all(|value| value.is_finite()) {
+        return Err(KMeansError::NumericalOverflow);
+    }
+    if unit_directions {
+        for (mean, previous) in means.chunks_exact_mut(dim).zip(centroids.chunks_exact(dim)) {
+            match normalize_nonzero_row(mean) {
+                Some(true) => {}
+                // With a zero cluster sum, every unit direction has the same dot objective.
+                // Retain the previous direction; dot training may also have a zero seed.
+                Some(false) => mean.copy_from_slice(previous),
+                None => return Err(KMeansError::NumericalOverflow),
+            }
+        }
+    }
     let diff = squared_euclidean(centroids, &means);
+    let diff = if diff.is_finite() {
+        f64::from(diff)
+    } else {
+        centroids
+            .iter()
+            .zip(&means)
+            .map(|(&left, &right)| (f64::from(left) - f64::from(right)).powi(2))
+            .sum()
+    };
     centroids.copy_from_slice(&means);
     if empty_cluster_count != 0 {
         debug!("fixed {empty_cluster_count} empty clusters");
     }
-    diff
+    Ok(diff)
 }
 
 /// K-means clustering algorithm.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct KMeans {
-    num_clusters: u32,
-    max_iter: u32,
-    tolerance: f32,
-    distance: Distance,
-    use_residual: bool,
-    use_default_config: bool,
-    seed: Option<u64>,
-}
-
-impl Default for KMeans {
-    fn default() -> Self {
-        Self {
-            num_clusters: 8,
-            max_iter: 10,
-            tolerance: 1e-4,
-            distance: Distance::default(),
-            use_residual: false,
-            use_default_config: true,
-            seed: None,
-        }
-    }
+    config: KMeansConfig,
 }
 
 impl KMeans {
-    /// Create a new KMeans instance.
+    /// Construct a trainer with automatic defaults and explicit overrides.
     ///
-    /// # Arguments
+    /// Settings are validated against the input shape during fitting, or ahead of loading
+    /// through [`KMeansConfig::resolve`]. Construction does not fit a projection.
     ///
-    /// * `num_clusters` - number of clusters; [`KMeans::default`] derives it from the input size
-    /// * `max_iter` - max number of iterations
-    /// * `tolerance` - convergence tolerance, stop when the diff is less than this value
-    /// * `distance` - distance metric
-    /// * `use_residual` - center vectors for more accurate L2 computations; returned
-    ///   centroids remain in the input coordinate space. Only applies to L2.
-    pub fn new(
-        num_clusters: u32,
-        max_iter: u32,
-        tolerance: f32,
-        distance: Distance,
-        use_residual: bool,
-    ) -> Self {
-        if num_clusters < 1 {
-            panic!("num_clusters must be greater than 0");
-        }
-        if max_iter < 1 {
-            panic!("max_iter must be greater than 0");
-        }
-        if tolerance <= 0.0 {
-            panic!("tolerance must be greater than 0.0");
-        }
-        Self {
-            num_clusters,
-            max_iter,
-            tolerance,
-            distance,
-            use_residual,
-            use_default_config: false,
-            seed: None,
-        }
+    /// ```
+    /// use gathers::distance::Distance;
+    /// use gathers::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+    /// use gathers::utils::as_continuous_vec;
+    /// let model = KMeans::new(KMeansConfig {
+    ///     n_clusters: Some(1), distance: Distance::Cosine, seed: Some(42),
+    ///     reduction: ReductionConfig::PCA { output_dim: 2, training_samples: None },
+    ///     ..Default::default()
+    /// });
+    /// let centroids = model.fit(as_continuous_vec(&[[1.0, 2.0, 3.0]; 40]), 3)?;
+    /// assert_eq!(centroids.len(), 3);
+    /// # Ok::<(), gathers::kmeans::KMeansError>(())
+    /// ```
+    pub fn new(config: KMeansConfig) -> Self {
+        Self { config }
     }
 
-    /// Set the random seed used for sampling, RaBitQ rotations, and empty-cluster repair.
+    /// Select a training sample, fit K-means, and return original-dimensional centroids.
     ///
-    /// Repeated fits with the same input order, configuration, and worker count reproduce
-    /// centroids within the same build and target. Results are not guaranteed to be
-    /// bitwise identical across dependency versions, architectures, or worker counts.
-    pub fn seed(mut self, seed: u64) -> Self {
-        self.seed = Some(seed);
-        self
+    /// Automatic settings use the original row count and dimension before sampling. Inputs must
+    /// contain complete finite rows. Sampled cosine rows must be nonzero and are normalized before
+    /// PCA fitting. Reduction always returns centroids in the original dimension.
+    /// Sampling uses `config.samples_per_cluster` unless `config.training_samples` overrides it.
+    pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> Result<AVec<f32>, KMeansError> {
+        Ok(self.fit_dispatch(vecs, dim, true)?.centroids)
     }
 
-    /// Fit the KMeans configurations and return centroids in the input coordinate space.
-    pub fn fit(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
-        if let Some(seed) = self.seed {
-            self.fit_inner(vecs, dim, true, &mut StdRng::seed_from_u64(seed))
+    /// Train every supplied row without further subsampling, returning centroids and labels.
+    ///
+    /// Automatic settings otherwise use the supplied sample's shape. For disk-loaded samples,
+    /// first call [`KMeansConfig::resolve`] with original source metadata, then construct the
+    /// trainer from that resolved config. At least 39 supplied rows per cluster are required.
+    /// Labels describe the last training assignment, not reassignment to returned centroids.
+    /// Empty-cluster repair can produce a centroid with no matching label. Inputs must be complete
+    /// and finite; original cosine rows must be nonzero, while projected zero rows are allowed.
+    /// Both `training_samples` and `samples_per_cluster` are ignored; all supplied rows are used.
+    pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> Result<KMeansFit, KMeansError> {
+        self.fit_dispatch(vecs, dim, false)
+    }
+
+    fn fit_dispatch(
+        &self,
+        vecs: AVec<f32>,
+        dim: usize,
+        subsample: bool,
+    ) -> Result<KMeansFit, KMeansError> {
+        if let Some(seed) = self.config.seed {
+            self.fit_inner(vecs, dim, subsample, &mut StdRng::seed_from_u64(seed))
         } else {
-            self.fit_inner(vecs, dim, true, &mut rand::rng())
+            self.fit_inner(vecs, dim, subsample, &mut rand::rng())
         }
-    }
-
-    /// Train on every row of an already-prepared sample, without further subsampling.
-    ///
-    /// Uses the same layout and preprocessing as [`Self::fit`] and returns centroids in the
-    /// input coordinate space. Configure the cluster count
-    /// with [`Self::new`] based on the original dataset size; a default configuration derives
-    /// it from the sample size. The seed controls initialization, rotations and empty-cluster
-    /// repair. Source sampling is the caller's responsibility. Requires at least 39 rows per
-    /// cluster, even when the original dataset is larger.
-    pub fn fit_sample(&self, vecs: AVec<f32>, dim: usize) -> AVec<f32> {
-        if let Some(seed) = self.seed {
-            self.fit_inner(vecs, dim, false, &mut StdRng::seed_from_u64(seed))
-        } else {
-            self.fit_inner(vecs, dim, false, &mut rand::rng())
-        }
-    }
-
-    /// Number of rows [`Self::fit`] retains, capped at 256 per cluster.
-    ///
-    /// Use this before loading vectors to prepare an external sample. Panics if the input
-    /// is empty, has fewer rows than clusters, or has fewer than 39 rows per cluster. Does
-    /// not allocate or change the configuration.
-    pub fn training_sample_size(&self, num_vectors: usize) -> usize {
-        num_vectors
-            .min((self.cluster_count(num_vectors) as usize).saturating_mul(MAX_POINTS_PER_CENTROID))
-    }
-
-    fn cluster_count(&self, num_vectors: usize) -> u32 {
-        let num_clusters = if self.use_default_config {
-            (((num_vectors as f64).powf(0.8) / 16.0).floor().max(1.0) as u32)
-                .min((num_vectors / MIN_POINTS_PER_CENTROID) as u32)
-        } else {
-            self.num_clusters
-        };
-        assert!(num_vectors > 0, "at least one vector is required");
-        assert!(
-            num_vectors >= num_clusters as usize,
-            "number of samples must be greater than num_clusters"
-        );
-        assert!(
-            num_clusters > 0 && num_vectors / MIN_POINTS_PER_CENTROID >= num_clusters as usize,
-            "too few samples for num_clusters"
-        );
-        num_clusters
     }
 
     fn fit_inner<R: Rng + ?Sized>(
@@ -403,62 +441,83 @@ impl KMeans {
         dim: usize,
         subsample: bool,
         rng: &mut R,
-    ) -> AVec<f32> {
-        validate_vectors(&vecs, dim);
-        assert!(!vecs.is_empty(), "at least one vector is required");
-
-        let num_vectors = vecs.len() / dim;
-
-        // auto-config `num_clusters` when initialized with `default()`
-        let num_clusters = self.cluster_count(num_vectors);
-        debug!("num of points: {num_vectors}, num of clusters: {num_clusters}");
-
-        // Center before sampling so the L2 assignment uses smaller coordinates.
-        let residual_mean = if self.distance == Distance::SquaredEuclidean && self.use_residual {
-            debug!("use residual");
-            Some(centroid_residual(&mut vecs, dim))
+    ) -> Result<KMeansFit, KMeansError> {
+        let rows = validate_shape(&vecs, dim)?;
+        let config = if subsample {
+            self.config
         } else {
-            None
+            KMeansConfig {
+                training_samples: Some(rows),
+                ..self.config
+            }
+        }
+        .resolve(rows, dim)?;
+        debug!("resolved K-means config: {config:?}");
+        let samples = config.training_samples.expect("sample size was resolved");
+        if subsample && samples < rows {
+            vecs = subsample_flat(samples, &vecs, dim, rng);
+        }
+        Self { config }.fit_prepared(vecs, dim, rng)
+    }
+
+    fn fit_raw<R: Rng + ?Sized>(
+        &self,
+        mut vecs: AVec<f32>,
+        dim: usize,
+        rng: &mut R,
+    ) -> Result<(AVec<f32>, Vec<u32>), KMeansError> {
+        let num_clusters = self.config.n_clusters.expect("cluster count was resolved");
+        // Center selected L2 rows so assignment uses smaller coordinates.
+        let residual_mean =
+            if self.config.distance == Distance::SquaredEuclidean && self.config.use_residual {
+                debug!("use residual");
+                let mean = centroid_residual(&mut vecs, dim);
+                if !vecs.iter().all(|value| value.is_finite()) {
+                    return Err(KMeansError::NumericalOverflow);
+                }
+                Some(mean)
+            } else {
+                None
+            };
+
+        // Original and projected cosine rows were normalized in fit_prepared/fit_projected.
+        let assignment_distance = if self.config.distance == Distance::Cosine {
+            Distance::NegativeDotProduct
+        } else {
+            self.config.distance
         };
 
-        // subsample
-        let n_sample = self.training_sample_size(num_vectors);
-        if subsample && num_vectors > n_sample {
-            debug!("subsample to {n_sample} points");
-            vecs = subsample_flat(n_sample, &vecs, dim, rng);
-        }
-
         let mut centroids = subsample_flat(num_clusters as usize, &vecs, dim, rng);
-        if self.distance == Distance::NegativeDotProduct {
-            centroids.chunks_mut(dim).for_each(normalize);
+        if assignment_distance == Distance::NegativeDotProduct {
+            try_normalize_rows(&mut centroids, dim, true)?;
         }
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
-        let use_exact_assignment = self.distance == Distance::NegativeDotProduct
-            || training_num * dim <= LARGE_CLUSTER_THRESHOLD;
+        let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
+            || vecs.len() <= LARGE_CLUSTER_THRESHOLD;
         #[cfg(not(feature = "perf"))]
         let mut matrix_workspace = if use_exact_assignment {
             matrix::MatrixAssignmentWorkspace::try_new(
                 &vecs,
                 centroids.len() / dim,
                 dim,
-                self.distance,
+                assignment_distance,
             )
         } else {
             None
         };
         debug!("start training");
-        for i in 0..self.max_iter {
+        for i in 0..self.config.max_iter {
             let start_time = Instant::now();
             if use_exact_assignment {
                 #[cfg(feature = "perf")]
-                base_assign(&vecs, &centroids, dim, self.distance, &mut labels);
+                base_assign(&vecs, &centroids, dim, assignment_distance, &mut labels);
                 #[cfg(not(feature = "perf"))]
                 if let Some(workspace) = &mut matrix_workspace {
                     workspace.assign(&vecs, &centroids, dim, &mut labels);
                 } else {
-                    base_assign_parallel(&vecs, &centroids, dim, self.distance, &mut labels);
+                    base_assign_parallel(&vecs, &centroids, dim, assignment_distance, &mut labels);
                 }
             } else {
                 #[cfg(feature = "perf")]
@@ -466,12 +525,16 @@ impl KMeans {
                 #[cfg(not(feature = "perf"))]
                 rabitq_assign_parallel_inner(&vecs, &centroids, dim, &mut labels, rng);
             }
-            let diff = update_centroids_inner(&vecs, &mut centroids, dim, &labels, rng);
-            if self.distance == Distance::NegativeDotProduct {
-                centroids.chunks_mut(dim).for_each(normalize);
-            }
+            let diff = update_centroids_inner(
+                &vecs,
+                &mut centroids,
+                dim,
+                &labels,
+                assignment_distance == Distance::NegativeDotProduct,
+                rng,
+            )?;
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
-            if diff < self.tolerance {
+            if diff < f64::from(self.config.tolerance) {
                 debug!("converged at iter {i}");
                 break;
             }
@@ -485,7 +548,11 @@ impl KMeans {
             }
         }
 
-        centroids
+        if !centroids.iter().all(|value| value.is_finite()) {
+            return Err(KMeansError::NumericalOverflow);
+        }
+
+        Ok((centroids, labels))
     }
 }
 
@@ -496,25 +563,126 @@ mod tests {
     use seed_rand::seeded_rng;
 
     use super::{
-        KMeans, base_assign, base_assign_parallel, rabitq_assign, rabitq_assign_inner,
-        rabitq_assign_parallel_inner, update_centroids,
+        KMeans, KMeansConfig, base_assign, base_assign_parallel, rabitq_assign,
+        rabitq_assign_inner, rabitq_assign_parallel_inner, update_centroids,
+        update_centroids_inner,
     };
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
     use crate::utils::as_continuous_vec;
 
     #[test]
+    fn finite_extreme_rows_have_representable_means() {
+        for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+            for use_residual in [false, true] {
+                let model = KMeans::new(KMeansConfig {
+                    n_clusters: Some(1),
+                    distance,
+                    use_residual,
+                    seed: Some(42),
+                    ..Default::default()
+                });
+                for centroids in [
+                    model.fit(as_continuous_vec(&[[f32::MAX]; 40]), 1).unwrap(),
+                    model
+                        .fit_sample(as_continuous_vec(&[[f32::MAX]; 40]), 1)
+                        .unwrap()
+                        .centroids,
+                ] {
+                    assert_eq!(
+                        centroids[0],
+                        if distance == Distance::SquaredEuclidean {
+                            f32::MAX
+                        } else {
+                            1.0
+                        }
+                    );
+                }
+            }
+        }
+        let mut centroids = [-f32::MAX];
+        let shift = update_centroids(&[f32::MAX; 40], &mut centroids, 1, &[0; 40]).unwrap();
+        assert_eq!(centroids, [f32::MAX]);
+        assert_eq!(shift, (2.0 * f64::from(f32::MAX)).powi(2));
+        // Overflowed positive and negative partial sums must not hide a valid zero mean.
+        let mut vectors = vec![f32::MAX; 20];
+        vectors.extend_from_slice(&[-f32::MAX; 20]);
+        update_centroids(&vectors, &mut centroids, 1, &[0; 40]).unwrap();
+        assert_eq!(centroids, [0.0]);
+    }
+
+    #[test]
+    fn training_rejects_unrepresentable_perturbations_and_residuals() {
+        let mut centroids = [0.0; 2];
+        assert_eq!(
+            update_centroids(&[f32::MAX; 80], &mut centroids, 1, &[0; 80]),
+            Err(super::KMeansError::NumericalOverflow)
+        );
+        assert_eq!(centroids, [0.0; 2]);
+        let mut vectors = [[-f32::MAX]; 40];
+        vectors[0] = [f32::MAX];
+        assert!(matches!(
+            KMeans::new(KMeansConfig {
+                n_clusters: Some(1),
+                use_residual: true,
+                ..Default::default()
+            })
+            .fit_sample(as_continuous_vec(&vectors), 1),
+            Err(super::KMeansError::NumericalOverflow)
+        ));
+    }
+
+    #[test]
     fn prepared_sample_uses_all_rows_above_the_automatic_cap() {
         let values = (0..600).map(|value| vec![value as f32]).collect::<Vec<_>>();
-        let model = KMeans::new(1, 1, 0.01, Distance::SquaredEuclidean, false).seed(42);
-        assert_eq!(model.training_sample_size(600), 256);
-        assert_eq!(&*model.fit_sample(as_continuous_vec(&values), 1), &[299.5]);
-        let small = &values[..128];
-        assert_eq!(model.training_sample_size(128), 128);
+        let model = KMeans::new(KMeansConfig {
+            n_clusters: Some(1),
+            max_iter: 1,
+            tolerance: 0.01,
+            distance: Distance::SquaredEuclidean,
+            use_residual: false,
+            seed: Some(42),
+            ..Default::default()
+        });
         assert_eq!(
-            model.fit_sample(as_continuous_vec(small), 1),
-            model.fit(as_continuous_vec(small), 1)
+            model.config.resolve(600, 1).unwrap().training_samples,
+            Some(256)
         );
+        let fit = model.fit_sample(as_continuous_vec(&values), 1).unwrap();
+        let centroids = fit.centroids;
+        let labels = fit.labels;
+        assert_eq!(&*centroids, &[299.5]);
+        assert_eq!(labels, vec![0; 600]);
+        let small = &values[..128];
+        assert_eq!(
+            model.config.resolve(128, 1).unwrap().training_samples,
+            Some(128)
+        );
+        assert_eq!(
+            model
+                .fit_sample(as_continuous_vec(small), 1)
+                .unwrap()
+                .centroids,
+            model.fit(as_continuous_vec(small), 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn fit_sample_ignores_both_sampling_controls() {
+        let rows = (0..600).map(|row| [row as f32]).collect::<Vec<_>>();
+        for samples_per_cluster in [0, 128, 512] {
+            let model = KMeans::new(KMeansConfig {
+                n_clusters: Some(1),
+                max_iter: 1,
+                samples_per_cluster,
+                training_samples: Some(39),
+                seed: Some(42),
+                ..Default::default()
+            });
+            let fit = model.fit_sample(as_continuous_vec(&rows), 1).unwrap();
+            assert_eq!(&*fit.centroids, &[299.5]);
+            assert_eq!(fit.labels.len(), rows.len());
+        }
     }
 
     #[test]
@@ -522,13 +690,238 @@ mod tests {
         let rows = (0..40)
             .map(|index| vec![10_000.0 + index as f32, -20_000.0 + 2.0 * index as f32])
             .collect::<Vec<_>>();
-        let model = KMeans::new(1, 2, 1e-4, Distance::SquaredEuclidean, true).seed(42);
+        let model = KMeans::new(KMeansConfig {
+            n_clusters: Some(1),
+            max_iter: 2,
+            tolerance: 1e-4,
+            distance: Distance::SquaredEuclidean,
+            use_residual: true,
+            seed: Some(42),
+            ..Default::default()
+        });
 
         for centroids in [
-            model.fit(as_continuous_vec(&rows), 2),
-            model.fit_sample(as_continuous_vec(&rows), 2),
+            model.fit(as_continuous_vec(&rows), 2).unwrap(),
+            model
+                .fit_sample(as_continuous_vec(&rows), 2)
+                .unwrap()
+                .centroids,
         ] {
             assert_eq!(&*centroids, &[10_019.5, -19_961.0]);
+        }
+    }
+
+    #[test]
+    fn cosine_training_normalizes_rows_but_dot_preserves_magnitudes() {
+        let vectors = (0..78)
+            .map(|row| {
+                if row % 2 == 0 {
+                    vec![100.0, 0.0]
+                } else {
+                    vec![0.0, 1.0]
+                }
+            })
+            .collect::<Vec<_>>();
+        let fit = |distance| {
+            KMeans::new(KMeansConfig {
+                n_clusters: Some(1),
+                max_iter: 1,
+                tolerance: 0.01,
+                distance,
+                use_residual: false,
+                seed: Some(42),
+                ..Default::default()
+            })
+            .fit_sample(as_continuous_vec(&vectors), 2)
+            .unwrap()
+            .centroids
+        };
+        let cosine = fit(Distance::Cosine);
+        let dot = fit(Distance::NegativeDotProduct);
+        let diagonal = 0.5_f32.sqrt();
+        assert!((cosine[0] - diagonal).abs() < 1e-5);
+        assert!((cosine[1] - diagonal).abs() < 1e-5);
+        assert!(dot[0] > 0.999);
+        assert!(dot[1] < 0.011);
+    }
+
+    #[test]
+    fn cosine_training_rejects_zero_vectors() {
+        let mut vectors = vec![vec![1.0, 0.0]; 39];
+        vectors[38] = vec![0.0, 0.0];
+        assert!(
+            KMeans::new(KMeansConfig {
+                n_clusters: Some(1),
+                distance: Distance::Cosine,
+                ..Default::default()
+            })
+            .fit_sample(as_continuous_vec(&vectors), 2)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn antipodal_cosine_cluster_keeps_a_unit_direction() {
+        let vectors = (0..40)
+            .map(|row| {
+                if row % 2 == 0 {
+                    vec![1.0, 0.0]
+                } else {
+                    vec![-1.0, 0.0]
+                }
+            })
+            .collect::<Vec<_>>();
+        let centroids = KMeans::new(KMeansConfig {
+            n_clusters: Some(1),
+            max_iter: 3,
+            tolerance: 0.01,
+            distance: Distance::Cosine,
+            use_residual: false,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .fit_sample(as_continuous_vec(&vectors), 2)
+        .unwrap()
+        .centroids;
+        assert!(centroids.iter().all(|value| value.is_finite()));
+        assert_eq!(centroids[0].abs(), 1.0);
+        assert_eq!(centroids[1], 0.0);
+        let mut labels = [0];
+        base_assign(&[1.0, 0.0], &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [0]);
+
+        let mut previous = [1.0, 0.0];
+        let flat = vectors.iter().flatten().copied().collect::<Vec<_>>();
+        let diff = update_centroids_inner(
+            &flat,
+            &mut previous,
+            2,
+            &[0; 40],
+            true,
+            &mut StdRng::seed_from_u64(42),
+        )
+        .unwrap();
+        assert_eq!(previous, [1.0, 0.0]);
+        assert_eq!(diff, 0.0);
+    }
+
+    #[test]
+    fn dot_training_preserves_zero_seeds_and_zero_means() {
+        let vectors = vec![vec![0.0, 0.0]; 40];
+        let centroids = KMeans::new(KMeansConfig {
+            n_clusters: Some(1),
+            max_iter: 3,
+            tolerance: 0.01,
+            distance: Distance::NegativeDotProduct,
+            use_residual: false,
+            seed: Some(42),
+            ..Default::default()
+        })
+        .fit_sample(as_continuous_vec(&vectors), 2)
+        .unwrap()
+        .centroids;
+        assert_eq!(&*centroids, &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn cosine_assignment_accounts_for_centroid_magnitude() {
+        let vector = [1.0, 2.0];
+        let centroids = [100.0, 0.0, 1.0, 1.0];
+        let mut labels = [0];
+        base_assign(&vector, &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [1]);
+        base_assign_parallel(&vector, &centroids, 2, Distance::Cosine, &mut labels);
+        assert_eq!(labels, [1]);
+        base_assign(
+            &vector,
+            &centroids,
+            2,
+            Distance::NegativeDotProduct,
+            &mut labels,
+        );
+        assert_eq!(labels, [0]);
+    }
+
+    #[test]
+    fn cosine_assignment_matches_reference_across_scales_and_dimensions() {
+        let tiny = f32::from_bits(1);
+        for dim in [2, 3, 8, 9, 32, 65, 768] {
+            let mut vectors = vec![0.0; 67 * dim];
+            for (row, vector) in vectors.chunks_exact_mut(dim).enumerate() {
+                let (left, right) = match row % 4 {
+                    0 => (f32::MAX / 4.0, f32::MAX / 2.0),
+                    1 => (tiny, 2.0 * tiny),
+                    2 => (-3.0, 1.0),
+                    _ => (1.0, -3.0),
+                };
+                vector[0] = left;
+                vector[1] = right;
+            }
+            let mut centroids = vec![0.0; 4 * dim];
+            for (centroid, (left, right)) in centroids.chunks_exact_mut(dim).zip([
+                (100.0, 0.0),
+                (tiny, tiny),
+                (-f32::MAX, 0.0),
+                (tiny, tiny), // Equal scores must retain the first centroid.
+            ]) {
+                centroid[0] = left;
+                centroid[1] = right;
+            }
+            let original_vectors = vectors.clone();
+            let original_centroids = centroids.clone();
+            let expected = vectors
+                .chunks_exact(dim)
+                .map(|vector| {
+                    // Independent f64 cosine reference, without normalizing f32 copies.
+                    let norm = |row: &[f32]| {
+                        row.iter()
+                            .map(|&value| f64::from(value).powi(2))
+                            .sum::<f64>()
+                            .sqrt()
+                    };
+                    centroids
+                        .chunks_exact(dim)
+                        .enumerate()
+                        .map(|(index, centroid)| {
+                            let dot = vector
+                                .iter()
+                                .zip(centroid)
+                                .map(|(&left, &right)| f64::from(left) * f64::from(right))
+                                .sum::<f64>();
+                            (index as u32, -dot / norm(vector) / norm(centroid))
+                        })
+                        .min_by(|left, right| left.1.total_cmp(&right.1))
+                        .unwrap()
+                        .0
+                })
+                .collect::<Vec<_>>();
+            let mut labels = vec![0; expected.len()];
+            for assign in [base_assign, base_assign_parallel] {
+                assign(&vectors, &centroids, dim, Distance::Cosine, &mut labels);
+                assert_eq!(labels, expected, "dimension {dim}");
+                assert_eq!(vectors, original_vectors);
+                assert_eq!(centroids, original_centroids);
+                // Empty query batches are permitted.
+                assign(&[], &centroids, dim, Distance::Cosine, &mut []);
+            }
+        }
+    }
+
+    #[test]
+    fn cosine_assignment_rejects_invalid_vector_and_centroid_norms() {
+        for assign in [base_assign, base_assign_parallel] {
+            for invalid in [0.0, f32::NAN, f32::INFINITY] {
+                for (vectors, centroids) in
+                    [([invalid, 0.0], [1.0, 0.0]), ([1.0, 0.0], [invalid, 0.0])]
+                {
+                    assert!(
+                        std::panic::catch_unwind(|| {
+                            assign(&vectors, &centroids, 2, Distance::Cosine, &mut [0]);
+                        })
+                        .is_err()
+                    );
+                }
+            }
         }
     }
 
@@ -569,22 +962,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dimension must be greater than zero")]
     fn test_fit_rejects_zero_dimension() {
-        KMeans::default().fit(as_continuous_vec(&[vec![1.0]]), 0);
+        assert!(
+            KMeans::default()
+                .fit(as_continuous_vec(&[vec![1.0]]), 0)
+                .is_err()
+        );
     }
 
     #[test]
-    #[should_panic(expected = "vectors must be complete")]
     fn test_fit_rejects_incomplete_vectors() {
-        KMeans::default().fit(as_continuous_vec(&[vec![1.0, 2.0, 3.0]]), 2);
+        assert!(
+            KMeans::default()
+                .fit(as_continuous_vec(&[vec![1.0, 2.0, 3.0]]), 2)
+                .is_err()
+        );
     }
 
     #[test]
-    #[should_panic(expected = "at least one vector is required")]
     fn test_fit_rejects_empty_input() {
         let vecs: Vec<Vec<f32>> = Vec::new();
-        KMeans::default().fit(as_continuous_vec(&vecs), 1);
+        assert!(KMeans::default().fit(as_continuous_vec(&vecs), 1).is_err());
     }
 
     #[test]
@@ -599,7 +997,7 @@ mod tests {
             let vecs = (0..n)
                 .map(|_| (0..dim).map(|_| rng.random::<f32>()).collect::<Vec<f32>>())
                 .collect::<Vec<Vec<f32>>>();
-            let centroids = km.fit(as_continuous_vec(&vecs), dim);
+            let centroids = km.fit(as_continuous_vec(&vecs), dim).unwrap();
 
             let mut labels = vec![0; n];
             for (i, vec) in vecs.iter().enumerate() {
@@ -673,7 +1071,7 @@ mod tests {
         let labels = vec![0, 0, 1, 1];
         let mut centroids = vec![0.0, 4.0];
 
-        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels).unwrap();
 
         assert_eq!(centroids, vec![0.0, 2.0]);
         assert_eq!(diff, 4.0);
@@ -683,7 +1081,7 @@ mod tests {
     #[should_panic(expected = "number of vectors must be at least the number of centroids")]
     fn test_update_centroids_rejects_more_centroids_than_vectors() {
         let mut centroids = vec![0.0, 1.0];
-        update_centroids(&[0.0], &mut centroids, 1, &[0]);
+        let _ = update_centroids(&[0.0], &mut centroids, 1, &[0]);
     }
 
     #[test]
@@ -692,7 +1090,7 @@ mod tests {
         let labels = vec![0, 0, 0, 0];
         let mut centroids = vec![0.0, 10.0];
 
-        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels).unwrap();
 
         assert!(diff.is_finite());
         assert!(centroids.iter().all(|value| (*value - 2.0).abs() < 0.01));
