@@ -7,7 +7,8 @@ use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::reduction::{
-    Reduction, ReductionError, check_finite_result, validate_output_dimension, validate_shape,
+    Reduction, ReductionError, check_finite_result, checked_buffer_len, validate_output_dimension,
+    validate_shape,
 };
 use crate::sampling::sample_indices;
 
@@ -31,7 +32,14 @@ impl SRHT {
     /// Construct a deterministic SRHT from dimensions and a random seed.
     pub fn new(input_dim: usize, output_dim: usize, seed: u64) -> Result<Self, ReductionError> {
         validate_output_dimension(input_dim, output_dim)?;
-        let padded_dim = input_dim.next_power_of_two();
+        let padded_dim = input_dim
+            .checked_next_power_of_two()
+            .ok_or(ReductionError::SizeOverflow)?;
+        checked_buffer_len(1, padded_dim)?;
+        // Sampling stores usize indices rather than f32 coordinates.
+        if output_dim > (isize::MAX as usize) / size_of::<usize>() {
+            return Err(ReductionError::SizeOverflow);
+        }
         let mut rng = StdRng::seed_from_u64(seed);
         let signs = (0..input_dim)
             .map(|_| if rng.random::<bool>() { 1.0 } else { -1.0 })
@@ -93,7 +101,7 @@ impl Reduction for SRHT {
     /// projecting the result again may differ from the supplied projected vectors.
     fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.output_dim)?;
-        let mut output = avec!(0.0_f32; rows * self.input_dim);
+        let mut output = avec!(0.0_f32; checked_buffer_len(rows, self.input_dim)?);
         let scale = (self.output_dim as f32).sqrt() / self.padded_dim as f32;
         output
             .par_chunks_mut(self.input_dim)

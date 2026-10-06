@@ -20,7 +20,7 @@ Defaults derive cluster count as max(1, floor(rows^0.8 / 16)), bounded by at lea
 cluster, and retain min(source rows, samples_per_cluster * clusters) training rows. The factor
 defaults to 256; use `KMeansConfig::samples_per_cluster`, `--samples-per-cluster`, or Python's
 `samples_per_cluster` to choose another value such as 128 (minimum 39). An exact `training_samples`
-count overrides the factor, including validation of the unused factor. **Auto reduction selects PCA
+count overrides the factor; the unused factor is ignored and is not validated. **Auto reduction selects PCA
 to 128 dimensions when original source rows >= 1,000,000 and input dimension > 196; otherwise
 it selects raw training.** This is a workload heuristic motivated by the GIST/Cohere comparison,
 not a guarantee of retained recall. Use `ReductionConfig::None` or `--reduction raw` to opt out.
@@ -122,6 +122,17 @@ intermediates or outputs, including inverse transforms. SRHT checks its unscaled
 so it can reject intermediate overflow even when final scaling would make the exact result finite.
 Rescale unusually large input values before retrying. Non-finite PCA eigendecomposition results
 return `ReductionError::DecompositionFailed`.
+
+K-means retries overflowing centroid sums in `f64` and divides before casting back to `f32`,
+for both raw training and original-space reconstruction. Squared centroid shifts also fall back
+to `f64` on overflow. Unrepresentable empty-cluster perturbations, L2 residuals, or restored
+centroids return `KMeansError::NumericalOverflow` (Python `ValueError`). Assignment and RaBitQ
+rotation retain ordinary `f32` arithmetic without per-score overflow checks or magnitude-based
+fallbacks. Finite inputs alone do not guarantee representable intermediate scores; rescale extreme
+magnitudes before training or assignment. The public `update_centroids` now returns
+`Result<f64, KMeansError>`.
+Buffer dimensions that overflow addressable sizes return `ReductionError::SizeOverflow`; this
+validation does not guarantee enough physical memory for otherwise addressable allocations.
 
 The CLI samples row indices from the fvecs source before loading vectors, so it does not load the
 whole corpus. It keeps the selected sample in RAM for K-means. A projected run temporarily holds

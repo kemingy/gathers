@@ -9,7 +9,8 @@ use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::reduction::{
-    Reduction, ReductionError, check_finite_result, validate_output_dimension, validate_shape,
+    Reduction, ReductionError, check_finite_result, checked_buffer_len, validate_output_dimension,
+    validate_shape,
 };
 use crate::sampling::sample_indices;
 
@@ -101,6 +102,7 @@ impl PCA {
         if rows < 2 {
             return Err(ReductionError::TooFewRows { rows });
         }
+        let covariance_len = checked_buffer_len(input_dim, input_dim)?;
 
         let mut mean = vec![0.0_f64; input_dim];
         for row in vectors.chunks_exact(input_dim) {
@@ -116,7 +118,7 @@ impl PCA {
         centered.resize(vectors.len(), 0.0_f32);
         center_rows(vectors, &mean, input_dim, &mut centered)?;
 
-        let mut covariance = vec![0.0_f32; input_dim * input_dim];
+        let mut covariance = vec![0.0_f32; covariance_len];
         let centered = MatRef::from_row_major_slice(&centered, rows, input_dim);
         matmul(
             MatMut::from_row_major_slice_mut(&mut covariance, input_dim, input_dim),
@@ -208,7 +210,7 @@ impl Reduction for PCA {
     /// Approximately reconstruct flat row-major projected vectors in the input space.
     fn inverse_transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.output_dim)?;
-        let mut output = avec!(0.0_f32; rows * self.input_dim);
+        let mut output = avec!(0.0_f32; checked_buffer_len(rows, self.input_dim)?);
         matmul(
             MatMut::from_row_major_slice_mut(&mut output, rows, self.input_dim),
             Accum::Replace,

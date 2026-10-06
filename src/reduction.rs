@@ -78,6 +78,9 @@ pub enum ReductionError {
     /// Reduction arithmetic produced a non-finite intermediate or output from finite inputs.
     #[error("reduction arithmetic overflowed; rescale the input vectors")]
     NumericalOverflow,
+    /// A requested buffer exceeds the addressable allocation size.
+    #[error("reduction buffer size exceeds the addressable allocation size")]
+    SizeOverflow,
     /// The covariance eigendecomposition did not converge.
     #[error("PCA covariance eigendecomposition failed")]
     DecompositionFailed,
@@ -104,6 +107,14 @@ pub(crate) fn check_finite_result(values: &[f32]) -> Result<(), ReductionError> 
     }
 }
 
+pub(crate) fn checked_buffer_len(rows: usize, dim: usize) -> Result<usize, ReductionError> {
+    // Include alignment rounding for both the explicit 64-byte and default AVec layouts.
+    let alignment = aligned_vec::CACHELINE_ALIGN.max(64);
+    rows.checked_mul(dim)
+        .filter(|&len| len <= ((isize::MAX as usize) - (alignment - 1)) / size_of::<f32>())
+        .ok_or(ReductionError::SizeOverflow)
+}
+
 pub(crate) fn validate_output_dimension(
     input_dim: usize,
     output_dim: usize,
@@ -119,7 +130,28 @@ pub(crate) fn validate_output_dimension(
 
 #[cfg(test)]
 mod tests {
-    use super::{PCA, Reduction, ReductionError, SRHT};
+    use super::{PCA, Reduction, ReductionError, SRHT, checked_buffer_len};
+
+    #[test]
+    fn buffer_sizes_reject_integer_and_byte_capacity_overflow() {
+        let alignment = aligned_vec::CACHELINE_ALIGN.max(64);
+        let limit = ((isize::MAX as usize) - (alignment - 1)) / size_of::<f32>();
+        assert_eq!(checked_buffer_len(1, limit), Ok(limit));
+        assert_eq!(
+            checked_buffer_len(1, limit + 1),
+            Err(ReductionError::SizeOverflow)
+        );
+        assert_eq!(
+            checked_buffer_len(usize::MAX, 2),
+            Err(ReductionError::SizeOverflow)
+        );
+        for dim in [usize::MAX, 1usize << (usize::BITS - 1)] {
+            assert!(matches!(
+                SRHT::new(dim, 1, 42),
+                Err(ReductionError::SizeOverflow)
+            ));
+        }
+    }
 
     #[test]
     fn transforms_validate_shapes_and_dimensions() {

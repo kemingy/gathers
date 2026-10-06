@@ -77,10 +77,10 @@ struct BestTwo {
 impl BestTwo {
     fn new() -> Self {
         Self {
-            best_score: f32::MAX,
-            second_best_score: f32::MAX,
+            best_score: f32::INFINITY,
+            second_best_score: f32::INFINITY,
             best_index: 0,
-            exact_best_distance: f32::MAX,
+            exact_best_distance: f32::INFINITY,
             exact_best_index: 0,
         }
     }

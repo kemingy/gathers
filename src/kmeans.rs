@@ -62,7 +62,7 @@ impl pulp::WithSimd for AssignBlock<'_> {
         } = self;
 
         for (label, vector) in labels.iter_mut().zip(vecs.chunks_exact(dim)) {
-            let mut best_distance = f32::MAX;
+            let mut best_distance = f32::INFINITY;
             let mut best_index = 0;
             for (index, centroid) in centroids.chunks_exact(dim).enumerate() {
                 let candidate = match distance {
@@ -106,6 +106,7 @@ fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, label
 /// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
 /// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
 /// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
+/// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn base_assign(
     vecs: &[f32],
     centroids: &[f32],
@@ -131,6 +132,7 @@ pub fn base_assign(
 /// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
 /// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
 /// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
+/// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn base_assign_parallel(
     vecs: &[f32],
     centroids: &[f32],
@@ -155,7 +157,9 @@ pub fn base_assign_parallel(
         });
 }
 
-/// Assign vectors to centroids with RaBitQ in single thread.
+/// Assign finite vectors to finite centroids with RaBitQ in single thread.
+///
+/// Rotation and scoring use ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn rabitq_assign(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
     rabitq_assign_inner(vecs, centroids, dim, labels, &mut rand::rng());
 }
@@ -185,7 +189,9 @@ fn rabitq_assign_inner<R: Rng + ?Sized>(
     debug!("RaBitQ: {}", rabitq.metrics());
 }
 
-/// Assign vectors to centroids with RaBitQ in multi-threads.
+/// Assign finite vectors to finite centroids with RaBitQ in multi-threads.
+///
+/// Rotation and scoring use ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 ///
 /// TODO: support dot product distance
 pub fn rabitq_assign_parallel(vecs: &[f32], centroids: &[f32], dim: usize, labels: &mut [u32]) {
@@ -207,10 +213,66 @@ fn rabitq_assign_parallel_inner<R: Rng + ?Sized>(
     debug!("RaBitQ: {}", rabitq.metrics());
 }
 
-/// Update centroids to the mean of assigned vectors.
-pub fn update_centroids(vecs: &[f32], centroids: &mut [f32], dim: usize, labels: &[u32]) -> f32 {
+/// Update centroids to the mean of assigned vectors, returning their squared shift in `f64`.
+///
+/// Finite inputs are required. Overflowing sums are retried in `f64` before averaging.
+/// Returns an error if empty-cluster perturbation overflows; centroids are unchanged on error.
+/// Returns an error for incomplete or non-finite vectors/centroids. Panics for invalid label
+/// counts, out-of-range labels, or more centroids than vectors.
+pub fn update_centroids(
+    vecs: &[f32],
+    centroids: &mut [f32],
+    dim: usize,
+    labels: &[u32],
+) -> Result<f64, KMeansError> {
+    validate_shape(vecs, dim)?;
+    validate_shape(centroids, dim)?;
     let mut rng = rand::rng();
     update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng)
+}
+
+// Inputs and label bounds are validated by the caller. Keep ordinary f32 accumulation unchanged,
+// but divide overflowing sums in f64 before casting: a mean of finite inputs is representable.
+fn cluster_means(vecs: &[f32], labels: &[u32], dim: usize, means: &mut [f32]) -> Vec<usize> {
+    means.fill(0.0);
+    let mut counts = vec![0usize; means.len() / dim];
+    for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
+        let label = label as usize;
+        counts[label] += 1;
+        for (sum, &value) in means[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
+            *sum += value;
+        }
+    }
+    if means.iter().all(|value| value.is_finite()) {
+        for (mean, &count) in means.chunks_exact_mut(dim).zip(&counts) {
+            if count != 0 {
+                let inverse = (count as f32).recip();
+                mean.iter_mut().for_each(|value| *value *= inverse);
+            }
+        }
+    } else {
+        let mut sums = vec![0.0_f64; means.len()];
+        for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
+            let label = label as usize;
+            for (sum, &value) in sums[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
+                *sum += f64::from(value);
+            }
+        }
+        for ((mean, sum), &count) in means
+            .chunks_exact_mut(dim)
+            .zip(sums.chunks_exact(dim))
+            .zip(&counts)
+        {
+            if count != 0 {
+                for (mean, &sum) in mean.iter_mut().zip(sum) {
+                    *mean = (sum / count as f64) as f32;
+                }
+            } else {
+                mean.fill(0.0);
+            }
+        }
+    }
+    counts
 }
 
 fn update_centroids_inner<R: Rng + ?Sized>(
@@ -220,7 +282,7 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     labels: &[u32],
     unit_directions: bool,
     rng: &mut R,
-) -> f32 {
+) -> Result<f64, KMeansError> {
     validate_assignment_inputs(vecs, centroids, dim, labels);
     let num_centroids = centroids.len() / dim;
     assert!(
@@ -233,24 +295,8 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     );
 
     let mut means = vec![0.0; centroids.len()];
-    let mut cluster_sizes = vec![0usize; num_centroids];
-    for (i, vec) in vecs.chunks(dim).enumerate() {
-        let label = labels[i] as usize;
-        cluster_sizes[label] += 1;
-        means[label * dim..(label + 1) * dim]
-            .iter_mut()
-            .zip(vec.iter())
-            .for_each(|(m, &v)| *m += v);
-    }
+    let mut cluster_sizes = cluster_means(vecs, labels, dim, &mut means);
     let mut empty_cluster_count = 0;
-    for i in 0..cluster_sizes.len() {
-        if cluster_sizes[i] != 0 {
-            let divider = (cluster_sizes[i] as f32).recip();
-            means[i * dim..(i + 1) * dim]
-                .iter_mut()
-                .for_each(|value| *value *= divider);
-        }
-    }
 
     for empty_cluster in 0..cluster_sizes.len() {
         if cluster_sizes[empty_cluster] == 0 {
@@ -293,6 +339,9 @@ fn update_centroids_inner<R: Rng + ?Sized>(
             cluster_sizes[donor_cluster] -= cluster_sizes[empty_cluster];
         }
     }
+    if !means.iter().all(|value| value.is_finite()) {
+        return Err(KMeansError::NumericalOverflow);
+    }
     if unit_directions {
         for (mean, previous) in means.chunks_exact_mut(dim).zip(centroids.chunks_exact(dim)) {
             match normalize_nonzero_row(mean) {
@@ -300,16 +349,25 @@ fn update_centroids_inner<R: Rng + ?Sized>(
                 // With a zero cluster sum, every unit direction has the same dot objective.
                 // Retain the previous direction; dot training may also have a zero seed.
                 Some(false) => mean.copy_from_slice(previous),
-                None => panic!("centroid has a non-finite norm"),
+                None => return Err(KMeansError::NumericalOverflow),
             }
         }
     }
     let diff = squared_euclidean(centroids, &means);
+    let diff = if diff.is_finite() {
+        f64::from(diff)
+    } else {
+        centroids
+            .iter()
+            .zip(&means)
+            .map(|(&left, &right)| (f64::from(left) - f64::from(right)).powi(2))
+            .sum()
+    };
     centroids.copy_from_slice(&means);
     if empty_cluster_count != 0 {
         debug!("fixed {empty_cluster_count} empty clusters");
     }
-    diff
+    Ok(diff)
 }
 
 /// K-means clustering algorithm.
@@ -407,13 +465,17 @@ impl KMeans {
         mut vecs: AVec<f32>,
         dim: usize,
         rng: &mut R,
-    ) -> (AVec<f32>, Vec<u32>) {
+    ) -> Result<(AVec<f32>, Vec<u32>), KMeansError> {
         let num_clusters = self.config.n_clusters.expect("cluster count was resolved");
         // Center selected L2 rows so assignment uses smaller coordinates.
         let residual_mean =
             if self.config.distance == Distance::SquaredEuclidean && self.config.use_residual {
                 debug!("use residual");
-                Some(centroid_residual(&mut vecs, dim))
+                let mean = centroid_residual(&mut vecs, dim);
+                if !vecs.iter().all(|value| value.is_finite()) {
+                    return Err(KMeansError::NumericalOverflow);
+                }
+                Some(mean)
             } else {
                 None
             };
@@ -427,18 +489,13 @@ impl KMeans {
 
         let mut centroids = subsample_flat(num_clusters as usize, &vecs, dim, rng);
         if assignment_distance == Distance::NegativeDotProduct {
-            for centroid in centroids.chunks_exact_mut(dim) {
-                assert!(
-                    normalize_nonzero_row(centroid).is_some(),
-                    "centroid has a non-finite norm"
-                );
-            }
+            try_normalize_rows(&mut centroids, dim, true)?;
         }
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
         let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
-            || training_num * dim <= LARGE_CLUSTER_THRESHOLD;
+            || vecs.len() <= LARGE_CLUSTER_THRESHOLD;
         #[cfg(not(feature = "perf"))]
         let mut matrix_workspace = if use_exact_assignment {
             matrix::MatrixAssignmentWorkspace::try_new(
@@ -475,9 +532,9 @@ impl KMeans {
                 &labels,
                 assignment_distance == Distance::NegativeDotProduct,
                 rng,
-            );
+            )?;
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
-            if diff < self.config.tolerance {
+            if diff < f64::from(self.config.tolerance) {
                 debug!("converged at iter {i}");
                 break;
             }
@@ -491,7 +548,11 @@ impl KMeans {
             }
         }
 
-        (centroids, labels)
+        if !centroids.iter().all(|value| value.is_finite()) {
+            return Err(KMeansError::NumericalOverflow);
+        }
+
+        Ok((centroids, labels))
     }
 }
 
@@ -509,6 +570,67 @@ mod tests {
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    fn finite_extreme_rows_have_representable_means() {
+        for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+            for use_residual in [false, true] {
+                let model = KMeans::new(KMeansConfig {
+                    n_clusters: Some(1),
+                    distance,
+                    use_residual,
+                    seed: Some(42),
+                    ..Default::default()
+                });
+                for centroids in [
+                    model.fit(as_continuous_vec(&[[f32::MAX]; 40]), 1).unwrap(),
+                    model
+                        .fit_sample(as_continuous_vec(&[[f32::MAX]; 40]), 1)
+                        .unwrap()
+                        .centroids,
+                ] {
+                    assert_eq!(
+                        centroids[0],
+                        if distance == Distance::SquaredEuclidean {
+                            f32::MAX
+                        } else {
+                            1.0
+                        }
+                    );
+                }
+            }
+        }
+        let mut centroids = [-f32::MAX];
+        let shift = update_centroids(&[f32::MAX; 40], &mut centroids, 1, &[0; 40]).unwrap();
+        assert_eq!(centroids, [f32::MAX]);
+        assert_eq!(shift, (2.0 * f64::from(f32::MAX)).powi(2));
+        // Overflowed positive and negative partial sums must not hide a valid zero mean.
+        let mut vectors = vec![f32::MAX; 20];
+        vectors.extend_from_slice(&[-f32::MAX; 20]);
+        update_centroids(&vectors, &mut centroids, 1, &[0; 40]).unwrap();
+        assert_eq!(centroids, [0.0]);
+    }
+
+    #[test]
+    fn training_rejects_unrepresentable_perturbations_and_residuals() {
+        let mut centroids = [0.0; 2];
+        assert_eq!(
+            update_centroids(&[f32::MAX; 80], &mut centroids, 1, &[0; 80]),
+            Err(super::KMeansError::NumericalOverflow)
+        );
+        assert_eq!(centroids, [0.0; 2]);
+        let mut vectors = [[-f32::MAX]; 40];
+        vectors[0] = [f32::MAX];
+        assert!(matches!(
+            KMeans::new(KMeansConfig {
+                n_clusters: Some(1),
+                use_residual: true,
+                ..Default::default()
+            })
+            .fit_sample(as_continuous_vec(&vectors), 1),
+            Err(super::KMeansError::NumericalOverflow)
+        ));
+    }
 
     #[test]
     fn prepared_sample_uses_all_rows_above_the_automatic_cap() {
@@ -677,7 +799,8 @@ mod tests {
             &[0; 40],
             true,
             &mut StdRng::seed_from_u64(42),
-        );
+        )
+        .unwrap();
         assert_eq!(previous, [1.0, 0.0]);
         assert_eq!(diff, 0.0);
     }
@@ -948,7 +1071,7 @@ mod tests {
         let labels = vec![0, 0, 1, 1];
         let mut centroids = vec![0.0, 4.0];
 
-        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels).unwrap();
 
         assert_eq!(centroids, vec![0.0, 2.0]);
         assert_eq!(diff, 4.0);
@@ -958,7 +1081,7 @@ mod tests {
     #[should_panic(expected = "number of vectors must be at least the number of centroids")]
     fn test_update_centroids_rejects_more_centroids_than_vectors() {
         let mut centroids = vec![0.0, 1.0];
-        update_centroids(&[0.0], &mut centroids, 1, &[0]);
+        let _ = update_centroids(&[0.0], &mut centroids, 1, &[0]);
     }
 
     #[test]
@@ -967,7 +1090,7 @@ mod tests {
         let labels = vec![0, 0, 0, 0];
         let mut centroids = vec![0.0, 10.0];
 
-        let diff = update_centroids(&vecs, &mut centroids, 1, &labels);
+        let diff = update_centroids(&vecs, &mut centroids, 1, &labels).unwrap();
 
         assert!(diff.is_finite());
         assert!(centroids.iter().all(|value| (*value - 2.0).abs() < 0.01));

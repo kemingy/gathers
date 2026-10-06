@@ -9,6 +9,24 @@ DIM = 32
 RABITQ_MATCH_RATE = 0.99
 
 
+@pytest.mark.parametrize("reduction", ["raw", "pca"])
+@pytest.mark.parametrize("distance", ["l2", "dot"])
+def test_extreme_finite_means_do_not_overflow(reduction, distance):
+    data = np.full((40, 2), np.finfo(np.float32).max, dtype=np.float32)
+    options = {"reduction": reduction, "distance": distance, "seed": 42}
+    if reduction == "pca":
+        options["reduced_dim"] = 1
+    centroids = Gathers().fit(data, 1, **options)
+    expected = data[0] if distance == "l2" else np.full(2, np.sqrt(0.5))
+    np.testing.assert_allclose(centroids[0], expected, rtol=1e-6)
+
+
+def test_centroid_perturbation_overflow_raises_value_error():
+    data = np.full((80, 2), np.finfo(np.float32).max, dtype=np.float32)
+    with pytest.raises(ValueError, match="K-means arithmetic overflowed"):
+        Gathers().fit(data, 2, reduction="raw", seed=42)
+
+
 def test_rabitq():
     gathers = Gathers(verbose=True)
     rng = np.random.default_rng()

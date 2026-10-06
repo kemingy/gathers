@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use crate::distance::Distance;
 use crate::kmeans::{DEFAULT_SAMPLES_PER_CLUSTER, KMeansError, MIN_POINTS_PER_CENTROID};
+use crate::reduction::{ReductionError, checked_buffer_len};
 
 /// Dimensionality reduction used during training; centroids retain the original dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -143,6 +144,8 @@ impl KMeansConfig {
                 "training samples require at least 39 rows per cluster",
             ));
         }
+        // Validate the selected in-memory sample, not a potentially much larger disk corpus.
+        checked_buffer_len(samples, dim)?;
         self.n_clusters = Some(clusters);
         self.training_samples = Some(samples);
         if self.reduction == ReductionConfig::Auto {
@@ -160,6 +163,7 @@ impl KMeansConfig {
                 output_dim,
                 training_samples,
             } => {
+                checked_buffer_len(dim, dim)?;
                 let fitting_rows =
                     training_samples.unwrap_or_else(|| samples.min(dim.saturating_mul(100)));
                 if !(2..=samples).contains(&fitting_rows) {
@@ -173,7 +177,13 @@ impl KMeansConfig {
                 };
                 Some(output_dim)
             }
-            ReductionConfig::SRHT { output_dim } => Some(output_dim),
+            ReductionConfig::SRHT { output_dim } => {
+                let padded = dim
+                    .checked_next_power_of_two()
+                    .ok_or(ReductionError::SizeOverflow)?;
+                checked_buffer_len(1, padded)?;
+                Some(output_dim)
+            }
             ReductionConfig::None => None,
             ReductionConfig::Auto => unreachable!("auto reduction was resolved above"),
         };
@@ -189,6 +199,30 @@ impl KMeansConfig {
 #[cfg(test)]
 mod tests {
     use super::{KMeansConfig, ReductionConfig};
+
+    #[test]
+    fn only_selected_buffers_must_fit_in_memory() {
+        let config = KMeansConfig {
+            n_clusters: Some(1),
+            training_samples: Some(39),
+            reduction: ReductionConfig::None,
+            ..Default::default()
+        };
+        assert!(config.resolve(usize::MAX, 2).is_ok());
+        assert!(config.resolve(usize::MAX, usize::MAX).is_err());
+        let dim = 1usize << (usize::BITS / 2);
+        assert!(
+            KMeansConfig {
+                reduction: ReductionConfig::PCA {
+                    output_dim: 1,
+                    training_samples: Some(2)
+                },
+                ..config
+            }
+            .resolve(39, dim)
+            .is_err()
+        );
+    }
 
     #[test]
     fn auto_pca_boundaries_and_explicit_overrides() {

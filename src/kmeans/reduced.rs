@@ -2,12 +2,12 @@
 
 use std::time::{Duration, Instant};
 
-use aligned_vec::AVec;
+use aligned_vec::{AVec, avec};
 use rand::{Rng, RngExt};
 
 use crate::distance::Distance;
-use crate::kmeans::{KMeans, ReductionConfig};
-use crate::reduction::{PCA, Reduction, ReductionError, SRHT, validate_shape};
+use crate::kmeans::{KMeans, ReductionConfig, cluster_means};
+use crate::reduction::{PCA, Reduction, ReductionError, SRHT, checked_buffer_len, validate_shape};
 use crate::utils::{NormalizeRowsError, try_normalize_rows};
 
 /// Error returned by K-means configuration resolution or training.
@@ -22,6 +22,9 @@ pub enum KMeansError {
     /// Cosine inputs or reconstructed centroids could not be normalized.
     #[error(transparent)]
     Normalization(#[from] NormalizeRowsError),
+    /// Training arithmetic produced an unrepresentable centroid or centered coordinate.
+    #[error("K-means arithmetic overflowed; rescale the input vectors")]
+    NumericalOverflow,
 }
 
 /// Centroids, final training labels, and stage timings for a prepared sample.
@@ -70,7 +73,7 @@ impl KMeans {
         let start = Instant::now();
         let mut fit = match self.config.reduction {
             ReductionConfig::None => {
-                let (centroids, labels) = self.fit_raw(vectors, dim, rng);
+                let (centroids, labels) = self.fit_raw(vectors, dim, rng)?;
                 KMeansFit {
                     centroids,
                     labels,
@@ -137,7 +140,7 @@ impl KMeans {
             Duration::ZERO
         };
         let start = Instant::now();
-        let (reduced_centroids, labels) = self.fit_raw(projected, training_dim, rng);
+        let (reduced_centroids, labels) = self.fit_raw(projected, training_dim, rng)?;
         let fit_time = start.elapsed();
         let start = Instant::now();
         let (centroids, empty_clusters) = reconstruct_original_centroids(
@@ -175,48 +178,40 @@ fn reconstruct_original_centroids<R: Reduction + ?Sized>(
     debug_assert_eq!(labels.len(), original_vectors.len() / input_dim);
     // Inverse projection loses null-space information. Use it only for empty clusters;
     // occupied centroids are exact original-space means unless the mean direction is zero.
-    let mut centroids = projection.inverse_transform(reduced_centroids)?;
-    let inverse_rows = validate_shape(&centroids, input_dim)?;
-    debug_assert_eq!(inverse_rows, num_centroids);
-    let mut counts = vec![0_usize; num_centroids];
-    let mut representatives = if distance == Distance::SquaredEuclidean {
-        Vec::new()
-    } else {
-        vec![None; num_centroids]
-    };
-    for (row, (&label, vector)) in labels
+    let mut centroids = avec!(0.0; checked_buffer_len(num_centroids, input_dim)?);
+    let counts = cluster_means(original_vectors, labels, input_dim, &mut centroids);
+    let empty = counts
         .iter()
-        .zip(original_vectors.chunks_exact(input_dim))
         .enumerate()
-    {
-        let index = label as usize;
-        let centroid = &mut centroids[index * input_dim..(index + 1) * input_dim];
-        if counts[index] == 0 {
-            centroid.fill(0.0);
+        .filter_map(|(index, &count)| (count == 0).then_some(index))
+        .collect::<Vec<_>>();
+    if !empty.is_empty() {
+        let mut reduced_empty = Vec::with_capacity(empty.len() * output_dim);
+        for &index in &empty {
+            reduced_empty.extend_from_slice(
+                &reduced_centroids[index * output_dim..(index + 1) * output_dim],
+            );
         }
-        if distance != Distance::SquaredEuclidean
-            && representatives[index].is_none()
-            && vector.iter().any(|&value| value != 0.0)
-        {
-            representatives[index] = Some(row);
-        }
-        counts[index] += 1;
-        centroid
-            .iter_mut()
-            .zip(vector)
-            .for_each(|(sum, &value)| *sum += value);
-    }
-    for (index, &count) in counts.iter().enumerate() {
-        if count == 0 {
-            continue;
-        }
-        let inverse = (count as f32).recip();
-        for value in &mut centroids[index * input_dim..(index + 1) * input_dim] {
-            *value *= inverse;
+        let inverse = projection.inverse_transform(&reduced_empty)?;
+        let inverse_rows = validate_shape(&inverse, input_dim)?;
+        debug_assert_eq!(inverse_rows, empty.len());
+        for (&index, row) in empty.iter().zip(inverse.chunks_exact(input_dim)) {
+            centroids[index * input_dim..(index + 1) * input_dim].copy_from_slice(row);
         }
     }
-    let empty_clusters = counts.iter().filter(|&&count| count == 0).count();
+    let empty_clusters = empty.len();
     if distance != Distance::SquaredEuclidean {
+        let mut representatives = vec![None; num_centroids];
+        for (row, (&label, vector)) in labels
+            .iter()
+            .zip(original_vectors.chunks_exact(input_dim))
+            .enumerate()
+        {
+            let index = label as usize;
+            if representatives[index].is_none() && vector.iter().any(|&value| value != 0.0) {
+                representatives[index] = Some(row);
+            }
+        }
         for (index, centroid) in centroids.chunks_exact_mut(input_dim).enumerate() {
             if centroid.iter().all(|&value| value == 0.0) {
                 // A zero cosine mean needs a unit representative. Dot may retain a zero cluster.
@@ -234,6 +229,9 @@ fn reconstruct_original_centroids<R: Reduction + ?Sized>(
             distance == Distance::NegativeDotProduct,
         )?;
     }
+    if !centroids.iter().all(|value| value.is_finite()) {
+        return Err(KMeansError::NumericalOverflow);
+    }
     Ok((centroids, empty_clusters))
 }
 
@@ -244,6 +242,48 @@ mod tests {
     use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
     use crate::reduction::{PCA, Reduction, SRHT};
     use crate::utils::{NormalizeRowsError, as_continuous_vec};
+
+    #[test]
+    fn projected_centroids_average_without_overflow_or_unneeded_inverse() {
+        let model = KMeans::new(KMeansConfig {
+            n_clusters: Some(1),
+            seed: Some(42),
+            reduction: ReductionConfig::PCA {
+                output_dim: 1,
+                training_samples: None,
+            },
+            ..Default::default()
+        });
+        let fit = model
+            .fit_sample(as_continuous_vec(&[[f32::MAX; 2]; 40]), 2)
+            .unwrap();
+        assert_eq!(&*fit.centroids, &[f32::MAX; 2]);
+
+        // The unused inverse would overflow from its mean plus this projected coordinate.
+        let projection = PCA::fit(&[f32::MAX; 4], 2, 1).unwrap();
+        assert!(projection.inverse_transform(&[f32::MAX]).is_err());
+        let (centroids, empty) = reconstruct_original_centroids(
+            &projection,
+            &[f32::MAX; 4],
+            &[f32::MAX],
+            &[0; 2],
+            Distance::SquaredEuclidean,
+        )
+        .unwrap();
+        assert_eq!(empty, 0);
+        assert_eq!(&*centroids, &[f32::MAX; 2]);
+        // The same inverse must be checked when an empty cluster actually requires it.
+        assert!(
+            reconstruct_original_centroids(
+                &projection,
+                &[f32::MAX; 4],
+                &[0.0, f32::MAX],
+                &[0; 2],
+                Distance::SquaredEuclidean,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn projected_assignments_reconstruct_original_space_means() {
