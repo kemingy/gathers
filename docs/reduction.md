@@ -116,6 +116,13 @@ variance order; it does not whiten or standardize features. It computes the mean
 random signs, zero-pads to the next power of two, runs a fast Walsh-Hadamard transform, and samples
 output coordinates.
 
+Finite inputs can still overflow PCA's `f32` residuals or covariance, or either method's transforms.
+Both return `ReductionError::NumericalOverflow` (Python `ValueError`) instead of accepting non-finite
+intermediates or outputs, including inverse transforms. SRHT checks its unscaled Hadamard workspace,
+so it can reject intermediate overflow even when final scaling would make the exact result finite.
+Rescale unusually large input values before retrying. Non-finite PCA eigendecomposition results
+return `ReductionError::DecompositionFailed`.
+
 The CLI samples row indices from the fvecs source before loading vectors, so it does not load the
 whole corpus. It keeps the selected sample in RAM for K-means. A projected run temporarily holds
 both original and reduced samples for centroid reconstruction; PCA transformation also creates a

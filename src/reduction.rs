@@ -17,6 +17,8 @@ pub use srht::SRHT;
 ///
 /// Construction remains specific to each method: [`PCA::fit`] learns a projection, while
 /// [`SRHT::new`] constructs one from dimensions and a seed.
+/// The built-in transforms return [`ReductionError::NumericalOverflow`] when arithmetic
+/// produces non-finite intermediates or outputs, even if their inputs were finite.
 pub trait Reduction {
     /// Number of coordinates in each original input row.
     fn input_dim(&self) -> usize;
@@ -73,6 +75,9 @@ pub enum ReductionError {
     /// The input contains a NaN or infinity.
     #[error("input contains a non-finite coordinate")]
     NonFiniteInput,
+    /// Reduction arithmetic produced a non-finite intermediate or output from finite inputs.
+    #[error("reduction arithmetic overflowed; rescale the input vectors")]
+    NumericalOverflow,
     /// The covariance eigendecomposition did not converge.
     #[error("PCA covariance eigendecomposition failed")]
     DecompositionFailed,
@@ -89,6 +94,14 @@ pub(crate) fn validate_shape(values: &[f32], dim: usize) -> Result<usize, Reduct
         return Err(ReductionError::NonFiniteInput);
     }
     Ok(values.len() / dim)
+}
+
+pub(crate) fn check_finite_result(values: &[f32]) -> Result<(), ReductionError> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(ReductionError::NumericalOverflow)
+    }
 }
 
 pub(crate) fn validate_output_dimension(
@@ -164,6 +177,10 @@ mod tests {
             (
                 ReductionError::NonFiniteInput,
                 "input contains a non-finite coordinate",
+            ),
+            (
+                ReductionError::NumericalOverflow,
+                "reduction arithmetic overflowed; rescale the input vectors",
             ),
             (
                 ReductionError::DecompositionFailed,

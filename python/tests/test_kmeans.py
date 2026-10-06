@@ -136,6 +136,18 @@ def test_nonfinite_training_rows_are_rejected(invalid, reduction):
         Gathers().fit(data, 1, **options)
 
 
+@pytest.mark.parametrize("reduction, scale", [
+    ("pca", np.finfo(np.float32).max), ("pca", 1e20), ("srht", np.finfo(np.float32).max),
+])
+def test_reduction_arithmetic_overflow_raises_value_error(reduction, scale):
+    data = np.zeros((40, 2), dtype=np.float32)
+    data[:, 0] = -scale
+    data[0, 0] = scale
+    data[:, 1] = data[:, 0]
+    with pytest.raises(ValueError, match="reduction arithmetic overflowed"):
+        Gathers().fit(data, 1, reduction=reduction, reduced_dim=1, seed=42)
+
+
 def test_auto_defaults_cluster_count_and_small_inputs_stay_raw():
     data = np.arange(1000 * 3, dtype=np.float32).reshape(1000, 3) + 1
     model = Gathers()

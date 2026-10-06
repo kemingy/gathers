@@ -6,7 +6,9 @@ use rand::{RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::reduction::{Reduction, ReductionError, validate_output_dimension, validate_shape};
+use crate::reduction::{
+    Reduction, ReductionError, check_finite_result, validate_output_dimension, validate_shape,
+};
 use crate::sampling::sample_indices;
 
 /// Subsampled randomized Hadamard transform for dense vectors.
@@ -14,6 +16,8 @@ use crate::sampling::sample_indices;
 /// The transform applies deterministic random signs, pads to the next power of two, performs an
 /// unnormalized fast Walsh-Hadamard transform, and retains uniformly sampled coordinates scaled
 /// by `1 / sqrt(output_dim)`. This preserves squared distances in expectation without fitting.
+/// Transforms return [`ReductionError::NumericalOverflow`] if unscaled Hadamard intermediates
+/// overflow `f32`, even when the final scaling would make the exact result representable.
 #[derive(Debug, Clone)]
 pub struct SRHT {
     input_dim: usize,
@@ -63,7 +67,7 @@ impl Reduction for SRHT {
         output
             .par_chunks_mut(self.output_dim)
             .zip(vectors.par_chunks(self.input_dim))
-            .for_each_init(
+            .try_for_each_init(
                 || vec![0.0_f32; self.padded_dim],
                 |scratch, (output, input)| {
                     scratch.fill(0.0);
@@ -71,11 +75,14 @@ impl Reduction for SRHT {
                         *value = input * sign;
                     }
                     hadamard_in_place(scratch);
+                    check_finite_result(scratch)?;
                     for (value, &index) in output.iter_mut().zip(&self.indices) {
                         *value = scratch[index] * scale;
                     }
+                    // Scale <= 1, so finite Hadamard values cannot overflow here.
+                    Ok(())
                 },
-            );
+            )?;
         Ok(output)
     }
 
@@ -91,7 +98,7 @@ impl Reduction for SRHT {
         output
             .par_chunks_mut(self.input_dim)
             .zip(vectors.par_chunks(self.output_dim))
-            .for_each_init(
+            .try_for_each_init(
                 || vec![0.0_f32; self.padded_dim],
                 |scratch, (output, input)| {
                     scratch.fill(0.0);
@@ -99,13 +106,16 @@ impl Reduction for SRHT {
                         scratch[index] = value;
                     }
                     hadamard_in_place(scratch);
+                    check_finite_result(scratch)?;
                     for ((output, &value), &sign) in
                         output.iter_mut().zip(&*scratch).zip(&self.signs)
                     {
                         *output = value * sign * scale;
                     }
+                    // Signs are +/-1 and scale <= 1; no additional overflow check is needed.
+                    Ok(())
                 },
-            );
+            )?;
         Ok(output)
     }
 }
@@ -130,10 +140,61 @@ fn hadamard_in_place(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::SRHT;
-    use crate::reduction::Reduction;
+    use crate::reduction::{Reduction, ReductionError};
 
     fn squared_norm(values: &[f32]) -> f32 {
         values.iter().map(|value| value * value).sum()
+    }
+
+    #[test]
+    fn srht_rejects_forward_and_inverse_overflow_before_scaling() {
+        let full = SRHT::new(2, 2, 42).unwrap();
+        for value in [f32::MAX * 0.6, f32::MAX] {
+            // With 0.6 * MAX the scaled result would fit, but the unscaled sum overflows.
+            assert_eq!(
+                full.transform(&[value; 2]),
+                Err(ReductionError::NumericalOverflow)
+            );
+        }
+        let sampled = SRHT::new(4, 2, 42).unwrap();
+        // The exact inverse is bounded by MAX / sqrt(2), but intermediate sums overflow.
+        assert_eq!(
+            sampled.inverse_transform(&[f32::MAX; 2]),
+            Err(ReductionError::NumericalOverflow)
+        );
+        // Large values are permitted when intermediate arithmetic still fits.
+        let value = f32::MAX * 0.25;
+        assert!(
+            full.transform(&[value; 2])
+                .unwrap()
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        assert!(
+            sampled
+                .inverse_transform(&[value; 2])
+                .unwrap()
+                .iter()
+                .all(|v| v.is_finite())
+        );
+    }
+
+    #[test]
+    fn srht_checks_overflow_in_unsampled_padded_coordinates() {
+        for seed in 0..8 {
+            let model = SRHT::new(3, 1, seed).unwrap();
+            // After random signs, all three coordinates are positive. Their first-stage sums
+            // fit, but the DC coordinate overflows in the second stage, sampled or not.
+            let input = model
+                .signs
+                .iter()
+                .map(|sign| sign * (f32::MAX * 0.4))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                model.transform(&input),
+                Err(ReductionError::NumericalOverflow)
+            );
+        }
     }
 
     #[test]

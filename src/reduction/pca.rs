@@ -8,7 +8,9 @@ use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::reduction::{Reduction, ReductionError, validate_output_dimension, validate_shape};
+use crate::reduction::{
+    Reduction, ReductionError, check_finite_result, validate_output_dimension, validate_shape,
+};
 use crate::sampling::sample_indices;
 
 /// Principal component projection learned from dense `f32` vectors.
@@ -16,6 +18,8 @@ use crate::sampling::sample_indices;
 /// Training centers the data using `f64` means, forms an `f32` covariance matrix, and retains the
 /// eigenvectors with the largest eigenvalues. Coordinates are not standardized or whitened, so
 /// the transform preserves the covariance-PCA geometry used by squared-Euclidean clustering.
+/// Finite inputs can still overflow `f32` arithmetic; fitting and transforms return
+/// [`ReductionError::NumericalOverflow`] rather than accepting non-finite intermediates or outputs.
 #[derive(Debug, Clone)]
 pub struct PCA {
     input_dim: usize,
@@ -28,15 +32,21 @@ pub struct PCA {
     preserved_variance: f64,
 }
 
-fn center_rows(input: &[f32], mean: &[f64], dim: usize, output: &mut [f32]) {
+fn center_rows(
+    input: &[f32],
+    mean: &[f64],
+    dim: usize,
+    output: &mut [f32],
+) -> Result<(), ReductionError> {
     output
         .par_chunks_mut(dim)
         .zip(input.par_chunks(dim))
-        .for_each(|(output, input)| {
+        .try_for_each(|(output, input)| {
             for ((output, &input), &mean) in output.iter_mut().zip(input).zip(mean) {
                 *output = (f64::from(input) - mean) as f32;
             }
-        });
+            check_finite_result(output)
+        })
 }
 
 impl PCA {
@@ -104,7 +114,7 @@ impl PCA {
 
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &mean, input_dim, &mut centered);
+        center_rows(vectors, &mean, input_dim, &mut centered)?;
 
         let mut covariance = vec![0.0_f32; input_dim * input_dim];
         let centered = MatRef::from_row_major_slice(&centered, rows, input_dim);
@@ -116,11 +126,16 @@ impl PCA {
             1.0 / (rows - 1) as f32,
             Par::rayon(0),
         );
+        check_finite_result(&covariance)?;
         let eigen = MatRef::from_row_major_slice(&covariance, input_dim, input_dim)
             .self_adjoint_eigen(Side::Lower)
             .map_err(|_| ReductionError::DecompositionFailed)?;
         let eigenvalues = eigen.S().column_vector();
         let eigenvectors = eigen.U();
+        // Check before max(0.0), which would mask a NaN eigenvalue as zero variance.
+        if !(0..input_dim).all(|index| eigenvalues.get(index).is_finite()) {
+            return Err(ReductionError::DecompositionFailed);
+        }
         let total_variance = (0..input_dim)
             .map(|index| f64::from((*eigenvalues.get(index)).max(0.0)))
             .sum::<f64>();
@@ -137,7 +152,11 @@ impl PCA {
         for component in 0..output_dim {
             let source = input_dim - 1 - component;
             for coordinate in 0..input_dim {
-                components.push(*eigenvectors.get(coordinate, source));
+                let value = *eigenvectors.get(coordinate, source);
+                if !value.is_finite() {
+                    return Err(ReductionError::DecompositionFailed);
+                }
+                components.push(value);
             }
         }
         Ok(Self {
@@ -171,7 +190,7 @@ impl Reduction for PCA {
         let rows = validate_shape(vectors, self.input_dim)?;
         let mut centered: AVec<f32> = AVec::new(64);
         centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &self.mean, self.input_dim, &mut centered);
+        center_rows(vectors, &self.mean, self.input_dim, &mut centered)?;
         let mut output = avec!(0.0_f32; rows * self.output_dim);
         matmul(
             MatMut::from_row_major_slice_mut(&mut output, rows, self.output_dim),
@@ -182,6 +201,7 @@ impl Reduction for PCA {
             1.0,
             Par::rayon(0),
         );
+        check_finite_result(&output)?;
         Ok(output)
     }
 
@@ -197,11 +217,12 @@ impl Reduction for PCA {
             1.0,
             Par::rayon(0),
         );
-        output.par_chunks_mut(self.input_dim).for_each(|row| {
+        output.par_chunks_mut(self.input_dim).try_for_each(|row| {
             for (value, &mean) in row.iter_mut().zip(&self.mean) {
                 *value = (f64::from(*value) + mean) as f32;
             }
-        });
+            check_finite_result(row)
+        })?;
         Ok(output)
     }
 }
@@ -209,7 +230,51 @@ impl Reduction for PCA {
 #[cfg(test)]
 mod tests {
     use super::PCA;
-    use crate::reduction::Reduction;
+    use crate::reduction::{Reduction, ReductionError};
+
+    #[test]
+    fn pca_rejects_centering_and_covariance_overflow() {
+        // The first residual overflows f32 even though the mean is computed in f64.
+        // The second fixture has finite residuals but their squares overflow the covariance.
+        for vectors in [&[f32::MAX, -f32::MAX, -f32::MAX][..], &[1e20, -1e20][..]] {
+            assert!(matches!(
+                PCA::fit(vectors, 1, 1),
+                Err(ReductionError::NumericalOverflow)
+            ));
+        }
+    }
+
+    #[test]
+    fn pca_rejects_transform_overflow() {
+        let constant = PCA::fit(&[-f32::MAX; 2], 1, 1).unwrap();
+        assert_eq!(&*constant.transform(&[-f32::MAX]).unwrap(), &[0.0]);
+        assert_eq!(
+            constant.transform(&[f32::MAX]),
+            Err(ReductionError::NumericalOverflow)
+        );
+        let diagonal = PCA::fit(&[-1.0, -1.0, 1.0, 1.0], 2, 1).unwrap();
+        // Centering remains finite; the retained coordinate exceeds f32::MAX.
+        assert_eq!(
+            diagonal.transform(&[f32::MAX; 2]),
+            Err(ReductionError::NumericalOverflow)
+        );
+    }
+
+    #[test]
+    fn pca_rejects_inverse_transform_overflow() {
+        let constant = PCA::fit(&[f32::MAX; 2], 1, 1).unwrap();
+        assert_eq!(&*constant.inverse_transform(&[0.0]).unwrap(), &[f32::MAX]);
+        assert_eq!(
+            constant.inverse_transform(&[f32::MAX]),
+            Err(ReductionError::NumericalOverflow)
+        );
+        let diagonal = PCA::fit(&[-1.0, -1.0, 1.0, 1.0], 2, 2).unwrap();
+        // One original coordinate overflows in matrix multiplication, before restoring the mean.
+        assert_eq!(
+            diagonal.inverse_transform(&[f32::MAX; 2]),
+            Err(ReductionError::NumericalOverflow)
+        );
+    }
 
     #[test]
     fn pca_fitting_sample_is_bounded_reproducible_and_validated() {
