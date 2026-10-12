@@ -117,9 +117,8 @@ fn check_memory(
 }
 
 pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
-    let mut reader = fvecs::Reader::open(&args.input)?;
-    let num_vectors = reader.rows;
-    let dim = reader.dim;
+    // Fail fast on flag errors before touching the input file.
+    ensure!(args.max_iter > 0, "max-iter must be positive");
     let distance = args.distance.parse::<Distance>()?;
     let reduction = match args.reduction.parse::<ReductionConfig>()? {
         ReductionConfig::PCA { output_dim, .. } => ReductionConfig::PCA {
@@ -143,6 +142,9 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
             reduction
         }
     };
+    let mut reader = fvecs::Reader::open(&args.input)?;
+    let num_vectors = reader.rows;
+    let dim = reader.dim;
     let config = KMeansConfig {
         n_clusters: args.n_cluster,
         max_iter: args.max_iter,
@@ -280,7 +282,7 @@ mod tests {
         }
         assert_eq!(
             "svd".parse::<ReductionConfig>().unwrap_err().to_string(),
-            "reduction must be auto, raw, pca, or srht"
+            "unknown reduction 'svd'; expected auto, raw, pca, or srht"
         );
     }
 

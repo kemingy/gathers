@@ -45,9 +45,7 @@ impl FromStr for ReductionConfig {
                 training_samples: None,
             }),
             "srht" => Ok(Self::SRHT { output_dim: 128 }),
-            _ => Err(KMeansError::InvalidConfig(
-                "reduction must be auto, raw, pca, or srht",
-            )),
+            _ => Err(KMeansError::UnknownReduction(value.to_owned())),
         }
     }
 }
@@ -199,6 +197,18 @@ impl KMeansConfig {
 #[cfg(test)]
 mod tests {
     use super::{KMeansConfig, ReductionConfig};
+
+    #[test]
+    fn reduction_parse_error_names_the_offending_value() {
+        assert_eq!(
+            "auto".parse::<ReductionConfig>().unwrap(),
+            ReductionConfig::Auto
+        );
+        assert_eq!(
+            "svd".parse::<ReductionConfig>().unwrap_err().to_string(),
+            "unknown reduction 'svd'; expected auto, raw, pca, or srht"
+        );
+    }
 
     #[test]
     fn only_selected_buffers_must_fit_in_memory() {

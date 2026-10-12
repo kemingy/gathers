@@ -16,6 +16,9 @@ pub enum KMeansError {
     /// Invalid training settings or insufficient rows.
     #[error("{0}")]
     InvalidConfig(&'static str),
+    /// An unknown reduction name was supplied.
+    #[error("unknown reduction '{0}'; expected auto, raw, pca, or srht")]
+    UnknownReduction(String),
     /// Projection construction, input validation, or transformation failed.
     #[error(transparent)]
     Reduction(#[from] ReductionError),

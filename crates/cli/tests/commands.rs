@@ -542,6 +542,33 @@ fn cosine_rejects_zero_original_rows() {
 }
 
 #[test]
+fn kmeans_flag_errors_precede_file_opening() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    for (extra, message) in [
+        (vec!["--max-iter", "0"], "max-iter must be positive"),
+        (
+            vec!["--reduction", "svd"],
+            "unknown reduction 'svd'; expected auto, raw, pca, or srht",
+        ),
+    ] {
+        let output = cli()
+            .args(["kmeans", "-i"])
+            .arg(&missing)
+            .arg("-o")
+            .arg(&centroids)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{stderr}");
+        assert!(!stderr.contains("cannot open"), "{stderr}");
+    }
+}
+
+#[test]
 fn assignment_rejects_mismatched_dimensions_and_invalid_options() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("vectors.fvecs");
