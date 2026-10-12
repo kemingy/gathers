@@ -38,5 +38,23 @@ cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
   --vectors vectors.fvecs --centroids centroids.fvecs
 ```
 
+### Dimensionality reduction
+
+Training automatically uses PCA to 128 dimensions for datasets with at least 1,000,000 rows and
+dimension above 196; smaller inputs train without reduction. Use `--reduction raw` to opt out.
+To lower the training sample budget, use `--samples-per-cluster 128` (default 256), or set an
+exact total with `--training-samples`.
+
+The CLI can train K-means in raw, PCA, or SRHT space and writes full-dimensional centroids for
+the existing `assign` command. Select `--distance l2|cos|dot` (default `l2`); explicit PCA/SRHT
+default to 128 dimensions, or use `--reduced-dim` to override:
+
+```console
+gathers kmeans -i vectors.fvecs -o centroids.fvecs -n 4096 \
+  --reduction pca --reduced-dim 128
+```
+
+See the [reduction guide](./docs/reduction.md) for method trade-offs and implementation details.
+
 To install the binary from a checkout, run `cargo install --path crates/cli`.
 For timing scope and CPU sampling, see the [profiling guide](./docs/profiling.md).

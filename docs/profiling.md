@@ -27,8 +27,10 @@ HDF5 datasets must be converted externally first (use `uv` for Python conversion
 `kmeans` reads the source shape before allocating training data. Without `-n`, it chooses
 `max(1, floor(rows^0.8 / 16))` clusters from the **full source row count**, the same formula as the
 library's automatic configuration. Explicit `-n` overrides it. By default it selects
-up to 256 rows per cluster uniformly without replacement. `--training-samples N` sets an explicit
-sample size independently of K: it must fit the source and provide at least 39 rows per cluster.
+up to 256 rows per cluster uniformly without replacement. `--samples-per-cluster 128` lowers this
+factor without fixing K; it must be at least 39. The total is min(source rows, factor * K).
+`--training-samples N` overrides the factor and sets an exact sample size independently of K:
+it must fit the source and provide at least 39 rows per cluster. The unused factor is ignored.
 Invalid requests are rejected rather than clamped.
 
 Sampling selects indices before reading vectors. Samples up to one third of the source use
@@ -37,8 +39,10 @@ draw per source row, including for sources larger than u32. Sorted indices drive
 reads: nearby rows are coalesced across gaps of at most 64 KiB, bounded by `--batch-rows`
 (default 4096). Only selected rows are decoded and validated. File shape and the first dimension
 are always checked; use `--validate-all` to scan and validate every row, including unselected rows.
-Training keeps the sample in one flat aligned RAM buffer, not the full corpus. Coordinates are
-preserved: this command does not normalize or apply PCA.
+Training keeps the sample in flat aligned RAM, not the full corpus. Default `auto` reduction
+uses PCA to 128 dimensions when source rows >= 1,000,000 and dimension > 196; other inputs train
+raw. `--reduction raw` disables projection. `--distance cos` normalizes training rows inside the
+library; see the [reduction guide](./reduction.md).
 
 `--memory-limit-gb` sets an optional preflight limit in decimal GB; there is **no limit by
 default**. Before selecting indices or allocating the
@@ -47,24 +51,28 @@ worker scratch and 4 GiB of runtime headroom. The separate index-selection phase
 conservative scratch for the adaptive sampler. An over-limit workload is rejected, not silently
 subsampled further. This is an admission check, **not an OS-enforced RSS cap**; measure peak RSS
 and leave room for other processes. For 10M rows at dimension 768, the default K is 24,881 and
-the training sample has 6,369,536 rows (19.57 GB of coordinates) — pass `--memory-limit-gb` to
-reject such workloads before loading. Original and projected samples
-are not needed simultaneously when an external batch projection prepares training input.
+the default training sample has 6,369,536 rows (19.57 GB of coordinates). A factor of 128 selects
+3,184,768 rows (9.78 GB of coordinates). Pass `--memory-limit-gb` to reject workloads before
+loading. Projected training temporarily retains both original and
+reduced samples to reconstruct full-dimensional centroids. PCA transformation also holds a
+centered copy; the estimate includes these buffers.
 Sampling alone does not make arbitrary K fit: at 10B source rows the default K is 6.25M, and
 even the minimum 39 rows per cluster would require about 749 GB at dimension 768. Use
 `--memory-limit-gb` to bound training before it starts; otherwise reduce K or dimension
 explicitly.
 
-Library callers preparing data externally can use `sampling::sample_indices` and
-`KMeans::training_sample_size`, then pass a flat aligned sample to `KMeans::fit_sample`.
-`fit_sample` never subsamples again. Configure K from the original dataset size before sampling;
-the default library configuration only sees the supplied sample's size. If residual centering is
-enabled, its mean is computed from the supplied sample. File formats stay in the CLI.
+Library callers preparing data externally first call `KMeansConfig::resolve(original_rows, dim)`
+to obtain the cluster count, training sample size, and projection settings. Use
+`sampling::sample_indices` to load those rows, then construct `KMeans` from the resolved config
+and call `fit_sample`. It returns `KMeansFit` without subsampling again. Passing the resolved
+config preserves source-size decisions; an unresolved config otherwise only sees the supplied
+sample's size. Residual centering uses the selected sample. File formats stay in the CLI.
 
 `assign` still loads data into RAM. It accepts `--num-vectors` and `--num-centroids` to load
 prefixes; omitted limits read all rows. Its per-row headers and values are checked for the loaded
 prefix, not unread rows. The training memory limit does not apply to this profiling command.
-Streaming full-corpus assignment and PCA are separate follow-up steps.
+Streaming full-corpus assignment remains a separate follow-up step. PCA and SRHT here transform
+the sampled training rows, not the full corpus.
 
 The index-sampling ablation needs no vector dataset:
 
@@ -93,11 +101,18 @@ The PID and attachment prompt are printed to stderr only with `--wait-for-profil
 Reports include shape, paths, seed, workers, CPU description, architecture, and OS. Hardware details
 are supplied externally, not detected through a backend-name API.
 
-- `kmeans`: `prepare_ms` measures index selection, sorting and sample loading. Separate
-  `index_sample_ms`, `index_sort_ms`, and `sample_read_ms` isolate those stages.
-  `fit_ms` measures `fit_sample`, including initialization and internal allocations, but no
-  source sampling or I/O. Their sum includes preparation and training, excluding centroid output.
-  Reports include `training_rows`, `batch_rows`, `validate_all`, `memory_limit_gb` and
+- `kmeans`: `prepare_ms` measures sample selection and loading plus any normalization and
+  projection. Separate `index_sample_ms`, `index_sort_ms`, and `sample_read_ms` isolate the
+  sampling stages. `fit_ms` measures K-means fitting, including initialization and internal
+  allocations, but no source sampling or I/O. Projected runs also report `projection_fit_ms`,
+  `projection_transform_ms`, and `reconstruction_ms`; the projection fields are included in
+  `prepare_ms`, while reconstruction is separate. Add `prepare_ms + fit_ms + reconstruction_ms`
+  for the reported training stages, excluding centroid output.
+  With `--wait-for-profiler`, projected runs pause after source loading and before the library's
+  normalization/projection/training/reconstruction pipeline. Raw cosine normalization also happens
+  once inside library preparation and is not repeated during dot training.
+  Reports include actual `training_rows`, requested `samples_per_cluster` (even when overridden
+  by an exact total), `batch_rows`, `validate_all`, `memory_limit_gb` and
   `estimated_memory_bytes`.
   Centroids are saved as fvecs.
 - `assign`: builds one RaBitQ index, warms it up, then reuses the index and labels. `build_ms` is

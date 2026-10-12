@@ -1,6 +1,5 @@
 //! A minimal RaBitQ implementation for top-1 retrieval.
 
-use core::f32;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -15,7 +15,7 @@
 //! let dim = vecs[0].len();
 //!
 //! // fit
-//! let centroids = kmeans.fit(as_continuous_vec(&vecs), dim);
+//! let centroids = kmeans.fit(as_continuous_vec(&vecs), dim).unwrap();
 //! // predict
 //! let mut labels = vec![0; num];
 //! rabitq_assign(&as_continuous_vec(&vecs), &centroids, dim, &mut labels);
@@ -25,6 +25,8 @@
 
 pub mod distance;
 pub mod kmeans;
+/// Dimensionality-reduction transforms for clustering workloads.
+pub mod reduction;
 /// RaBitQ-based approximate top-1 vector retrieval.
 pub use rabitq;
 pub mod sampling;
