@@ -221,3 +221,28 @@ def test_sampling_factor_with_automatic_cluster_count():
 def test_invalid_sampling_options_raise_value_error(options):
     with pytest.raises(ValueError):
         Gathers().fit(np.ones((1000, 3), dtype=np.float32), 2, **options)
+
+
+@pytest.mark.parametrize("options", [
+    {"n_cluster": -1}, {"max_iter": -1}, {"reduced_dim": -1},
+    {"samples_per_cluster": -1}, {"training_samples": -1},
+    {"projection_training_samples": -1}, {"seed": -1},
+])
+def test_negative_training_options_raise_value_error(options):
+    with pytest.raises(ValueError, match="non-negative"):
+        Gathers().fit(np.ones((40, 3), dtype=np.float32), **options)
+
+
+def test_wrapper_rejects_wrong_dtype_rank_and_dimension():
+    gathers = Gathers()
+    data = np.ones((40, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="float32"):
+        gathers.fit(data.astype(np.float64), 1)
+    with pytest.raises(ValueError, match="2-D"):
+        gathers.fit(data.ravel(), 1)
+    with pytest.raises(ValueError, match="must match"):
+        gathers.batch_assign(data, np.ones((2, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match="1-D"):
+        gathers.assign(data, np.ones((2, 3), dtype=np.float32))
+    with pytest.raises(ValueError, match="must match"):
+        gathers.assign(np.ones(4, dtype=np.float32), np.ones((2, 3), dtype=np.float32))

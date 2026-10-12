@@ -11,6 +11,13 @@ __all__ = ["Gathers"]
 MATRIX_SHAPE = 2
 
 
+def _require_float32(name: str, array: np.ndarray, ndim: int) -> None:
+    if array.dtype != np.float32:
+        raise ValueError(f"{name} must contain float32 values, got {array.dtype}")
+    if array.ndim != ndim:
+        raise ValueError(f"{name} must be a {ndim}-D array, got {array.ndim}-D")
+
+
 class Gathers:
     def __init__(self, verbose: bool = False):
         if verbose:
@@ -25,11 +32,13 @@ class Gathers:
         This method is slower than :py:meth:`~Gathers.batch_assign`, but it's
         100% accurate.
         """
-        assert (
-            len(vec.shape) == 1
-            and len(centroids.shape) == MATRIX_SHAPE
-            and vec.shape[0] == centroids.shape[1]
-        )
+        _require_float32("vec", vec, 1)
+        _require_float32("centroids", centroids, MATRIX_SHAPE)
+        if vec.shape[0] != centroids.shape[1]:
+            raise ValueError(
+                f"vec dimension {vec.shape[0]} must match centroids dimension "
+                f"{centroids.shape[1]}"
+            )
         return assign(
             np.ascontiguousarray(vec), np.ascontiguousarray(centroids), distance
         )
@@ -46,11 +55,13 @@ class Gathers:
         Returns:
             list[int]: The list of the assigned labels.
         """
-        assert (
-            len(vecs.shape) == MATRIX_SHAPE
-            and len(centroids.shape) == MATRIX_SHAPE
-            and vecs.shape[1] == centroids.shape[1]
-        )
+        _require_float32("vecs", vecs, MATRIX_SHAPE)
+        _require_float32("centroids", centroids, MATRIX_SHAPE)
+        if vecs.shape[1] != centroids.shape[1]:
+            raise ValueError(
+                f"vecs dimension {vecs.shape[1]} must match centroids dimension "
+                f"{centroids.shape[1]}"
+            )
         return batch_assign(
             np.ascontiguousarray(vecs), np.ascontiguousarray(centroids), distance
         )
@@ -86,7 +97,18 @@ class Gathers:
         Returns:
             np.ndarray: Centroids in the original input dimension, even with reduction.
         """
-        assert len(vecs.shape) == MATRIX_SHAPE
+        _require_float32("vecs", vecs, MATRIX_SHAPE)
+        for name, value in [
+            ("n_cluster", n_cluster),
+            ("max_iter", max_iter),
+            ("reduced_dim", reduced_dim),
+            ("samples_per_cluster", samples_per_cluster),
+            ("training_samples", training_samples),
+            ("projection_training_samples", projection_training_samples),
+            ("seed", seed),
+        ]:
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative, got {value}")
         return kmeans_fit(
             np.ascontiguousarray(vecs),
             n_cluster,
