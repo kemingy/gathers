@@ -172,7 +172,16 @@ GIST-960 centroids (412 ms vs 397 ms flat for 20k queries). Its value is the
 exactness guarantee, not speed; greedy remains the fit-time path.
 
 End-to-end GIST (1M×960 base, 400k training rows, PCA to 128, k = 3,943, 8
-threads): `fit_ms` 6,668 → 1,327 ms (5.0×) with identical query inertia.
+threads): `fit_ms` 6,668 → 1,327 ms (5.0×) with identical query inertia. With
+the full 1M-row training sample: `fit_ms` 3,249 ms, zero empty clusters at
+reconstruction.
+
+Assignment recall on real data (centroids trained on full GIST, k = 3,943,
+dim 960; the 1,000 gist_query vectors as queries, flat assignment as ground
+truth): best-first is exact for L2 (1,000/1,000) and dot (1,000/1,000 at
+5 cells), 93.1% for cosine; greedy holds 80.2% for L2 but only 9.8% for dot —
+Euclidean routing is a poor surrogate for dot when centroid magnitudes vary, so
+greedy-in-fit relies on dot training's unit-norm centroids.
 
 ## Complexity summary
 
