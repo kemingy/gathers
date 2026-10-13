@@ -30,9 +30,14 @@ const EXPECTED_CHILDREN: usize = 196;
 /// A routing layer is created only when its proposed size reaches this count.
 const MIN_ROUTING_CENTROIDS: usize = 16;
 /// Leaf cells scanned per query for dot/cosine best-first search, where the radii bound
-/// does not apply. Measured recall at k=3,200 (16 cells): ~0.6 at 1, ~0.95 at 4,
-/// >= 0.99 at 8 on uniform and directional data.
-const SCAN_BUDGET: usize = 8;
+/// does not apply: `sqrt(top-level cells)` capped at 10. No established rule exists for the
+/// probe count (Faiss/FLANN tune it empirically); this follows the `nlist ≈ sqrt(n)`
+/// precedent applied to the routing layer. Measured recall (500 queries, dim 8, uniform and
+/// directional data): ~0.93-0.98 at k=3,200 (16 cells, budget 4); >= 0.97 at k=16,384
+/// (83 cells, budget 9) and k=65,536 (256 cells, budget 10).
+fn scan_budget(cells: usize) -> usize {
+    ((cells as f64).sqrt().ceil() as usize).clamp(1, 10)
+}
 const RAYON_BLOCK_SIZE: usize = 64;
 
 #[derive(Debug)]
@@ -445,9 +450,10 @@ impl Hierarchy {
     ///
     /// Squared Euclidean uses per-node radii for an exact early stop and returns the same
     /// nearest centroid as an exact flat scan (ties may pick a different equal-scoring
-    /// centroid). Dot and cosine traverse centers by score and scan up to 8 leaf cells
-    /// per query. Cosine ranking needs no query normalization: the query norm is constant
-    /// per query, so `-dot / ||centroid||` ranks identically.
+    /// centroid). Dot and cosine traverse centers by score and scan up to
+    /// `sqrt(top-level cells)` leaf cells per query (capped at 10). Cosine ranking needs no
+    /// query normalization: the query norm is constant per query, so `-dot / ||centroid||`
+    /// ranks identically.
     pub fn assign(&self, vecs: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
         self.validate(vecs, dim, labels);
         let arch = pulp::Arch::new();
@@ -564,6 +570,8 @@ impl Hierarchy {
     ) -> u32 {
         scratch.heap.clear();
         let top = self.levels.len() - 1;
+        let top_count = self.levels[top].len();
+        let mut budget = scan_budget(top_count);
         score_range(
             simd,
             &self.levels[top].centroids,
@@ -586,7 +594,6 @@ impl Hierarchy {
         }
         let mut best = f32::INFINITY;
         let mut best_index = 0_u32;
-        let mut budget = SCAN_BUDGET;
         while let Some(entry) = scratch.heap.pop() {
             if distance == Distance::SquaredEuclidean && entry.score >= best {
                 break;
@@ -856,36 +863,41 @@ mod tests {
     fn budgeted_dot_and_cosine_hold_recall() {
         let dim = 8;
         let mut rng = seeded_rng();
-        let uniform: Vec<f32> = (0..3_200 * dim)
-            .map(|_| rng.random::<f32>() - 0.5)
-            .collect();
-        // 32 direction blobs x 100 centroids with varying magnitudes.
-        let mut directional = Vec::new();
-        for _ in 0..32 {
-            let direction: Vec<f32> = (0..dim).map(|_| rng.random::<f32>() - 0.5).collect();
-            let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
-            for _ in 0..100 {
-                let scale = 0.5 + rng.random::<f32>();
-                for value in &direction {
-                    directional.push(value / norm * scale + (rng.random::<f32>() - 0.5) * 0.1);
+        let queries: Vec<f32> = (0..500 * dim).map(|_| rng.random::<f32>() - 0.5).collect();
+        // The budget is sqrt(top cells) capped at 10, so small hierarchies probe a larger
+        // fraction of their cells and hold a higher recall floor.
+        for (k, floor) in [(3_200usize, 0.9), (16_384, 0.95)] {
+            let uniform: Vec<f32> = (0..k * dim).map(|_| rng.random::<f32>() - 0.5).collect();
+            // 32 direction blobs with varying magnitudes.
+            let mut directional = Vec::new();
+            for _ in 0..32 {
+                let direction: Vec<f32> = (0..dim).map(|_| rng.random::<f32>() - 0.5).collect();
+                let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
+                for _ in 0..(k / 32) {
+                    let scale = 0.5 + rng.random::<f32>();
+                    for value in &direction {
+                        directional.push(value / norm * scale + (rng.random::<f32>() - 0.5) * 0.1);
+                    }
                 }
             }
-        }
-        let queries: Vec<f32> = (0..500 * dim).map(|_| rng.random::<f32>() - 0.5).collect();
-        for (name, centroids) in [("uniform", &uniform), ("directional", &directional)] {
-            let hierarchy = Hierarchy::build(centroids, dim, Some(42)).unwrap();
-            for distance in [Distance::NegativeDotProduct, Distance::Cosine] {
-                let mut expected = vec![0; 500];
-                base_assign(&queries, centroids, dim, distance, &mut expected);
-                let mut actual = vec![0; 500];
-                hierarchy.assign(&queries, dim, distance, &mut actual);
-                let recall = expected
-                    .iter()
-                    .zip(&actual)
-                    .filter(|(left, right)| left == right)
-                    .count() as f32
-                    / 500.0;
-                assert!(recall >= 0.95, "{name} {distance:?} recall {recall}");
+            for (name, centroids) in [("uniform", &uniform), ("directional", &directional)] {
+                let hierarchy = Hierarchy::build(centroids, dim, Some(42)).unwrap();
+                for distance in [Distance::NegativeDotProduct, Distance::Cosine] {
+                    let mut expected = vec![0; 500];
+                    base_assign(&queries, centroids, dim, distance, &mut expected);
+                    let mut actual = vec![0; 500];
+                    hierarchy.assign(&queries, dim, distance, &mut actual);
+                    let recall = expected
+                        .iter()
+                        .zip(&actual)
+                        .filter(|(left, right)| left == right)
+                        .count() as f32
+                        / 500.0;
+                    assert!(
+                        recall >= floor,
+                        "k={k} {name} {distance:?} recall {recall} < {floor}"
+                    );
+                }
             }
         }
     }

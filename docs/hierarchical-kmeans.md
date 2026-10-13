@@ -153,15 +153,18 @@ training each routing layer:
 - Inside `fit`, the saving multiplies by `max_iter * n`; this is the strongest
   use case. Use greedy descent there.
 - For the public assign API (`Hierarchy::assign`), best-first uses the radii
-  exact stop for squared Euclidean and a fixed internal budget of 8 leaf cells
-  for dot/cosine — no public knob; the flat `base_assign` path remains for
-  callers that need a guaranteed-exact scan.
+  exact stop for squared Euclidean and an internal budget of
+  `sqrt(top-level cells)` leaf cells (capped at 10) for dot/cosine — no public
+  knob; the flat `base_assign` path remains for callers that need a
+  guaranteed-exact scan.
 
 ## Measured results (Apple M5 Pro)
 
 Assignment over random centroids (2,048 queries, dim 128): greedy descent is
 12×/42×/104× faster than flat at k = 4,096/16,384/65,536. Budgeted best-first
-(8 leaf cells) for dot is 2.3×/10×/33× faster with ≥99% recall at k = 3,200.
+(`sqrt(top cells)` ≤ 10 leaf cells) for dot is 2.3×/10×/33× faster; measured
+recall (500 queries, dim 8): ~0.93-0.98 at k = 3,200 (16 cells, budget 4) and
+≥ 0.97 at k ≥ 16,384.
 **Exact best-first L2 does not prune in high dimensions**: radii cover most of
 the cell width, so lower bounds rarely exclude a subtree — it matches flat-scan
 speed on uniform data (1.0× at k ≤ 16k, 0.69× at 65k from heap overhead) and on
