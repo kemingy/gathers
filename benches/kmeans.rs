@@ -58,6 +58,27 @@ fn assignment_benchmark(c: &mut Criterion) {
             )
         })
     });
+    for (name, parallel) in [
+        ("serial_cos_4096x256x128", false),
+        ("parallel_cos_4096x256x128", true),
+    ] {
+        let assign = if parallel {
+            base_assign_parallel
+        } else {
+            base_assign
+        };
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                assign(
+                    black_box(&vecs),
+                    black_box(&centroids),
+                    DIM,
+                    Distance::Cosine,
+                    black_box(&mut labels),
+                )
+            })
+        });
+    }
     group.bench_function("rabitq_l2_4096x256x128", |b| {
         b.iter(|| {
             rabitq_assign_parallel(

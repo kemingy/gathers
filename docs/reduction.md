@@ -158,6 +158,11 @@ Both use negative-dot-product assignment and unit nonzero centroids. For large s
 may use approximate RaBitQ assignment; `cos` and `dot` use exact assignment. Do not compare their
 timings as if only the metric changed.
 
+Direct `base_assign` and `base_assign_parallel` calls with cosine normalize centroids once and
+normalize query chunks in reusable scratch, without copying the full query batch. Inputs remain
+unchanged; an invalid cosine row panics and may leave some labels assigned. Already-normalized
+callers can select `NegativeDotProduct` to skip normalization.
+
 The JSON report separates `projection_fit_ms`, `projection_transform_ms`, `fit_ms`, and
 `reconstruction_ms`. `prepare_ms` includes sampling, reading, projection fitting, transformation,
 and normalization/validation of original and projected rows. `normalization_ms` measures both
