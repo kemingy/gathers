@@ -1,13 +1,15 @@
 # Hierarchical assignment: a centroid hierarchy for fast assign
 
-Design note for replacing flat nearest-centroid assignment with a multilayer
-hierarchy built **over the centroids themselves**. Construction groups fine
-centroids into a routing layer, then groups that layer into successively
-coarser layers. Assignment traverses the finished hierarchy in reverse, from
-the small top layer down to the fine centroids, scanning only a fraction of `k`.
-The two-level IVF-style scheme (one coarse layer over the fine centroids) is
-the depth-2 special case; the k-means-tree literature is the source of the
-traversal and training rules.
+**Status: implemented** in `src/kmeans/hierarchy.rs` (`kmeans::Hierarchy`). Construction
+groups fine centroids into a routing layer, then groups that layer into successively
+coarser layers. Assignment traverses the finished hierarchy in reverse, from the small top
+layer down to the fine centroids, scanning only a fraction of `k`. The two-level IVF-style
+scheme (one coarse layer over the fine centroids) is the depth-2 special case; the k-means
+tree literature is the source of the traversal and training rules.
+
+`fit` automatically routes exact assignment through greedy descent when the build rules
+permit a hierarchy (3,136+ centroids); below that it stays on the flat matrix/SIMD path.
+The public `Hierarchy::assign` is best-first with radii.
 
 ## Goal
 
@@ -113,15 +115,21 @@ training each routing layer:
   warns below `39 * k_i`.
 - **Training-size constraint**: this repository's `KMeans::fit` requires at
   least 39 input centroids per output centroid, so the 196-child rule clears
-  its global training-size check at every layer. K-means does not guarantee
-  that each resulting cell has 196 members; verify and repair the assignments.
-- **Fewer iterations at the top**: Faiss uses `niter = 10` for the level-1
-  quantizer vs 25 for ordinary clustering. Rough convergence is fine for
-  routing layers; FLANN reports ~7 iterations retain >90% of tree quality at
-  <10% of build cost, and 0 iterations degrades performance ~2x.
+  its global training-size check at every layer. The 196-child count is an
+  expectation for sizing, not an enforced minimum: uneven or smaller cells are
+  kept as-is.
+- **Iterations at the top**: Faiss uses `niter = 10` for the level-1 quantizer
+  vs 25 for ordinary clustering, and FLANN reports ~7 iterations retain >90% of
+  tree quality. That guidance assumes budgeted (`nprobe`-style) search, which
+  tolerates rough routing. One-path greedy descent does not: under-trained
+  routing makes entire cells unreachable (measured: whole clusters misassigned,
+  empty-cluster repair cascading). Routing layers here train with 25 iterations.
 - **Empty-cluster repair**: split, or copy the largest cluster's centroid and
   apply symmetric `×(1 ± 1/1024)` perturbation (already the established
-  pattern in this repository).
+  pattern in this repository). With a fixed partition, a repaired centroid moved
+  next to its donor stays invisible to the donor's rows, so `fit` rebuilds the
+  hierarchy after any iteration that repaired empties and otherwise refreshes
+  coordinates and radii in place.
 - **Fan-out and depth**: from `m` previous-layer centroids, choose roughly
   `min(√m, m / 196)` centroids for the new layer, rounding down and stopping
   if the result is below 16. K-means can produce uneven cells, so rebalance
@@ -144,9 +152,24 @@ training each routing layer:
   fan-out or adding backtracking over adding levels once `L ≥ 3`.
 - Inside `fit`, the saving multiplies by `max_iter * n`; this is the strongest
   use case. Use greedy descent there.
-- For the public assign API, expose the recall/cost knob (`max_nodes` scan
-  budget, or radii-based exact stop for Euclidean distance) and default to
-  best-first with radii where the exact bound applies.
+- For the public assign API (`Hierarchy::assign`), best-first uses the radii
+  exact stop for squared Euclidean and a fixed internal budget of 8 leaf cells
+  for dot/cosine — no public knob; the flat `base_assign` path remains for
+  callers that need a guaranteed-exact scan.
+
+## Measured results (Apple M5 Pro)
+
+Assignment over random centroids (2,048 queries, dim 128): greedy descent is
+12×/42×/104× faster than flat at k = 4,096/16,384/65,536. Budgeted best-first
+(8 leaf cells) for dot is 2.3×/10×/33× faster with ≥99% recall at k = 3,200.
+**Exact best-first L2 does not prune in high dimensions**: radii cover most of
+the cell width, so lower bounds rarely exclude a subtree — it matches flat-scan
+speed on uniform data (1.0× at k ≤ 16k, 0.69× at 65k from heap overhead) and on
+GIST-960 centroids (412 ms vs 397 ms flat for 20k queries). Its value is the
+exactness guarantee, not speed; greedy remains the fit-time path.
+
+End-to-end GIST (1M×960 base, 400k training rows, PCA to 128, k = 3,943, 8
+threads): `fit_ms` 6,668 → 1,327 ms (5.0×) with identical query inertia.
 
 ## Complexity summary
 

@@ -6,8 +6,11 @@ The root Cargo workspace contains the public `gathers` crate and internal crates
 
 - `src/lib.rs`: public Rust library surface. The crate denies missing documentation, so every new
   public item needs rustdoc.
-- `src/kmeans.rs` and `src/kmeans/`: K-means configuration, assignment, centroid updates, and
-  matrix-based implementation details.
+- `src/kmeans.rs` and `src/kmeans/`: K-means configuration, assignment, centroid updates,
+  matrix-based implementation details, and the centroid hierarchy (`hierarchy.rs`) used for
+  assignment above the layer-rule threshold.
+- `docs/hierarchical-kmeans.md`: hierarchy build/traversal rules; keep it in sync with
+  `src/kmeans/hierarchy.rs` behavior changes.
 - `src/distance.rs`: scalar reference implementations and runtime-dispatched distance operations.
 - `src/simd.rs` and `src/simd/`: SIMD dispatch and portable kernels implemented with `pulp`.
 - `src/{sampling,utils}.rs`: shared sampling and vector-layout helpers.

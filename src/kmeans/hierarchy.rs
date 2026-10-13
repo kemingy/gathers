@@ -1,0 +1,1029 @@
+//! A centroid hierarchy for fast assignment.
+//!
+//! Fine centroids are grouped bottom-up into routing layers. A layer of `m` centroids
+//! proposes `min(sqrt(m), m / 196)` parents and is created only when the proposal reaches
+//! 16, so a hierarchy exists iff the fine level has at least `16 * 196 = 3,136` centroids.
+//! The 196 figure only sizes the proposal; actual cells may be uneven and are not
+//! rebalanced.
+//!
+//! Assignment either descends greedily (used inside K-means fitting, where boundary errors
+//! wash out over Lloyd iterations) or traverses best-first with per-node radii: exact with
+//! an early stop for squared Euclidean, budgeted for dot/cosine where the
+//! triangle-inequality bound does not apply. Routing layers are always trained with
+//! squared Euclidean, the standard monotone surrogate for unit-norm dot/cosine routing.
+//! See `docs/hierarchical-kmeans.md` for the design rules.
+
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
+use aligned_vec::AVec;
+use rand::rngs::StdRng;
+use rand::{Rng, RngExt, SeedableRng};
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::slice::{ParallelSlice, ParallelSliceMut};
+
+use crate::distance::Distance;
+use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+
+/// Expected children per routing centroid, used to size layer proposals; not a minimum.
+const EXPECTED_CHILDREN: usize = 196;
+/// A routing layer is created only when its proposed size reaches this count.
+const MIN_ROUTING_CENTROIDS: usize = 16;
+/// Leaf cells scanned per query for dot/cosine best-first search, where the radii bound
+/// does not apply. Measured recall at k=3,200 (16 cells): ~0.6 at 1, ~0.95 at 4,
+/// >= 0.99 at 8 on uniform and directional data.
+const SCAN_BUDGET: usize = 8;
+const RAYON_BLOCK_SIZE: usize = 64;
+
+#[derive(Debug)]
+struct Level {
+    centroids: AVec<f32>,
+    /// Node j owns children `child_offsets[j]..child_offsets[j + 1]` in the next lower
+    /// level. Empty for the fine level.
+    child_offsets: Vec<u32>,
+    /// Node j covers fine centroids `fine_offsets[j]..fine_offsets[j + 1]` in level-0
+    /// (permuted) order.
+    fine_offsets: Vec<u32>,
+    /// Euclidean radius over all fine centroids in the subtree; empty for the fine level.
+    radii: Vec<f32>,
+    /// L2 norm per node, so cosine scoring can skip normalizing the stored centroids.
+    norms: Vec<f32>,
+}
+
+impl Level {
+    fn len(&self) -> usize {
+        self.norms.len()
+    }
+}
+
+/// A multilayer routing hierarchy over trained centroids.
+///
+/// Level 0 holds the fine centroids permuted so each routing node's children are
+/// contiguous; assignment results are mapped back to the original centroid indices.
+/// Radii are exact maxima over each subtree computed with f64 intermediates, so the
+/// squared-Euclidean best-first search returns the same nearest centroid as an exact flat
+/// scan (ties may resolve to a different equal-scoring centroid).
+#[derive(Debug)]
+pub struct Hierarchy {
+    dim: usize,
+    levels: Vec<Level>,
+    /// Fine-level position -> original centroid index.
+    leaf_order: Vec<u32>,
+}
+
+/// Proposed routing-layer size over `m` centroids; `None` when a layer is not worthwhile.
+fn proposed_parents(m: usize) -> Option<usize> {
+    let proposal = ((m as f64).sqrt() as usize).min(m / EXPECTED_CHILDREN);
+    (proposal >= MIN_ROUTING_CENTROIDS).then_some(proposal)
+}
+
+fn l2_norm(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .map(|&value| f64::from(value) * f64::from(value))
+        .sum::<f64>()
+        .sqrt() as f32
+}
+
+fn l2_distance(lhs: &[f32], rhs: &[f32]) -> f32 {
+    lhs.iter()
+        .zip(rhs)
+        .map(|(&left, &right)| {
+            let delta = f64::from(left) - f64::from(right);
+            delta * delta
+        })
+        .sum::<f64>()
+        .sqrt() as f32
+}
+
+fn gather(values: &[f32], order: &[u32], dim: usize) -> AVec<f32> {
+    let mut output = AVec::with_capacity(64, values.len());
+    for &source in order {
+        let start = source as usize * dim;
+        output.extend_from_slice(&values[start..start + dim]);
+    }
+    output
+}
+
+fn permute<T: Clone>(values: &[T], order: &[u32]) -> Vec<T> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    order
+        .iter()
+        .map(|&source| values[source as usize].clone())
+        .collect()
+}
+
+/// Rebuild CSR offsets so the runs referenced by `order` become contiguous, keeping the
+/// referenced (lower-level) order unchanged. Empty offsets (fine level) stay empty.
+fn permuted_offsets(offsets: &[u32], order: &[u32]) -> Vec<u32> {
+    if offsets.is_empty() {
+        return Vec::new();
+    }
+    let mut output = Vec::with_capacity(offsets.len());
+    output.push(0);
+    for &source in order {
+        let size = offsets[source as usize + 1] - offsets[source as usize];
+        output.push(output.last().unwrap() + size);
+    }
+    output
+}
+
+/// Min-heap entry keyed by lower bound (L2) or center score (dot/cosine). Ties resolve
+/// toward deeper nodes so a leaf cell scans before its siblings expand.
+struct ScoreEntry {
+    score: f32,
+    level: u32,
+    node: u32,
+}
+
+impl PartialEq for ScoreEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for ScoreEntry {}
+impl PartialOrd for ScoreEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ScoreEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then(other.level.cmp(&self.level))
+            .then(other.node.cmp(&self.node))
+    }
+}
+
+/// Score a contiguous candidate range against one query. L2 uses squared distances;
+/// cosine ranks by `-dot / ||centroid||` (the query norm is constant per query) and
+/// zero-norm centroids never win.
+#[allow(clippy::too_many_arguments)]
+fn score_range<S: pulp::Simd>(
+    simd: S,
+    centroids: &[f32],
+    norms: &[f32],
+    query: &[f32],
+    dim: usize,
+    distance: Distance,
+    scores: &mut Vec<f32>,
+) {
+    scores.clear();
+    scores.resize(norms.len(), 0.0);
+    for ((score, centroid), &norm) in scores
+        .iter_mut()
+        .zip(centroids.chunks_exact(dim))
+        .zip(norms)
+    {
+        *score = match distance {
+            Distance::SquaredEuclidean => {
+                crate::simd::pulp::l2_squared_distance(simd, query, centroid)
+            }
+            Distance::NegativeDotProduct => -crate::simd::pulp::dot_product(simd, query, centroid),
+            Distance::Cosine => {
+                if norm > 0.0 {
+                    -crate::simd::pulp::dot_product(simd, query, centroid) / norm
+                } else {
+                    f32::INFINITY
+                }
+            }
+        };
+    }
+}
+
+/// Lower bound on the squared distance to any fine centroid under a node, from the node's
+/// squared center distance and radius: `max(0, sqrt(d2) - r)^2` in f64.
+fn lower_bound(squared_center: f32, radius: f32) -> f32 {
+    let bound = (f64::from(squared_center).sqrt() - f64::from(radius)).max(0.0);
+    (bound * bound) as f32
+}
+
+#[derive(Default)]
+struct SearchScratch {
+    heap: BinaryHeap<ScoreEntry>,
+    scores: Vec<f32>,
+}
+
+impl Hierarchy {
+    /// Build a hierarchy over flat row-major `centroids`, or return `None` when the layer
+    /// rules do not permit one (fewer than `16 * 196 = 3,136` fine centroids, or the
+    /// square-root rule stops earlier at deeper levels).
+    ///
+    /// The seed controls routing-layer training. Panics if `centroids` is empty, `dim` is
+    /// zero, or rows are incomplete.
+    pub fn build(centroids: &[f32], dim: usize, seed: Option<u64>) -> Option<Self> {
+        assert!(dim > 0, "dimension must be greater than zero");
+        assert!(
+            !centroids.is_empty() && centroids.len().is_multiple_of(dim),
+            "centroids must be complete and non-empty"
+        );
+        let mut rng = match seed {
+            Some(seed) => StdRng::seed_from_u64(seed),
+            None => StdRng::from_rng(&mut rand::rng()),
+        };
+        Self::build_inner(&mut rng, centroids, dim)
+    }
+
+    pub(crate) fn build_with_rng<R: Rng + ?Sized>(
+        rng: &mut R,
+        centroids: &[f32],
+        dim: usize,
+    ) -> Option<Self> {
+        let mut layer_rng = StdRng::seed_from_u64(rng.random());
+        Self::build_inner(&mut layer_rng, centroids, dim)
+    }
+
+    fn build_inner(rng: &mut StdRng, centroids: &[f32], dim: usize) -> Option<Self> {
+        let m = centroids.len() / dim;
+        proposed_parents(m)?;
+
+        let mut level = Level {
+            centroids: {
+                let mut copy = AVec::with_capacity(64, centroids.len());
+                copy.extend_from_slice(centroids);
+                copy
+            },
+            child_offsets: Vec::new(),
+            fine_offsets: (0..=m as u32).collect(),
+            radii: Vec::new(),
+            norms: centroids.chunks_exact(dim).map(l2_norm).collect(),
+        };
+        let mut leaf_order: Option<Vec<u32>> = None;
+        let mut levels: Vec<Level> = Vec::new();
+
+        while let Some(parents) = proposed_parents(level.len()) {
+            // fit_sample trains every supplied row; the 196-based proposal keeps the
+            // expected cell size above its 39-rows-per-cluster minimum.
+            let config = KMeansConfig {
+                n_clusters: Some(parents as u32),
+                max_iter: 25,
+                distance: Distance::SquaredEuclidean,
+                reduction: ReductionConfig::None,
+                seed: Some(rng.random()),
+                ..Default::default()
+            };
+            let fit = KMeans::new(config)
+                .fit_sample(level.centroids.clone(), dim)
+                .expect("routing layer training must succeed on finite centroids");
+            let count = level.len();
+            debug_assert_eq!(fit.labels.len(), count);
+
+            // Group the current level by parent so every routing node's children are
+            // contiguous, then finalize it.
+            let mut order: Vec<u32> = (0..count as u32).collect();
+            order.sort_by_key(|&index| fit.labels[index as usize]);
+            let mut child_offsets = vec![0_u32; parents + 1];
+            for &label in &fit.labels {
+                child_offsets[label as usize + 1] += 1;
+            }
+            for index in 0..parents {
+                child_offsets[index + 1] += child_offsets[index];
+            }
+            let grouped_fine_offsets = permuted_offsets(&level.fine_offsets, &order);
+            let grouped = Level {
+                centroids: gather(&level.centroids, &order, dim),
+                child_offsets: permuted_offsets(&level.child_offsets, &order),
+                radii: permute(&level.radii, &order),
+                norms: permute(&level.norms, &order),
+                fine_offsets: grouped_fine_offsets.clone(),
+            };
+            if leaf_order.is_none() {
+                leaf_order = Some(order);
+            }
+            levels.push(grouped);
+
+            // Each routing node covers the contiguous union of its children's fine ranges.
+            let mut fine_offsets = Vec::with_capacity(parents + 1);
+            for node in 0..parents {
+                fine_offsets.push(grouped_fine_offsets[child_offsets[node] as usize]);
+            }
+            fine_offsets.push(grouped_fine_offsets[child_offsets[parents] as usize]);
+
+            let fine = &levels[0];
+            let radii = fit
+                .centroids
+                .chunks_exact(dim)
+                .zip(fine_offsets.windows(2))
+                .map(|(centroid, range)| {
+                    let start = range[0] as usize * dim;
+                    let end = range[1] as usize * dim;
+                    fine.centroids[start..end]
+                        .chunks_exact(dim)
+                        .map(|member| l2_distance(centroid, member))
+                        .fold(0.0_f32, f32::max)
+                })
+                .collect();
+            level = Level {
+                norms: fit.centroids.chunks_exact(dim).map(l2_norm).collect(),
+                centroids: fit.centroids,
+                child_offsets,
+                fine_offsets,
+                radii,
+            };
+        }
+
+        levels.push(level);
+        Some(Self {
+            dim,
+            levels,
+            leaf_order: leaf_order.expect("a routing layer was created"),
+        })
+    }
+
+    /// Refresh coordinates after the fine centroids move (e.g. each Lloyd iteration),
+    /// keeping the partition fixed. Routing centroids become their fine-range means and
+    /// radii/norms are recomputed. `centroids` uses the original (build-time) order.
+    pub(crate) fn refresh(&mut self, centroids: &[f32]) {
+        let dim = self.dim;
+        assert_eq!(centroids.len(), self.leaf_order.len() * dim);
+        let (fine, routing) = self.levels.split_at_mut(1);
+        let fine = &mut fine[0];
+        for (position, centroid) in fine.centroids.chunks_exact_mut(dim).enumerate() {
+            let start = self.leaf_order[position] as usize * dim;
+            centroid.copy_from_slice(&centroids[start..start + dim]);
+        }
+        for (norm, centroid) in fine.norms.iter_mut().zip(fine.centroids.chunks_exact(dim)) {
+            *norm = l2_norm(centroid);
+        }
+        for level in routing {
+            for node in 0..level.len() {
+                let start = level.fine_offsets[node] as usize * dim;
+                let end = level.fine_offsets[node + 1] as usize * dim;
+                let centroid = &mut level.centroids[node * dim..(node + 1) * dim];
+                if start == end {
+                    // Dead cell from empty-cluster repair: no members, no mean.
+                    continue;
+                }
+                centroid.fill(0.0);
+                for member in fine.centroids[start..end].chunks_exact(dim) {
+                    for (value, &member) in centroid.iter_mut().zip(member) {
+                        *value += member;
+                    }
+                }
+                let count = ((end - start) / dim) as f32;
+                centroid
+                    .iter_mut()
+                    .for_each(|value| *value *= count.recip());
+                level.radii[node] = fine.centroids[start..end]
+                    .chunks_exact(dim)
+                    .map(|member| l2_distance(centroid, member))
+                    .fold(0.0_f32, f32::max);
+                level.norms[node] = l2_norm(centroid);
+            }
+        }
+    }
+
+    /// Centroid dimension.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Number of levels, including the fine level; at least 2.
+    pub fn levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    fn validate(&self, vecs: &[f32], dim: usize, labels: &[u32]) {
+        assert_eq!(dim, self.dim, "dimension must match the hierarchy");
+        assert!(vecs.len().is_multiple_of(dim), "vectors must be complete");
+        assert_eq!(
+            labels.len(),
+            vecs.len() / dim,
+            "one label is required per vector"
+        );
+    }
+
+    /// Assign vectors to the nearest original centroid index with greedy descent.
+    ///
+    /// Scans the top layer, then one child list per level: approximate, minimal work.
+    pub fn assign_greedy(&self, vecs: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
+        self.validate(vecs, dim, labels);
+        let arch = pulp::Arch::new();
+        let mut scratch = SearchScratch::default();
+        for (labels, vecs) in labels
+            .chunks_mut(RAYON_BLOCK_SIZE)
+            .zip(vecs.chunks(dim * RAYON_BLOCK_SIZE))
+        {
+            arch.dispatch(GreedyBlock {
+                hierarchy: self,
+                vecs,
+                distance,
+                labels,
+                scratch: &mut scratch,
+            });
+        }
+    }
+
+    /// Greedy descent in parallel, with per-task reusable scratch.
+    pub fn assign_greedy_parallel(
+        &self,
+        vecs: &[f32],
+        dim: usize,
+        distance: Distance,
+        labels: &mut [u32],
+    ) {
+        self.validate(vecs, dim, labels);
+        labels
+            .par_chunks_mut(RAYON_BLOCK_SIZE)
+            .zip(vecs.par_chunks(dim * RAYON_BLOCK_SIZE))
+            .for_each_init(SearchScratch::default, |scratch, (labels, vecs)| {
+                pulp::Arch::new().dispatch(GreedyBlock {
+                    hierarchy: self,
+                    vecs,
+                    distance,
+                    labels,
+                    scratch,
+                });
+            });
+    }
+
+    /// Assign vectors with best-first backtracking.
+    ///
+    /// Squared Euclidean uses per-node radii for an exact early stop and returns the same
+    /// nearest centroid as an exact flat scan (ties may pick a different equal-scoring
+    /// centroid). Dot and cosine traverse centers by score and scan up to 8 leaf cells
+    /// per query. Cosine ranking needs no query normalization: the query norm is constant
+    /// per query, so `-dot / ||centroid||` ranks identically.
+    pub fn assign(&self, vecs: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
+        self.validate(vecs, dim, labels);
+        let arch = pulp::Arch::new();
+        let mut scratch = SearchScratch::default();
+        for (labels, vecs) in labels
+            .chunks_mut(RAYON_BLOCK_SIZE)
+            .zip(vecs.chunks(dim * RAYON_BLOCK_SIZE))
+        {
+            arch.dispatch(BestFirstBlock {
+                hierarchy: self,
+                vecs,
+                distance,
+                labels,
+                scratch: &mut scratch,
+            });
+        }
+    }
+
+    /// Best-first backtracking in parallel, with per-task reusable scratch.
+    pub fn assign_parallel(
+        &self,
+        vecs: &[f32],
+        dim: usize,
+        distance: Distance,
+        labels: &mut [u32],
+    ) {
+        self.validate(vecs, dim, labels);
+        labels
+            .par_chunks_mut(RAYON_BLOCK_SIZE)
+            .zip(vecs.par_chunks(dim * RAYON_BLOCK_SIZE))
+            .for_each_init(SearchScratch::default, |scratch, (labels, vecs)| {
+                pulp::Arch::new().dispatch(BestFirstBlock {
+                    hierarchy: self,
+                    vecs,
+                    distance,
+                    labels,
+                    scratch,
+                });
+            });
+    }
+
+    fn greedy_one<S: pulp::Simd>(
+        &self,
+        simd: S,
+        query: &[f32],
+        distance: Distance,
+        scratch: &mut SearchScratch,
+    ) -> u32 {
+        let top = self.levels.len() - 1;
+        let mut node = self.scan_children(
+            simd,
+            top,
+            0,
+            self.levels[top].len(),
+            query,
+            distance,
+            scratch,
+            true,
+        );
+        for level in (1..=top).rev() {
+            let start = self.levels[level].child_offsets[node] as usize;
+            let end = self.levels[level].child_offsets[node + 1] as usize;
+            let lower = level - 1;
+            // Skip dead routing nodes (empty child ranges); fine centroids are never dead.
+            node = start
+                + self.scan_children(simd, lower, start, end, query, distance, scratch, lower > 0);
+        }
+        self.leaf_order[node]
+    }
+
+    /// Score nodes `start..end` of `level` and return the offset of the best live one.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_children<S: pulp::Simd>(
+        &self,
+        simd: S,
+        level: usize,
+        start: usize,
+        end: usize,
+        query: &[f32],
+        distance: Distance,
+        scratch: &mut SearchScratch,
+        skip_dead: bool,
+    ) -> usize {
+        let level_ref = &self.levels[level];
+        score_range(
+            simd,
+            &level_ref.centroids[start * self.dim..end * self.dim],
+            &level_ref.norms[start..end],
+            query,
+            self.dim,
+            distance,
+            &mut scratch.scores,
+        );
+        scratch
+            .scores
+            .iter()
+            .enumerate()
+            .filter(|(offset, _)| {
+                !skip_dead
+                    || level_ref.child_offsets[start + offset + 1]
+                        > level_ref.child_offsets[start + offset]
+            })
+            .min_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(offset, _)| offset)
+            .expect("at least one live routing node")
+    }
+
+    fn best_first_one<S: pulp::Simd>(
+        &self,
+        simd: S,
+        query: &[f32],
+        distance: Distance,
+        scratch: &mut SearchScratch,
+    ) -> u32 {
+        scratch.heap.clear();
+        let top = self.levels.len() - 1;
+        score_range(
+            simd,
+            &self.levels[top].centroids,
+            &self.levels[top].norms,
+            query,
+            self.dim,
+            distance,
+            &mut scratch.scores,
+        );
+        for (node, &score) in scratch.scores.iter().enumerate() {
+            let score = match distance {
+                Distance::SquaredEuclidean => lower_bound(score, self.levels[top].radii[node]),
+                _ => score,
+            };
+            scratch.heap.push(ScoreEntry {
+                score,
+                level: top as u32,
+                node: node as u32,
+            });
+        }
+        let mut best = f32::INFINITY;
+        let mut best_index = 0_u32;
+        let mut budget = SCAN_BUDGET;
+        while let Some(entry) = scratch.heap.pop() {
+            if distance == Distance::SquaredEuclidean && entry.score >= best {
+                break;
+            }
+            let level = entry.level as usize;
+            let node = entry.node as usize;
+            let start = self.levels[level].child_offsets[node] as usize;
+            let end = self.levels[level].child_offsets[node + 1] as usize;
+            if level == 1 {
+                if distance != Distance::SquaredEuclidean {
+                    if budget == 0 {
+                        break;
+                    }
+                    budget -= 1;
+                }
+                // Leaf cell: exact fine scan.
+                score_range(
+                    simd,
+                    &self.levels[0].centroids[start * self.dim..end * self.dim],
+                    &self.levels[0].norms[start..end],
+                    query,
+                    self.dim,
+                    distance,
+                    &mut scratch.scores,
+                );
+                for (offset, &score) in scratch.scores.iter().enumerate() {
+                    if score < best {
+                        best = score;
+                        best_index = self.leaf_order[start + offset];
+                    }
+                }
+            } else {
+                score_range(
+                    simd,
+                    &self.levels[level - 1].centroids[start * self.dim..end * self.dim],
+                    &self.levels[level - 1].norms[start..end],
+                    query,
+                    self.dim,
+                    distance,
+                    &mut scratch.scores,
+                );
+                for (offset, &score) in scratch.scores.iter().enumerate() {
+                    let child = start + offset;
+                    let score = match distance {
+                        Distance::SquaredEuclidean => {
+                            lower_bound(score, self.levels[level - 1].radii[child])
+                        }
+                        _ => score,
+                    };
+                    scratch.heap.push(ScoreEntry {
+                        score,
+                        level: (level - 1) as u32,
+                        node: child as u32,
+                    });
+                }
+            }
+        }
+        best_index
+    }
+}
+
+struct GreedyBlock<'a> {
+    hierarchy: &'a Hierarchy,
+    vecs: &'a [f32],
+    distance: Distance,
+    labels: &'a mut [u32],
+    scratch: &'a mut SearchScratch,
+}
+
+impl pulp::WithSimd for GreedyBlock<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: pulp::Simd>(self, simd: S) {
+        for (label, query) in self
+            .labels
+            .iter_mut()
+            .zip(self.vecs.chunks_exact(self.hierarchy.dim))
+        {
+            *label = self
+                .hierarchy
+                .greedy_one(simd, query, self.distance, self.scratch);
+        }
+    }
+}
+
+struct BestFirstBlock<'a> {
+    hierarchy: &'a Hierarchy,
+    vecs: &'a [f32],
+    distance: Distance,
+    labels: &'a mut [u32],
+    scratch: &'a mut SearchScratch,
+}
+
+impl pulp::WithSimd for BestFirstBlock<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: pulp::Simd>(self, simd: S) {
+        for (label, query) in self
+            .labels
+            .iter_mut()
+            .zip(self.vecs.chunks_exact(self.hierarchy.dim))
+        {
+            *label = self
+                .hierarchy
+                .best_first_one(simd, query, self.distance, self.scratch);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::RngExt;
+    use seed_rand::seeded_rng;
+
+    use super::{
+        EXPECTED_CHILDREN, Hierarchy, Level, MIN_ROUTING_CENTROIDS, l2_distance, proposed_parents,
+    };
+    use crate::distance::Distance;
+    use crate::kmeans::base_assign;
+
+    fn random_rows(rows: usize, dim: usize) -> Vec<f32> {
+        let mut rng = seeded_rng();
+        (0..rows * dim).map(|_| rng.random::<f32>() - 0.5).collect()
+    }
+
+    /// 100 fine centroids per blob, blobs far apart along coordinate 0.
+    fn blob_centroids(blobs: usize, per_blob: usize, dim: usize) -> Vec<f32> {
+        let mut rng = seeded_rng();
+        let mut centroids = Vec::new();
+        for blob in 0..blobs {
+            for _ in 0..per_blob {
+                let mut centroid = vec![0.0; dim];
+                centroid[0] = blob as f32 * 100.0;
+                for value in centroid.iter_mut().skip(1) {
+                    *value = rng.random::<f32>() - 0.5;
+                }
+                centroids.extend_from_slice(&centroid);
+            }
+        }
+        centroids
+    }
+
+    #[test]
+    fn layer_proposal_boundaries() {
+        assert_eq!(
+            proposed_parents(MIN_ROUTING_CENTROIDS * EXPECTED_CHILDREN - 1),
+            None
+        );
+        assert_eq!(proposed_parents(3_136), Some(16));
+        assert_eq!(proposed_parents(3_200), Some(16));
+        // sqrt rule dominates once sqrt(m) < m / 196: sqrt(40_000) = 200 > 204.
+        assert_eq!(proposed_parents(40_000), Some(200));
+        assert_eq!(proposed_parents(1_000_000), Some(1000));
+    }
+
+    #[test]
+    fn build_groups_children_contiguously() {
+        let dim = 4;
+        let centroids = random_rows(3_200, dim);
+        let hierarchy = Hierarchy::build(&centroids, dim, Some(42)).unwrap();
+        assert_eq!(hierarchy.levels(), 2);
+        let fine = &hierarchy.levels[0];
+        let routing = &hierarchy.levels[1];
+        assert_eq!(routing.len(), 16);
+
+        // Child ranges tile the fine level without gaps or overlaps.
+        assert_eq!(routing.child_offsets[0], 0);
+        assert_eq!(*routing.child_offsets.last().unwrap(), 3_200);
+        assert!(routing.child_offsets.windows(2).all(|w| w[0] <= w[1]));
+
+        // leaf_order is a permutation mapping back to the original centroids.
+        let mut order = hierarchy.leaf_order.clone();
+        order.sort_unstable();
+        assert_eq!(order, (0..3_200).collect::<Vec<_>>());
+        for (position, &original) in hierarchy.leaf_order.iter().enumerate() {
+            for coordinate in 0..dim {
+                assert_eq!(
+                    fine.centroids[position * dim + coordinate],
+                    centroids[original as usize * dim + coordinate]
+                );
+            }
+        }
+
+        // Radii cover every fine centroid in the subtree, and norms match the centroids.
+        for node in 0..routing.len() {
+            let center = &routing.centroids[node * dim..(node + 1) * dim];
+            let start = routing.fine_offsets[node] as usize;
+            let end = routing.fine_offsets[node + 1] as usize;
+            let actual = fine.centroids[start * dim..end * dim]
+                .chunks_exact(dim)
+                .map(|member| l2_distance(center, member))
+                .fold(0.0_f32, f32::max);
+            assert!(routing.radii[node] >= actual * 0.999);
+            assert!((routing.norms[node] - super::l2_norm(center)).abs() < 1e-4);
+        }
+
+        // One centroids fewer than the build threshold yields no hierarchy.
+        assert!(Hierarchy::build(&random_rows(3_135, dim), dim, Some(42)).is_none());
+    }
+
+    #[test]
+    fn best_first_l2_matches_flat_assignment() {
+        let k = 3_200;
+        let mut rng = seeded_rng();
+        for dim in [1, 3, 31, 128] {
+            let data: Vec<f32> = (0..(k + 200) * dim)
+                .map(|_| rng.random::<f32>() - 0.5)
+                .collect();
+            let (centroids, queries) = data.split_at(k * dim);
+            let hierarchy = Hierarchy::build(centroids, dim, Some(42)).unwrap();
+            let mut expected = vec![0; 200];
+            base_assign(
+                queries,
+                centroids,
+                dim,
+                Distance::SquaredEuclidean,
+                &mut expected,
+            );
+            // Greedy descent is approximate and covered separately; best-first is exact.
+            for actual in [
+                Hierarchy::assign as fn(&Hierarchy, &[f32], usize, Distance, &mut [u32]),
+                Hierarchy::assign_parallel,
+            ] {
+                let mut labels = vec![u32::MAX; 200];
+                actual(
+                    &hierarchy,
+                    queries,
+                    dim,
+                    Distance::SquaredEuclidean,
+                    &mut labels,
+                );
+                assert_eq!(labels, expected, "dimension {dim}");
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_descent_finds_the_blob_on_separated_data() {
+        let dim = 8;
+        let centroids = blob_centroids(32, 100, dim);
+        let hierarchy = Hierarchy::build(&centroids, dim, Some(42)).unwrap();
+        // Queries are fine centroids plus small noise: the source centroid stays nearest.
+        let mut queries = Vec::new();
+        let mut rng = seeded_rng();
+        for query in 0..100 {
+            let index = (query * 31) % 3_200;
+            let mut vector = centroids[index * dim..index * dim + dim].to_vec();
+            vector[0] += rng.random::<f32>() - 0.5;
+            queries.extend_from_slice(&vector);
+        }
+        let mut expected = vec![0; 100];
+        base_assign(
+            &queries,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        let mut labels = vec![0; 100];
+        hierarchy.assign_greedy(&queries, dim, Distance::SquaredEuclidean, &mut labels);
+        assert_eq!(labels, expected);
+    }
+
+    #[test]
+    fn budgeted_dot_and_cosine_hold_recall() {
+        let dim = 8;
+        let mut rng = seeded_rng();
+        let uniform: Vec<f32> = (0..3_200 * dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect();
+        // 32 direction blobs x 100 centroids with varying magnitudes.
+        let mut directional = Vec::new();
+        for _ in 0..32 {
+            let direction: Vec<f32> = (0..dim).map(|_| rng.random::<f32>() - 0.5).collect();
+            let norm = direction.iter().map(|v| v * v).sum::<f32>().sqrt();
+            for _ in 0..100 {
+                let scale = 0.5 + rng.random::<f32>();
+                for value in &direction {
+                    directional.push(value / norm * scale + (rng.random::<f32>() - 0.5) * 0.1);
+                }
+            }
+        }
+        let queries: Vec<f32> = (0..500 * dim).map(|_| rng.random::<f32>() - 0.5).collect();
+        for (name, centroids) in [("uniform", &uniform), ("directional", &directional)] {
+            let hierarchy = Hierarchy::build(centroids, dim, Some(42)).unwrap();
+            for distance in [Distance::NegativeDotProduct, Distance::Cosine] {
+                let mut expected = vec![0; 500];
+                base_assign(&queries, centroids, dim, distance, &mut expected);
+                let mut actual = vec![0; 500];
+                hierarchy.assign(&queries, dim, distance, &mut actual);
+                let recall = expected
+                    .iter()
+                    .zip(&actual)
+                    .filter(|(left, right)| left == right)
+                    .count() as f32
+                    / 500.0;
+                assert!(recall >= 0.95, "{name} {distance:?} recall {recall}");
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_radii_valid_and_partition_fixed() {
+        let dim = 4;
+        let centroids = random_rows(3_200, dim);
+        let mut hierarchy = Hierarchy::build(&centroids, dim, Some(42)).unwrap();
+        let moved: Vec<f32> = centroids.iter().map(|value| value * 1.01 + 0.001).collect();
+        hierarchy.refresh(&moved);
+        let fine = &hierarchy.levels[0];
+        let routing = &hierarchy.levels[1];
+        for (position, &original) in hierarchy.leaf_order.iter().enumerate() {
+            for coordinate in 0..dim {
+                assert_eq!(
+                    fine.centroids[position * dim + coordinate],
+                    moved[original as usize * dim + coordinate]
+                );
+            }
+        }
+        for node in 0..routing.len() {
+            let center = &routing.centroids[node * dim..(node + 1) * dim];
+            let start = routing.fine_offsets[node] as usize;
+            let end = routing.fine_offsets[node + 1] as usize;
+            let actual = fine.centroids[start * dim..end * dim]
+                .chunks_exact(dim)
+                .map(|member| l2_distance(center, member))
+                .fold(0.0_f32, f32::max);
+            assert!(routing.radii[node] + 1e-4 >= actual);
+        }
+        // Best-first is still exact after a small drift.
+        let queries = random_rows(50, dim);
+        let mut expected = vec![0; 50];
+        base_assign(
+            &queries,
+            &moved,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        let mut actual = vec![0; 50];
+        hierarchy.assign(&queries, dim, Distance::SquaredEuclidean, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn deep_tree_best_first_matches_flat() {
+        // Depth 3 needs ~9.8M centroids through the build rules, so hand-build one:
+        // 4 top nodes x 8 routing children x 4 fine centroids.
+        let dim = 2;
+        let mut fine = Vec::new();
+        for top in 0..4 {
+            for middle in 0..8 {
+                for leaf in 0..4 {
+                    fine.extend_from_slice(&[
+                        top as f32 * 100.0 + middle as f32 * 10.0 + leaf as f32,
+                        (top + middle + leaf) as f32 * 0.01,
+                    ]);
+                }
+            }
+        }
+        let fine_count = fine.len() / dim;
+        let level0 = Level {
+            norms: fine.chunks_exact(dim).map(super::l2_norm).collect(),
+            centroids: {
+                let mut copy = aligned_vec::AVec::with_capacity(64, fine.len());
+                copy.extend_from_slice(&fine);
+                copy
+            },
+            child_offsets: Vec::new(),
+            fine_offsets: (0..=fine_count as u32).collect(),
+            radii: Vec::new(),
+        };
+        let mut levels = vec![level0];
+        let mut lower_count = fine_count;
+        let mut fan_out = 4;
+        for _ in 1..3 {
+            let nodes = lower_count / fan_out;
+            let mut centroids = aligned_vec::AVec::with_capacity(64, nodes * dim);
+            let mut child_offsets = vec![0_u32; nodes + 1];
+            let mut fine_offsets = Vec::with_capacity(nodes + 1);
+            let mut radii = Vec::with_capacity(nodes);
+            for node in 0..nodes {
+                child_offsets[node + 1] = child_offsets[node] + fan_out as u32;
+                fine_offsets.push(node as u32 * fan_out as u32);
+            }
+            fine_offsets.push(lower_count as u32);
+            let fine_level = &levels[0];
+            for node in 0..nodes {
+                let start = fine_offsets[node] as usize * dim;
+                let end = fine_offsets[node + 1] as usize * dim;
+                let mut mean = vec![0.0_f32; dim];
+                for member in fine_level.centroids[start..end].chunks_exact(dim) {
+                    for (value, &member) in mean.iter_mut().zip(member) {
+                        *value += member;
+                    }
+                }
+                let count = ((end - start) / dim) as f32;
+                mean.iter_mut().for_each(|value| *value *= count.recip());
+                radii.push(
+                    fine_level.centroids[start..end]
+                        .chunks_exact(dim)
+                        .map(|member| l2_distance(&mean, member))
+                        .fold(0.0_f32, f32::max),
+                );
+                centroids.extend_from_slice(&mean);
+            }
+            levels.push(Level {
+                norms: centroids.chunks_exact(dim).map(super::l2_norm).collect(),
+                centroids,
+                child_offsets,
+                fine_offsets,
+                radii,
+            });
+            lower_count = nodes;
+            fan_out = 8;
+        }
+        let hierarchy = Hierarchy {
+            dim,
+            levels,
+            leaf_order: (0..fine_count as u32).collect(),
+        };
+        assert_eq!(hierarchy.levels(), 3);
+        let queries = random_rows(100, dim);
+        let mut expected = vec![0; 100];
+        base_assign(
+            &queries,
+            &fine,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        let mut actual = vec![0; 100];
+        hierarchy.assign(&queries, dim, Distance::SquaredEuclidean, &mut actual);
+        assert_eq!(actual, expected);
+        let mut greedy = vec![0; 100];
+        hierarchy.assign_greedy(&queries, dim, Distance::SquaredEuclidean, &mut greedy);
+        assert_eq!(greedy, expected);
+    }
+}
