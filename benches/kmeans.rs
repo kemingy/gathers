@@ -58,6 +58,56 @@ fn assignment_benchmark(c: &mut Criterion) {
             )
         })
     });
+    for (name, parallel) in [
+        ("serial_cos_4096x256x128", false),
+        ("parallel_cos_4096x256x128", true),
+    ] {
+        let assign = if parallel {
+            base_assign_parallel
+        } else {
+            base_assign
+        };
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                assign(
+                    black_box(&vecs),
+                    black_box(&centroids),
+                    DIM,
+                    Distance::Cosine,
+                    black_box(&mut labels),
+                )
+            })
+        });
+    }
+    // Small query batches isolate centroid normalization from scoring.
+    let big_centroids: Vec<f32> = (0..4096 * DIM).map(|_| rng.random()).collect();
+    let mut small_labels = vec![0; 8];
+    for (name, query_centroids, distance) in [
+        ("serial_cos_8x256x128", &centroids, Distance::Cosine),
+        (
+            "serial_dot_8x256x128",
+            &centroids,
+            Distance::NegativeDotProduct,
+        ),
+        ("serial_cos_8x4096x128", &big_centroids, Distance::Cosine),
+        (
+            "serial_dot_8x4096x128",
+            &big_centroids,
+            Distance::NegativeDotProduct,
+        ),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                base_assign(
+                    black_box(&vecs[..8 * DIM]),
+                    black_box(query_centroids),
+                    DIM,
+                    distance,
+                    black_box(&mut small_labels),
+                )
+            })
+        });
+    }
     group.bench_function("rabitq_l2_4096x256x128", |b| {
         b.iter(|| {
             rabitq_assign_parallel(

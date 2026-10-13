@@ -46,6 +46,7 @@ struct AssignBlock<'a> {
     dim: usize,
     distance: Distance,
     labels: &'a mut [u32],
+    scratch: &'a mut Vec<f32>,
 }
 
 impl pulp::WithSimd for AssignBlock<'_> {
@@ -59,7 +60,22 @@ impl pulp::WithSimd for AssignBlock<'_> {
             dim,
             distance,
             labels,
+            scratch,
         } = self;
+
+        let vecs = if distance == Distance::Cosine {
+            scratch.clear();
+            scratch.extend_from_slice(vecs);
+            for row in scratch.chunks_exact_mut(dim) {
+                assert!(
+                    matches!(normalize_nonzero_row(row), Some(true)),
+                    "cannot assign cosine vectors: each row must have a finite nonzero L2 norm"
+                );
+            }
+            scratch.as_slice()
+        } else {
+            vecs
+        };
 
         for (label, vector) in labels.iter_mut().zip(vecs.chunks_exact(dim)) {
             let mut best_distance = f32::INFINITY;
@@ -69,7 +85,7 @@ impl pulp::WithSimd for AssignBlock<'_> {
                     Distance::SquaredEuclidean => {
                         crate::simd::pulp::l2_squared_distance(simd, vector, centroid)
                     }
-                    // Cosine inputs are normalized once at the public assignment boundary.
+                    // Cosine centroids and the current query chunk are already normalized.
                     Distance::NegativeDotProduct | Distance::Cosine => {
                         -crate::simd::pulp::dot_product(simd, vector, centroid)
                     }
@@ -102,8 +118,9 @@ fn validate_assignment_inputs(vecs: &[f32], centroids: &[f32], dim: usize, label
 
 /// Assign vectors to centroids with single-threaded scoring.
 ///
-/// Cosine assignment requires finite nonzero row norms and normalizes copies of the inputs
-/// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
+/// Cosine assignment requires finite nonzero row norms. Centroids are normalized once;
+/// query chunks use reusable scratch before dot-product scoring. Input slices are unchanged.
+/// An invalid cosine row panics and may leave some labels assigned. Already-normalized callers
 /// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
 /// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
 /// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
@@ -115,22 +132,36 @@ pub fn base_assign(
     labels: &mut [u32],
 ) {
     validate_assignment_inputs(vecs, centroids, dim, labels);
-    let vecs = normalize_assignment_rows(vecs, dim, distance);
     let centroids = normalize_assignment_rows(centroids, dim, distance);
-    pulp::Arch::new().dispatch(AssignBlock {
-        vecs: &vecs,
-        centroids: &centroids,
-        dim,
-        distance,
-        labels,
-    });
+    let mut scratch = Vec::new();
+    let arch = pulp::Arch::new();
+    let block_size = if distance == Distance::Cosine {
+        RAYON_BLOCK_SIZE
+    } else {
+        labels.len().max(1)
+    };
+    for (labels, vecs) in labels
+        .chunks_mut(block_size)
+        .zip(vecs.chunks(dim * block_size))
+    {
+        arch.dispatch(AssignBlock {
+            vecs,
+            centroids: &centroids,
+            dim,
+            distance,
+            labels,
+            scratch: &mut scratch,
+        });
+    }
 }
 
 /// Assign vectors to centroids in multi-threads.
 ///
-/// Cosine assignment requires finite nonzero row norms and normalizes copies of the inputs
-/// once before dot-product scoring. Input slices are unchanged. Already-normalized callers
-/// can use [`Distance::NegativeDotProduct`] to avoid copying and normalization.
+/// Cosine assignment requires finite nonzero row norms. Centroids are normalized once;
+/// query chunks use reusable task-local scratch before dot-product scoring, without a full input
+/// copy. Input slices are unchanged. An invalid cosine row panics and may leave some labels assigned.
+/// Already-normalized callers can use [`Distance::NegativeDotProduct`] to avoid copying and
+/// normalization.
 /// Scores use the `f32` dot kernel, so near ties may differ from direct `f64` cosine scoring.
 /// Scoring uses ordinary `f32` arithmetic; rescale extreme magnitudes to avoid overflow.
 pub fn base_assign_parallel(
@@ -141,18 +172,18 @@ pub fn base_assign_parallel(
     labels: &mut [u32],
 ) {
     validate_assignment_inputs(vecs, centroids, dim, labels);
-    let vecs = normalize_assignment_rows(vecs, dim, distance);
     let centroids = normalize_assignment_rows(centroids, dim, distance);
     labels
         .par_chunks_mut(RAYON_BLOCK_SIZE)
         .zip(vecs.par_chunks(dim * RAYON_BLOCK_SIZE))
-        .for_each(|(labels, vecs)| {
+        .for_each_init(Vec::new, |scratch, (labels, vecs)| {
             pulp::Arch::new().dispatch(AssignBlock {
                 vecs,
                 centroids: &centroids,
                 dim,
                 distance,
                 labels,
+                scratch,
             });
         });
 }
@@ -428,11 +459,11 @@ impl KMeans {
         dim: usize,
         subsample: bool,
     ) -> Result<KMeansFit, KMeansError> {
-        if let Some(seed) = self.config.seed {
-            self.fit_inner(vecs, dim, subsample, &mut StdRng::seed_from_u64(seed))
-        } else {
-            self.fit_inner(vecs, dim, subsample, &mut rand::rng())
-        }
+        let mut rng = self
+            .config
+            .seed
+            .map_or_else(|| StdRng::from_rng(&mut rand::rng()), StdRng::seed_from_u64);
+        self.fit_inner(vecs, dim, subsample, &mut rng)
     }
 
     fn fit_inner<R: Rng + ?Sized>(
@@ -686,6 +717,34 @@ mod tests {
     }
 
     #[test]
+    fn seeded_fit_dispatch_preserves_the_rng_stream() {
+        let rows = (0..600)
+            .map(|row| [row as f32, (row % 7) as f32])
+            .collect::<Vec<_>>();
+        let model = KMeans::new(KMeansConfig {
+            n_clusters: Some(2),
+            max_iter: 2,
+            seed: Some(42),
+            ..Default::default()
+        });
+        for subsample in [false, true] {
+            let expected = model
+                .fit_inner(
+                    as_continuous_vec(&rows),
+                    2,
+                    subsample,
+                    &mut StdRng::seed_from_u64(42),
+                )
+                .unwrap();
+            let actual = model
+                .fit_dispatch(as_continuous_vec(&rows), 2, subsample)
+                .unwrap();
+            assert_eq!(actual.centroids, expected.centroids);
+            assert_eq!(actual.labels, expected.labels);
+        }
+    }
+
+    #[test]
     fn residual_fit_returns_centroids_in_input_coordinates() {
         let rows = (0..40)
             .map(|index| vec![10_000.0 + index as f32, -20_000.0 + 2.0 * index as f32])
@@ -846,7 +905,7 @@ mod tests {
     fn cosine_assignment_matches_reference_across_scales_and_dimensions() {
         let tiny = f32::from_bits(1);
         for dim in [2, 3, 8, 9, 32, 65, 768] {
-            let mut vectors = vec![0.0; 67 * dim];
+            let mut vectors = vec![0.0; 129 * dim];
             for (row, vector) in vectors.chunks_exact_mut(dim).enumerate() {
                 let (left, right) = match row % 4 {
                     0 => (f32::MAX / 4.0, f32::MAX / 2.0),
@@ -895,14 +954,20 @@ mod tests {
                         .0
                 })
                 .collect::<Vec<_>>();
-            let mut labels = vec![0; expected.len()];
             for assign in [base_assign, base_assign_parallel] {
-                assign(&vectors, &centroids, dim, Distance::Cosine, &mut labels);
-                assert_eq!(labels, expected, "dimension {dim}");
+                for rows in [0, 1, 63, 64, 65, 129] {
+                    let mut labels = vec![u32::MAX; rows];
+                    assign(
+                        &vectors[..rows * dim],
+                        &centroids,
+                        dim,
+                        Distance::Cosine,
+                        &mut labels,
+                    );
+                    assert_eq!(labels, expected[..rows], "dimension {dim}, rows {rows}");
+                }
                 assert_eq!(vectors, original_vectors);
                 assert_eq!(centroids, original_centroids);
-                // Empty query batches are permitted.
-                assign(&[], &centroids, dim, Distance::Cosine, &mut []);
             }
         }
     }
@@ -921,6 +986,14 @@ mod tests {
                         .is_err()
                     );
                 }
+                let mut vectors = [1.0, 0.0].repeat(129);
+                vectors[128 * 2] = invalid;
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        assign(&vectors, &[1.0, 0.0], 2, Distance::Cosine, &mut [0; 129]);
+                    })
+                    .is_err()
+                );
             }
         }
     }

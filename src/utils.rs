@@ -128,7 +128,9 @@ pub(crate) fn normalize_nonzero_row(vector: &mut [f32]) -> Option<bool> {
 /// accumulated in `f64` so finite `f32` components do not overflow the sum. The reduction
 /// uses independent accumulators, so results can differ slightly from a sequential sum.
 /// Rows whose inverse norm is not a normal `f32` are scaled in `f64` to avoid range loss.
-/// Rows are processed in parallel; on error, some other rows may already be normalized.
+/// Below 1M elements a serial pass avoids thread-pool latency; larger inputs use parallel
+/// blocks of 64 rows so per-row task scheduling does not dominate. On error, some other
+/// rows may already be normalized.
 pub fn try_normalize_rows(
     vecs: &mut [f32],
     dim: usize,
@@ -137,14 +139,36 @@ pub fn try_normalize_rows(
     if dim == 0 || !vecs.len().is_multiple_of(dim) {
         return Err(NormalizeRowsError::InvalidLayout);
     }
-    vecs.par_chunks_exact_mut(dim)
+    const ROWS_PER_BLOCK: usize = 64;
+    const SERIAL_ELEMENTS: usize = 1 << 20;
+    if vecs.len() < SERIAL_ELEMENTS {
+        return vecs
+            .chunks_exact_mut(dim)
+            .enumerate()
+            .try_for_each(|(row, vector)| normalize_row(row, vector, allow_zero));
+    }
+    vecs.par_chunks_mut(dim * ROWS_PER_BLOCK)
         .enumerate()
-        .try_for_each(|(row, vector)| match normalize_nonzero_row(vector) {
-            Some(true) => Ok(()),
-            Some(false) if allow_zero => Ok(()),
-            None if allow_zero => Err(NormalizeRowsError::NonFiniteNorm(row)),
-            _ => Err(NormalizeRowsError::InvalidNorm(row)),
+        .try_for_each(|(block, rows)| {
+            rows.chunks_exact_mut(dim)
+                .enumerate()
+                .try_for_each(|(offset, vector)| {
+                    normalize_row(block * ROWS_PER_BLOCK + offset, vector, allow_zero)
+                })
         })
+}
+
+fn normalize_row(
+    row: usize,
+    vector: &mut [f32],
+    allow_zero: bool,
+) -> Result<(), NormalizeRowsError> {
+    match normalize_nonzero_row(vector) {
+        Some(true) => Ok(()),
+        Some(false) if allow_zero => Ok(()),
+        None if allow_zero => Err(NormalizeRowsError::NonFiniteNorm(row)),
+        _ => Err(NormalizeRowsError::InvalidNorm(row)),
+    }
 }
 
 /// Read the fvces/ivces file.
