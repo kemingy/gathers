@@ -9,7 +9,7 @@ tree literature is the source of the traversal and training rules.
 
 `fit` automatically routes exact assignment through greedy descent when the build rules
 permit a hierarchy (3,136+ centroids); below that it stays on the flat matrix/SIMD path.
-The public `Hierarchy::assign` is best-first with radii.
+The public `Hierarchy::assign` is budgeted best-first for all distances.
 
 ## Goal
 
@@ -40,10 +40,11 @@ candidate set.
    contiguous `&[f32]` plus `dim` per level, matching the existing flat layout
    contract. Store a `u32` leaf-to-original-index map when outputs must keep
    the original centroid order.
-4. Precompute each node's radius `r_n = max ||member - node_centroid||` over
-   all fine centroids in its subtree; this enables the exact early-termination
-   rule below. A radius over immediate child centers alone is insufficient
-   for that rule.
+4. Per-node radii `r_n = max ||member - node_centroid||` over a subtree were
+   dropped after measurement (see below): at high dimension they prune nothing,
+   and the 95th-percentile variant stays vacuous while sacrificing recall.
+   Nodes store only centroids and L2 norms (norms enable cosine scoring without
+   normalizing stored centroids).
 
 For 1,000,000 input rows, the proposed leaf count is about 3,943 fine
 centroids. Its square root is about 63, but the 196-child cap permits only
@@ -65,28 +66,20 @@ all points.
 ### Priority-queue backtracking (best-node-first)
 
 Generalize best-bin-first search (FLANN's priority-queue traversal on k-means
-trees) to any depth. For exact Euclidean search:
+trees) to any depth. Cells sit in a min-heap ordered by center score; popping a
+routing node expands its children, and popping a leaf cell scans its fine
+centroids exactly. The scan stops after `sqrt(top-level cells)` leaf cells
+(capped at 10) per query, the analogue of FLANN's `checks` / IVF's `nprobe`.
+In the depth-2 special case this is multi-probe IVF.
 
-1. Compute each root child's lower bound
-   `lb_n = max(0, ||q - node_centroid|| - r_n)` and push it on a min-heap
-   keyed by `lb_n`.
-2. Pop the node with the smallest bound. If it is internal, compute exact
-   distances and bounds for its children and push them. If it is a leaf, scan
-   its fine centroids exactly and update the best distance.
-3. **Early termination (radii rule):** stop when the heap's smallest bound is
-   at least the best distance. By the triangle inequality, no remaining
-   subtree can improve the result. Ordering by center distance alone cannot
-   justify this stop because a farther center can have a larger radius and a
-   smaller bound.
-
-The bound uses Euclidean distances. With `SquaredEuclidean` scores, compare
-`lb_n²` with the best squared distance. `NegativeDotProduct`, `Cosine`, and approximate
-RaBitQ scores do not support this exact stopping rule; use a scan budget
-(`max_nodes`, the analogue of FLANN's `checks`) for those paths. Greedy descent
-is a separate one-path search. Budgeted best-first search can revisit sibling
-subtrees to improve recall, at the cost of a heap and extra scans. In the
-depth-2 special case, this resembles multi-probe IVF, with a provable stop
-only for the exact Euclidean path.
+The classic exact early-termination rule (`lb_n = max(0, ||q - c_n|| - r_n)`,
+stop when the heap minimum reaches the best distance) was implemented and
+measured, then removed: in high dimensions radii cover most of a cell's width,
+so the bound clamps to zero for nearly every cell — 19.8/20 cells expanded per
+query on GIST-960, i.e. flat-scan cost with heap overhead. Tightening radii to
+the 95th percentile of member distances does not fix the bound (still 18.4/20)
+and drops recall to ~48% when the budget interacts with vacuous bounds. Greedy
+descent is a separate one-path search.
 
 ### Recall failure mode (both variants)
 
@@ -129,7 +122,7 @@ training each routing layer:
   pattern in this repository). With a fixed partition, a repaired centroid moved
   next to its donor stays invisible to the donor's rows, so `fit` rebuilds the
   hierarchy after any iteration that repaired empties and otherwise refreshes
-  coordinates and radii in place.
+  coordinates and norms in place.
 - **Fan-out and depth**: from `m` previous-layer centroids, choose roughly
   `min(√m, m / 196)` centroids for the new layer, rounding down and stopping
   if the result is below 16. K-means can produce uneven cells, so rebalance
@@ -152,10 +145,9 @@ training each routing layer:
   fan-out or adding backtracking over adding levels once `L ≥ 3`.
 - Inside `fit`, the saving multiplies by `max_iter * n`; this is the strongest
   use case. Use greedy descent there.
-- For the public assign API (`Hierarchy::assign`), best-first uses the radii
-  exact stop for squared Euclidean and an internal budget of
-  `sqrt(top-level cells)` leaf cells (capped at 10) for dot/cosine — no public
-  knob; the flat `base_assign` path remains for callers that need a
+- For the public assign API (`Hierarchy::assign`), best-first is budgeted for
+  all distances: `sqrt(top-level cells)` leaf cells per query, capped at 10 —
+  no public knob; the flat `base_assign` path remains for callers that need a
   guaranteed-exact scan.
 
 ## Measured results (Apple M5 Pro)
@@ -168,8 +160,10 @@ recall (500 queries, dim 8): ~0.93-0.98 at k = 3,200 (16 cells, budget 4) and
 **Exact best-first L2 does not prune in high dimensions**: radii cover most of
 the cell width, so lower bounds rarely exclude a subtree — it matches flat-scan
 speed on uniform data (1.0× at k ≤ 16k, 0.69× at 65k from heap overhead) and on
-GIST-960 centroids (412 ms vs 397 ms flat for 20k queries). Its value is the
-exactness guarantee, not speed; greedy remains the fit-time path.
+GIST-960 centroids (412 ms vs 397 ms flat for 20k queries). The 95th-percentile
+radius variant stays vacuous (18.4/20 cells still unprunable) while cutting
+recall to ~48%, so the exact stop was removed entirely in favor of the bounded
+budget for all distances. Greedy remains the fit-time path.
 
 End-to-end GIST (1M×960 base, 400k training rows, PCA to 128, k = 3,943, 8
 threads): `fit_ms` 6,668 → 1,327 ms (5.0×) with identical query inertia. With
@@ -178,10 +172,12 @@ reconstruction.
 
 Assignment recall on real data (centroids trained on full GIST, k = 3,943,
 dim 960; the 1,000 gist_query vectors as queries, flat assignment as ground
-truth): best-first is exact for L2 (1,000/1,000) and dot (1,000/1,000 at
-5 cells), 93.1% for cosine; greedy holds 80.2% for L2 but only 9.8% for dot —
-Euclidean routing is a poor surrogate for dot when centroid magnitudes vary, so
-greedy-in-fit relies on dot training's unit-norm centroids.
+truth), budgeted best-first at 5 cells: L2 99.8% (2.9× faster than flat), dot
+100% (5.4×), cosine 93.1% (2.4×). Greedy holds 80.2% for L2 but only 9.8% for
+dot — Euclidean routing is a poor surrogate for dot when centroid magnitudes
+vary, so greedy-in-fit relies on dot training's unit-norm centroids. Note the
+heap must be ordered by center score, not lower bounds: ordering by vacuous
+bounds collapses budgeted L2 recall to 27%.
 
 ## Complexity summary
 
@@ -189,11 +185,11 @@ greedy-in-fit relies on dot training's unit-norm centroids.
 | --- | --- | --- |
 | Flat SIMD | `k` | centroids |
 | Greedy descent | top-layer size + child-list sizes along one path | hierarchy centroids, offsets |
-| Best-first with radii | up to all routing nodes and all `k` fine centroids; exact when the minimum lower bound cannot improve the result | + heap, per-node radii |
+| Best-first (budgeted) | top layer + expansions + `sqrt(top)` leaf-cell scans | + heap, per-node norms |
 
 Each stored centroid uses `4 * dim` bytes. With `k` fine centroids and routing
 layer sizes `k_1, …, k_L` from bottom to top, the tree stores
-`k + Σ_{i=1}^{L} k_i` centroid vectors, plus offsets, radii, and any
+`k + Σ_{i=1}^{L} k_i` centroid vectors, plus offsets, norms, and any
 leaf-to-original-index map.
 
 ## References
