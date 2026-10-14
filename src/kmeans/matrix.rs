@@ -33,12 +33,28 @@ fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     Some(values)
 }
 
-fn matmul_block_size(num_centroids: usize, num_threads: usize) -> Option<usize> {
+fn matmul_block_size(
+    num_vectors: usize,
+    num_centroids: usize,
+    num_threads: usize,
+) -> Option<usize> {
     let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
     let scratch_denominator = centroid_block_size.checked_mul(num_threads)?;
     let max_block_size = MAX_MATRIX_SCRATCH_ELEMENTS.checked_div(scratch_denominator)?;
-    (max_block_size >= MIN_MATMUL_BLOCK_SIZE)
-        .then(|| PREFERRED_MATMUL_BLOCK_SIZE.min(1 << max_block_size.ilog2()))
+    if max_block_size < MIN_MATMUL_BLOCK_SIZE {
+        return None;
+    }
+    // Size tiles for parallel batches, rounding up to amortize matrix packing.
+    // Keep a 64-row minimum and retain 512-row tiles for bulk work.
+    let rows_per_worker = num_vectors.div_ceil(num_threads).max(MIN_MATMUL_BLOCK_SIZE);
+    let parallel_block_size = rows_per_worker
+        .min(PREFERRED_MATMUL_BLOCK_SIZE)
+        .next_power_of_two();
+    Some(
+        PREFERRED_MATMUL_BLOCK_SIZE
+            .min(1 << max_block_size.ilog2())
+            .min(parallel_block_size),
+    )
 }
 
 fn stable_l2_norm(values: &[f32]) -> f32 {
@@ -172,7 +188,7 @@ impl MatrixAssignmentWorkspace {
         {
             return None;
         }
-        matmul_block_size(num_centroids, rayon::current_num_threads())?;
+        matmul_block_size(num_vectors, num_centroids, rayon::current_num_threads())?;
 
         let mut vector_norms = try_zeroed(num_vectors)?;
         vector_norms
@@ -217,7 +233,8 @@ impl MatrixAssignmentWorkspace {
         // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
         let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
-        let Some(block_size) = matmul_block_size(num_centroids, rayon::current_num_threads())
+        let Some(block_size) =
+            matmul_block_size(labels.len(), num_centroids, rayon::current_num_threads())
         else {
             base_assign_parallel(vecs, centroids, dim, self.distance, labels);
             return;
@@ -382,12 +399,33 @@ mod tests {
 
     #[test]
     fn test_matrix_assignment_adapts_block_size_to_worker_scratch_budget() {
-        assert_eq!(matmul_block_size(4096, 16), Some(512));
-        assert_eq!(matmul_block_size(131_073, 16), Some(512));
-        assert_eq!(matmul_block_size(4096, 128), Some(256));
-        assert_eq!(matmul_block_size(4096, 256), Some(128));
-        assert_eq!(matmul_block_size(4096, 512), Some(64));
-        assert_eq!(matmul_block_size(4096, 513), None);
+        assert_eq!(matmul_block_size(1_000_000, 4096, 16), Some(512));
+        assert_eq!(matmul_block_size(1_000_000, 131_073, 16), Some(512));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 128), Some(256));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 256), Some(128));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 512), Some(64));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 513), None);
+    }
+
+    #[test]
+    fn test_matrix_blocks_expose_parallel_work_with_bounded_scratch() {
+        for threads in [1, 3, 4, 6, 8, 12, 16] {
+            for rows in [1000, 1537, 3001, 8192, 65_536] {
+                let block = matmul_block_size(rows, 4096, threads).unwrap();
+                assert!(block.is_power_of_two());
+                assert!((64..=512).contains(&block));
+                assert!(
+                    block * PREFERRED_CENTROID_BLOCK_SIZE * threads
+                        <= super::MAX_MATRIX_SCRATCH_ELEMENTS
+                );
+                if rows >= 64 * threads {
+                    assert!(rows.div_ceil(block) >= threads.div_ceil(2));
+                }
+            }
+        }
+        assert_eq!(matmul_block_size(1000, 4096, 1), Some(512));
+        assert_eq!(matmul_block_size(65_536, 4096, 16), Some(512));
+        assert_eq!(matmul_block_size(1000, 4096, 0), None);
     }
 
     #[test]
@@ -426,7 +464,7 @@ mod tests {
     #[test]
     fn test_matrix_assignment_matches_direct_across_centroid_tiles() {
         let mut rng = seeded_rng();
-        let dim = 64;
+        let dim = 65;
         let num_vectors = 513;
         let num_centroids = PREFERRED_CENTROID_BLOCK_SIZE + 1;
         let vecs = (0..num_vectors * dim)
@@ -436,7 +474,6 @@ mod tests {
             .map(|_| rng.random::<f32>())
             .collect::<Vec<_>>();
         let mut expected = vec![0; num_vectors];
-        let mut actual = vec![0; num_vectors];
 
         base_assign(
             &vecs,
@@ -445,22 +482,31 @@ mod tests {
             Distance::SquaredEuclidean,
             &mut expected,
         );
-        let mut workspace = MatrixAssignmentWorkspace::try_new(
-            &vecs,
-            num_centroids,
-            dim,
-            Distance::SquaredEuclidean,
-        )
-        .unwrap();
-        workspace.assign(&vecs, &centroids, dim, &mut actual);
+        for threads in [1, 4, 8, 16] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let mut actual = vec![0; num_vectors];
+                    let mut workspace = MatrixAssignmentWorkspace::try_new(
+                        &vecs,
+                        num_centroids,
+                        dim,
+                        Distance::SquaredEuclidean,
+                    )
+                    .unwrap();
+                    workspace.assign(&vecs, &centroids, dim, &mut actual);
 
-        assert_eq!(actual, expected);
+                    assert_eq!(actual, expected);
+                });
+        }
     }
 
     #[test]
     fn test_matrix_dot_product_matches_direct_across_centroid_tiles() {
         let mut rng = seeded_rng();
-        let dim = 64;
+        let dim = 65;
         let num_vectors = 513;
         let num_centroids = PREFERRED_CENTROID_BLOCK_SIZE + 1;
         let vecs = (0..num_vectors * dim)
@@ -470,7 +516,6 @@ mod tests {
             .map(|_| rng.random::<f32>())
             .collect::<Vec<_>>();
         let mut expected = vec![0; num_vectors];
-        let mut actual = vec![0; num_vectors];
 
         base_assign(
             &vecs,
@@ -479,16 +524,25 @@ mod tests {
             Distance::NegativeDotProduct,
             &mut expected,
         );
-        let mut workspace = MatrixAssignmentWorkspace::try_new(
-            &vecs,
-            num_centroids,
-            dim,
-            Distance::NegativeDotProduct,
-        )
-        .unwrap();
-        workspace.assign(&vecs, &centroids, dim, &mut actual);
+        for threads in [1, 4, 8, 16] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let mut actual = vec![0; num_vectors];
+                    let mut workspace = MatrixAssignmentWorkspace::try_new(
+                        &vecs,
+                        num_centroids,
+                        dim,
+                        Distance::NegativeDotProduct,
+                    )
+                    .unwrap();
+                    workspace.assign(&vecs, &centroids, dim, &mut actual);
 
-        assert_eq!(actual, expected);
+                    assert_eq!(actual, expected);
+                });
+        }
     }
 
     #[test]
