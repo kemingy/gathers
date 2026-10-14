@@ -134,6 +134,63 @@ fn assignment_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+fn hierarchy_assign_benchmark(c: &mut Criterion) {
+    const QUERIES: usize = 2048;
+    const DIM: usize = 128;
+
+    let mut rng = seeded_rng();
+    let queries: Vec<f32> = (0..QUERIES * DIM).map(|_| rng.random()).collect();
+    let mut labels = vec![0; QUERIES];
+    let mut group = c.benchmark_group("hierarchy_assign");
+    group.sample_size(10);
+    for k in [4_096, 16_384, 65_536] {
+        let centroids: Vec<f32> = (0..k * DIM).map(|_| rng.random()).collect();
+        let hierarchy = gathers::kmeans::Hierarchy::build(&centroids, DIM, Some(42)).unwrap();
+        group.bench_function(format!("flat_l2_{k}x{DIM}"), |b| {
+            b.iter(|| {
+                base_assign_parallel(
+                    black_box(&queries),
+                    black_box(&centroids),
+                    DIM,
+                    Distance::SquaredEuclidean,
+                    black_box(&mut labels),
+                )
+            })
+        });
+        group.bench_function(format!("greedy_l2_{k}x{DIM}"), |b| {
+            b.iter(|| {
+                hierarchy.assign_greedy_parallel(
+                    black_box(&queries),
+                    DIM,
+                    Distance::SquaredEuclidean,
+                    black_box(&mut labels),
+                )
+            })
+        });
+        group.bench_function(format!("bestfirst_l2_{k}x{DIM}"), |b| {
+            b.iter(|| {
+                hierarchy.assign_parallel(
+                    black_box(&queries),
+                    DIM,
+                    Distance::SquaredEuclidean,
+                    black_box(&mut labels),
+                )
+            })
+        });
+        group.bench_function(format!("bestfirst_dot_{k}x{DIM}"), |b| {
+            b.iter(|| {
+                hierarchy.assign_parallel(
+                    black_box(&queries),
+                    DIM,
+                    Distance::NegativeDotProduct,
+                    black_box(&mut labels),
+                )
+            })
+        });
+    }
+    group.finish();
+}
+
 fn kmeans_benchmark(c: &mut Criterion) {
     const NUM_VECTORS: usize = 50_176;
     const NUM_CENTROIDS: usize = 256;
@@ -180,5 +237,6 @@ fn kmeans_benchmark(c: &mut Criterion) {
 }
 
 criterion_group!(assignment_benches, assignment_benchmark);
+criterion_group!(hierarchy_benches, hierarchy_assign_benchmark);
 criterion_group!(kmeans_benches, kmeans_benchmark);
-criterion_main!(kmeans_benches, assignment_benches);
+criterion_main!(kmeans_benches, assignment_benches, hierarchy_benches);

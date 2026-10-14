@@ -1,6 +1,7 @@
 //! K-means clustering implementation.
 
 mod config;
+mod hierarchy;
 #[cfg(not(feature = "perf"))]
 mod matrix;
 mod reduced;
@@ -11,6 +12,7 @@ use std::time::Instant;
 
 use aligned_vec::AVec;
 pub use config::{KMeansConfig, ReductionConfig};
+pub use hierarchy::Hierarchy;
 use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
@@ -259,7 +261,7 @@ pub fn update_centroids(
     validate_shape(vecs, dim)?;
     validate_shape(centroids, dim)?;
     let mut rng = rand::rng();
-    update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng)
+    update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng).map(|(diff, _)| diff)
 }
 
 // Inputs and label bounds are validated by the caller. Keep ordinary f32 accumulation unchanged,
@@ -313,7 +315,7 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     labels: &[u32],
     unit_directions: bool,
     rng: &mut R,
-) -> Result<f64, KMeansError> {
+) -> Result<(f64, usize), KMeansError> {
     validate_assignment_inputs(vecs, centroids, dim, labels);
     let num_centroids = centroids.len() / dim;
     assert!(
@@ -398,7 +400,7 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     if empty_cluster_count != 0 {
         debug!("fixed {empty_cluster_count} empty clusters");
     }
-    Ok(diff)
+    Ok((diff, empty_cluster_count))
 }
 
 /// K-means clustering algorithm.
@@ -527,8 +529,25 @@ impl KMeans {
         let mut labels: Vec<u32> = vec![0; training_num];
         let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
             || vecs.len() <= LARGE_CLUSTER_THRESHOLD;
+        // Above the layer-rule threshold (3,136+ centroids), route exact assignment through
+        // a centroid hierarchy. The partition is fixed at seeding; coordinates and radii
+        // are refreshed after each centroid update.
         #[cfg(not(feature = "perf"))]
-        let mut matrix_workspace = if use_exact_assignment {
+        let mut hierarchy = if use_exact_assignment {
+            let hierarchy = Hierarchy::build_with_rng(rng, &centroids, dim);
+            if let Some(hierarchy) = &hierarchy {
+                debug!(
+                    "hierarchical assignment: {} levels over {} centroids",
+                    hierarchy.levels(),
+                    num_clusters
+                );
+            }
+            hierarchy
+        } else {
+            None
+        };
+        #[cfg(not(feature = "perf"))]
+        let mut matrix_workspace = if use_exact_assignment && hierarchy.is_none() {
             matrix::MatrixAssignmentWorkspace::try_new(
                 &vecs,
                 centroids.len() / dim,
@@ -541,6 +560,34 @@ impl KMeans {
         debug!("start training");
         for i in 0..self.config.max_iter {
             let start_time = Instant::now();
+            #[cfg(not(feature = "perf"))]
+            if let Some(hierarchy) = &mut hierarchy {
+                hierarchy.assign_greedy_parallel(&vecs, dim, assignment_distance, &mut labels);
+                let (diff, repaired) = update_centroids_inner(
+                    &vecs,
+                    &mut centroids,
+                    dim,
+                    &labels,
+                    assignment_distance == Distance::NegativeDotProduct,
+                    rng,
+                )?;
+                // Empty-cluster repair moves a centroid next to its donor; with a fixed
+                // partition the moved centroid stays invisible to the donor's rows and
+                // repair cascades. Rebuild so the partition reflects current coordinates.
+                if repaired > 0 {
+                    if let Some(rebuilt) = Hierarchy::build_with_rng(rng, &centroids, dim) {
+                        *hierarchy = rebuilt;
+                    }
+                } else {
+                    hierarchy.refresh(&centroids);
+                }
+                debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
+                if diff < f64::from(self.config.tolerance) {
+                    debug!("converged at iter {i}");
+                    break;
+                }
+                continue;
+            }
             if use_exact_assignment {
                 #[cfg(feature = "perf")]
                 base_assign(&vecs, &centroids, dim, assignment_distance, &mut labels);
@@ -556,7 +603,7 @@ impl KMeans {
                 #[cfg(not(feature = "perf"))]
                 rabitq_assign_parallel_inner(&vecs, &centroids, dim, &mut labels, rng);
             }
-            let diff = update_centroids_inner(
+            let (diff, _) = update_centroids_inner(
                 &vecs,
                 &mut centroids,
                 dim,
@@ -601,6 +648,46 @@ mod tests {
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    fn fit_routes_large_cluster_counts_through_the_hierarchy() {
+        // 200 well-separated blobs x 624 rows = 124,800 rows; k = 3,200 centroids is above
+        // the 3,136 build threshold, so assignment goes through the hierarchy.
+        let dim = 4;
+        let blobs = 200;
+        let per_blob = 624;
+        let mut rng = seeded_rng();
+        let mut rows = Vec::new();
+        for blob in 0..blobs {
+            for _ in 0..per_blob {
+                let mut row = vec![blob as f32 * 100.0];
+                for _ in 1..dim {
+                    row.push(rng.random::<f32>() - 0.5);
+                }
+                rows.extend_from_slice(&row);
+            }
+        }
+        let clusters = 3_200;
+        let model = KMeans::new(KMeansConfig {
+            n_clusters: Some(clusters),
+            max_iter: 3,
+            seed: Some(42),
+            ..Default::default()
+        });
+        let fit = model
+            .fit_sample(as_continuous_vec(&[rows.as_slice()]), dim)
+            .unwrap();
+        assert_eq!(fit.centroids.len(), clusters as usize * dim);
+        assert!(fit.centroids.iter().all(|value| value.is_finite()));
+        // Every assigned centroid stays within its blob (separation is 100, noise < 1).
+        let mut total = 0.0_f64;
+        for (row, &label) in rows.chunks_exact(dim).zip(&fit.labels) {
+            let centroid = &fit.centroids[label as usize * dim..(label as usize + 1) * dim];
+            assert!((centroid[0] - row[0]).abs() < 5.0);
+            total += f64::from(squared_euclidean(row, centroid));
+        }
+        assert!(total / ((blobs * per_blob) as f64) < 1.0);
+    }
 
     #[test]
     fn finite_extreme_rows_have_representable_means() {
@@ -851,7 +938,7 @@ mod tests {
 
         let mut previous = [1.0, 0.0];
         let flat = vectors.iter().flatten().copied().collect::<Vec<_>>();
-        let diff = update_centroids_inner(
+        let (diff, repaired) = update_centroids_inner(
             &flat,
             &mut previous,
             2,
@@ -862,6 +949,7 @@ mod tests {
         .unwrap();
         assert_eq!(previous, [1.0, 0.0]);
         assert_eq!(diff, 0.0);
+        assert_eq!(repaired, 0);
     }
 
     #[test]
