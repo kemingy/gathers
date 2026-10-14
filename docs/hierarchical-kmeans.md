@@ -68,8 +68,14 @@ all points.
 Generalize best-bin-first search (FLANN's priority-queue traversal on k-means
 trees) to any depth. Cells sit in a min-heap ordered by center score; popping a
 routing node expands its children, and popping a leaf cell scans its fine
-centroids exactly. The scan stops after `sqrt(top-level cells)` leaf cells
-(capped at 10) per query, the analogue of FLANN's `checks` / IVF's `nprobe`.
+centroids exactly. The scan stops after a bounded budget of leaf cells per
+query, the analogue of FLANN's `checks` / IVF's `nprobe`. The budget defaults
+to `sqrt(top-level cells)` capped at 10 — no established rule exists for the
+probe count — and `Hierarchy::calibrate` replaces it with a measured value:
+representative rows are searched with an unlimited budget, and the budget
+becomes the 99th percentile of the leaf-scan counts needed to reach each row's
+true cell. Calibration adapts the probe count to the data geometry and scoring
+function (cosine needs more probes than L2 at the same tree; see below).
 In the depth-2 special case this is multi-probe IVF.
 
 The classic exact early-termination rule (`lb_n = max(0, ||q - c_n|| - r_n)`,
@@ -146,7 +152,8 @@ training each routing layer:
 - Inside `fit`, the saving multiplies by `max_iter * n`; this is the strongest
   use case. Use greedy descent there.
 - For the public assign API (`Hierarchy::assign`), best-first is budgeted for
-  all distances: `sqrt(top-level cells)` leaf cells per query, capped at 10 —
+  all distances: `sqrt(top-level cells)` leaf cells per query by default
+  (capped at 10), or a data-adaptive budget after `Hierarchy::calibrate` —
   no public knob; the flat `base_assign` path remains for callers that need a
   guaranteed-exact scan.
 
@@ -179,13 +186,20 @@ vary, so greedy-in-fit relies on dot training's unit-norm centroids. Note the
 heap must be ordered by center score, not lower bounds: ordering by vacuous
 bounds collapses budgeted L2 recall to 27%.
 
+Calibration (`Hierarchy::calibrate` on 500k gist_learn rows, ~18 ms one-time)
+corrects the default in both directions on the same setup: L2 drops to 4 cells
+at 99.2% recall (6.2 ms vs 7.6 ms), dot to 3 cells at 99.1% (2.2 ms vs
+3.5 ms), and cosine rises to 8 cells, lifting recall from 93.1% to 99.5%
+(11.0 ms vs 7.2 ms). The sqrt default over-probes L2/dot and under-probes
+cosine; the measured budget holds ~99% recall for each scoring function.
+
 ## Complexity summary
 
 | Method | Distance computations per assignment | Extra state |
 | --- | --- | --- |
 | Flat SIMD | `k` | centroids |
 | Greedy descent | top-layer size + child-list sizes along one path | hierarchy centroids, offsets |
-| Best-first (budgeted) | top layer + expansions + `sqrt(top)` leaf-cell scans | + heap, per-node norms |
+| Best-first (budgeted) | top layer + expansions + budgeted leaf-cell scans | + heap, per-node norms |
 
 Each stored centroid uses `4 * dim` bytes. With `k` fine centroids and routing
 layer sizes `k_1, …, k_L` from bottom to top, the tree stores

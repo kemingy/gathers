@@ -11,7 +11,9 @@
 //! center score, scanning a bounded budget of leaf cells per query. The classic
 //! radii-based exact early stop was measured to prune nothing in high dimensions (even at
 //! the 95th-percentile radius, lower bounds stay vacuous), so it is omitted; the budget
-//! keeps cost predictable for every distance. Routing layers are always trained with
+//! keeps cost predictable for every distance. The budget defaults to `sqrt(top cells)`
+//! capped at 10 and can be adapted to the data geometry with [`Hierarchy::calibrate`].
+//! Routing layers are always trained with
 //! squared Euclidean, the standard monotone surrogate for unit-norm dot/cosine routing.
 //! See `docs/hierarchical-kmeans.md` for the design rules.
 
@@ -19,9 +21,10 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use aligned_vec::AVec;
+use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
-use rayon::iter::{IndexedParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::Distance;
@@ -31,15 +34,22 @@ use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
 const EXPECTED_CHILDREN: usize = 196;
 /// A routing layer is created only when its proposed size reaches this count.
 const MIN_ROUTING_CENTROIDS: usize = 16;
-/// Leaf cells scanned per query in best-first search: `sqrt(top-level cells)` capped at
-/// 10. No established rule exists for the
+/// Default leaf cells scanned per query in best-first search: `sqrt(top-level cells)`
+/// capped at 10. No established rule exists for the
 /// probe count (Faiss/FLANN tune it empirically); this follows the `nlist ≈ sqrt(n)`
-/// precedent applied to the routing layer. Measured recall (500 queries, dim 8, uniform and
+/// precedent applied to the routing layer. [`Hierarchy::calibrate`] replaces this
+/// heuristic with a budget measured on representative data. Measured recall of the
+/// default (500 queries, dim 8, uniform and
 /// directional data): ~0.93-0.98 at k=3,200 (16 cells, budget 4); >= 0.97 at k=16,384
 /// (83 cells, budget 9) and k=65,536 (256 cells, budget 10).
 fn scan_budget(cells: usize) -> usize {
     ((cells as f64).sqrt().ceil() as usize).clamp(1, 10)
 }
+/// Rows sampled by [`Hierarchy::calibrate`].
+const CALIBRATION_QUERIES: usize = 1024;
+/// Coverage target of the calibrated budget: the smallest scan count reaching the true
+/// cell for this share of sampled rows.
+const CALIBRATION_PERCENTILE: f64 = 0.99;
 const RAYON_BLOCK_SIZE: usize = 64;
 
 #[derive(Debug)]
@@ -71,6 +81,9 @@ pub struct Hierarchy {
     levels: Vec<Level>,
     /// Fine-level position -> original centroid index.
     leaf_order: Vec<u32>,
+    /// Leaf cells scanned per query in best-first assignment; the `sqrt(top cells)`
+    /// default until [`Hierarchy::calibrate`] replaces it.
+    budget: u32,
 }
 
 /// Proposed routing-layer size over `m` centroids; `None` when a layer is not worthwhile.
@@ -294,10 +307,12 @@ impl Hierarchy {
         }
 
         levels.push(level);
+        let budget = scan_budget(levels.last().expect("a routing layer exists").len()) as u32;
         Some(Self {
             dim,
             levels,
             leaf_order: leaf_order.expect("a routing layer was created"),
+            budget,
         })
     }
 
@@ -348,6 +363,138 @@ impl Hierarchy {
     /// Number of levels, including the fine level; at least 2.
     pub fn levels(&self) -> usize {
         self.levels.len()
+    }
+
+    /// Leaf cells scanned per query in best-first assignment.
+    pub fn budget(&self) -> usize {
+        self.budget as usize
+    }
+
+    /// Calibrate the best-first scan budget from representative vectors.
+    ///
+    /// Up to 1,024 evenly strided rows are searched with an unlimited budget, recording
+    /// how many leaf cells each row must scan before reaching the cell that holds its
+    /// exact nearest centroid. The budget becomes the 99th percentile of those counts
+    /// (clamped to the number of leaf cells), so it adapts to the data geometry:
+    /// well-separated data lands at 1, concentrated high-dimensional data requests more.
+    /// Pass a sample of the training or expected query distribution; empty input leaves
+    /// the budget unchanged.
+    pub fn calibrate(&mut self, vecs: &[f32], dim: usize, distance: Distance) {
+        assert_eq!(dim, self.dim, "dimension must match the hierarchy");
+        assert!(vecs.len().is_multiple_of(dim), "vectors must be complete");
+        let rows = vecs.len() / dim;
+        if rows == 0 {
+            return;
+        }
+        let take = rows.min(CALIBRATION_QUERIES);
+        let stride = rows / take;
+        let mut counts = vec![0_u32; take];
+        counts.par_iter_mut().enumerate().for_each_init(
+            SearchScratch::default,
+            |scratch, (index, count)| {
+                let start = index * stride * dim;
+                *count = pulp::Arch::new().dispatch(CalibrateQuery {
+                    hierarchy: self,
+                    query: &vecs[start..start + dim],
+                    distance,
+                    scratch,
+                });
+            },
+        );
+        counts.sort_unstable();
+        let rank = ((counts.len() as f64 * CALIBRATION_PERCENTILE).ceil() as usize - 1)
+            .min(counts.len() - 1);
+        self.budget = counts[rank].clamp(1, self.levels[1].len() as u32);
+        debug!(
+            "calibrated scan budget {} from {} rows (p50={}, p95={}, max={})",
+            self.budget,
+            counts.len(),
+            counts[counts.len() / 2],
+            counts[(counts.len() as f64 * 0.95).ceil() as usize - 1],
+            counts[counts.len() - 1]
+        );
+    }
+
+    /// Leaf-scan count needed to reach the cell holding the exact nearest centroid.
+    fn calibrate_one<S: pulp::Simd>(
+        &self,
+        simd: S,
+        query: &[f32],
+        distance: Distance,
+        scratch: &mut SearchScratch,
+    ) -> u32 {
+        let fine = &self.levels[0];
+        score_range(
+            simd,
+            &fine.centroids,
+            &fine.norms,
+            query,
+            self.dim,
+            distance,
+            &mut scratch.scores,
+        );
+        let nearest = scratch
+            .scores
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.total_cmp(right))
+            .map(|(index, _)| index)
+            .expect("the fine level is never empty");
+        // Level-1 cell owning the exact nearest centroid.
+        let target = self.levels[1]
+            .fine_offsets
+            .partition_point(|&offset| offset as usize <= nearest)
+            - 1;
+
+        scratch.heap.clear();
+        let top = self.levels.len() - 1;
+        score_range(
+            simd,
+            &self.levels[top].centroids,
+            &self.levels[top].norms,
+            query,
+            self.dim,
+            distance,
+            &mut scratch.scores,
+        );
+        for (node, &score) in scratch.scores.iter().enumerate() {
+            scratch.heap.push(ScoreEntry {
+                score,
+                level: top as u32,
+                node: node as u32,
+            });
+        }
+        let mut scanned = 0_u32;
+        while let Some(entry) = scratch.heap.pop() {
+            let level = entry.level as usize;
+            let node = entry.node as usize;
+            if level == 1 {
+                scanned += 1;
+                if node == target {
+                    return scanned;
+                }
+                continue;
+            }
+            let start = self.levels[level].child_offsets[node] as usize;
+            let end = self.levels[level].child_offsets[node + 1] as usize;
+            score_range(
+                simd,
+                &self.levels[level - 1].centroids[start * self.dim..end * self.dim],
+                &self.levels[level - 1].norms[start..end],
+                query,
+                self.dim,
+                distance,
+                &mut scratch.scores,
+            );
+            for (offset, &score) in scratch.scores.iter().enumerate() {
+                scratch.heap.push(ScoreEntry {
+                    score,
+                    level: (level - 1) as u32,
+                    node: (start + offset) as u32,
+                });
+            }
+        }
+        unreachable!("every cell expands before the heap empties")
     }
 
     fn validate(&self, vecs: &[f32], dim: usize, labels: &[u32]) {
@@ -407,7 +554,8 @@ impl Hierarchy {
     /// Assign vectors with best-first backtracking.
     ///
     /// Cells are explored in center-score order and the scan is capped at
-    /// `sqrt(top-level cells)` leaf cells per query (at most 10), so cost is bounded and
+    /// [`Hierarchy::budget`] leaf cells per query (the `sqrt(top-level cells)` default, or
+    /// a data-adaptive value after [`Hierarchy::calibrate`]), so cost is bounded and
     /// predictable; results are approximate. Cosine ranking needs no query normalization:
     /// the query norm is constant per query, so `-dot / ||centroid||` ranks identically.
     /// Callers needing an exact scan can use [`crate::kmeans::base_assign`].
@@ -527,8 +675,7 @@ impl Hierarchy {
     ) -> u32 {
         scratch.heap.clear();
         let top = self.levels.len() - 1;
-        let top_count = self.levels[top].len();
-        let mut budget = scan_budget(top_count);
+        let mut budget = self.budget;
         score_range(
             simd,
             &self.levels[top].centroids,
@@ -643,6 +790,23 @@ impl pulp::WithSimd for BestFirstBlock<'_> {
                 .hierarchy
                 .best_first_one(simd, query, self.distance, self.scratch);
         }
+    }
+}
+
+struct CalibrateQuery<'a> {
+    hierarchy: &'a Hierarchy,
+    query: &'a [f32],
+    distance: Distance,
+    scratch: &'a mut SearchScratch,
+}
+
+impl pulp::WithSimd for CalibrateQuery<'_> {
+    type Output = u32;
+
+    #[inline(always)]
+    fn with_simd<S: pulp::Simd>(self, simd: S) -> u32 {
+        self.hierarchy
+            .calibrate_one(simd, self.query, self.distance, self.scratch)
     }
 }
 
@@ -970,6 +1134,7 @@ mod tests {
             dim,
             levels,
             leaf_order: (0..fine_count as u32).collect(),
+            budget: super::scan_budget(4) as u32,
         };
         assert_eq!(hierarchy.levels(), 3);
         let queries = random_rows(100, dim);
@@ -993,5 +1158,78 @@ mod tests {
         let mut greedy = vec![0; 100];
         hierarchy.assign_greedy(&queries, dim, Distance::SquaredEuclidean, &mut greedy);
         assert_eq!(greedy, expected);
+    }
+
+    #[test]
+    fn calibrate_shrinks_the_budget_on_separated_data() {
+        let dim = 8;
+        let centroids = blob_centroids(32, 100, dim);
+        let mut hierarchy = Hierarchy::build(&centroids, dim, Some(42)).unwrap();
+        let default = hierarchy.budget();
+        assert!(default > 1);
+
+        // Queries are fine centroids plus small noise: the exact winner sits in the
+        // first scanned cell, so the calibrated budget collapses to 1.
+        let mut queries = Vec::new();
+        let mut rng = seeded_rng();
+        for query in 0..300 {
+            let index = (query * 31) % 3_200;
+            let mut vector = centroids[index * dim..index * dim + dim].to_vec();
+            vector[0] += rng.random::<f32>() - 0.5;
+            queries.extend_from_slice(&vector);
+        }
+        hierarchy.calibrate(&queries, dim, Distance::SquaredEuclidean);
+        assert_eq!(hierarchy.budget(), 1);
+
+        // Calibrated best-first stays exact on this well-separated data.
+        let mut expected = vec![0; 300];
+        base_assign(
+            &queries,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        let mut actual = vec![0; 300];
+        hierarchy.assign(&queries, dim, Distance::SquaredEuclidean, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn calibrate_grows_the_budget_on_concentrated_data() {
+        // High-dimensional uniform data is near-tied: the true cell rarely ranks first,
+        // so the calibrated budget exceeds 1 yet stays within the leaf-cell count.
+        let dim = 64;
+        let k = 3_200;
+        let centroids = random_rows(k, dim);
+        let queries = random_rows(400, dim);
+        let mut hierarchy = Hierarchy::build(&centroids, dim, Some(42)).unwrap();
+        hierarchy.calibrate(&queries, dim, Distance::SquaredEuclidean);
+        let budget = hierarchy.budget();
+        assert!(budget > 1, "concentrated data should need extra probes");
+        assert!(budget <= 16, "budget cannot exceed the 16 leaf cells");
+
+        // Recall with the calibrated budget beats the p99 coverage target.
+        let mut expected = vec![0; 400];
+        base_assign(
+            &queries,
+            &centroids,
+            dim,
+            Distance::SquaredEuclidean,
+            &mut expected,
+        );
+        let mut actual = vec![0; 400];
+        hierarchy.assign(&queries, dim, Distance::SquaredEuclidean, &mut actual);
+        let recall = expected
+            .iter()
+            .zip(&actual)
+            .filter(|(left, right)| left == right)
+            .count() as f32
+            / 400.0;
+        assert!(recall >= 0.95, "calibrated recall {recall} < 0.95");
+
+        // Empty input is a no-op.
+        hierarchy.calibrate(&[], dim, Distance::SquaredEuclidean);
+        assert_eq!(hierarchy.budget(), budget);
     }
 }
