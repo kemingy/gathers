@@ -44,13 +44,31 @@ s += """\nstatic REVIEW_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomi
 pub fn review_set_matrix_block(block: usize) { REVIEW_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed); }
 """
 (out / "src/kmeans/matrix.rs").write_text(s)
+gemm = (repo / "src/kmeans/matrix/gemm.rs").read_text()
+needle = "    if let (Ok(rows), Ok(cols), Ok(dim)) ="
+assert gemm.count(needle) == 1, (
+    "backend helper changed; update benchmark instrumentation"
+)
+gemm = gemm.replace(
+    needle,
+    "    if REVIEW_ACCELERATE.load(std::sync::atomic::Ordering::Relaxed)\n        && let (Ok(rows), Ok(cols), Ok(dim)) =",
+)
+gemm += """\nstatic REVIEW_ACCELERATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[allow(missing_docs)]
+pub fn review_use_accelerate(enabled: bool) { REVIEW_ACCELERATE.store(enabled, std::sync::atomic::Ordering::Relaxed); }
+"""
+gemm_path = out / "src/kmeans/matrix/gemm.rs"
+gemm_path.parent.mkdir(exist_ok=True)
+gemm_path.write_text(gemm)
+with (out / "src/kmeans/matrix.rs").open("a") as matrix:
+    matrix.write("\n#[allow(missing_docs)]\npub use gemm::review_use_accelerate;\n")
 p = out / "src/kmeans.rs"
 p.write_text(
     p.read_text()
     + """\n#[allow(missing_docs)]
 pub use matrix::MatrixAssignmentWorkspace as ReviewMatrix;
 #[allow(missing_docs)]
-pub use matrix::review_set_matrix_block;
+pub use matrix::{review_set_matrix_block, review_use_accelerate};
 """
 )
 examples = out / "crates/cli/examples"

@@ -1,5 +1,5 @@
-use faer::linalg::matmul::matmul;
-use faer::{Accum, MatMut, MatRef, Par};
+mod gemm;
+
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
@@ -278,14 +278,7 @@ impl MatrixAssignmentWorkspace {
                         let tile_start = tile_index * centroid_block_size;
                         let tile_rows = centroid_norm_tile.len();
                         let scores = &mut scores[..block_rows * tile_rows];
-                        matmul(
-                            MatMut::from_row_major_slice_mut(scores, block_rows, tile_rows),
-                            Accum::Replace,
-                            MatRef::from_row_major_slice(vectors, block_rows, dim),
-                            MatRef::from_row_major_slice(centroid_tile, tile_rows, dim).transpose(),
-                            scale,
-                            Par::Seq,
-                        );
+                        gemm::scores(vectors, centroid_tile, scores, dim, scale);
                         best.iter_mut()
                             .zip(vector_norms)
                             .zip(vectors.chunks_exact(dim))

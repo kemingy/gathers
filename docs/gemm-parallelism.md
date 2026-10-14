@@ -1,203 +1,162 @@
-# Adaptive GEMM row blocks
+# Assignment GEMM backends and parallelism
 
-Exact matrix assignment parallelizes query-row tiles through Rayon and calls each
-`faer` GEMM with `Par::Seq`. The previous preferred tile was always 512 rows,
-subject to the existing scratch cap. All 1,000 native queries therefore produced
-only two tasks, even with sixteen workers.
+Matrix assignment uses Apple Accelerate's system `cblas_sgemm` on macOS and
+sequential `faer` GEMM elsewhere. Accelerate ships with macOS: no extra package,
+Cargo feature, runtime download or system BLAS installation is required. Building
+on macOS needs the normal Xcode Command Line Tools. Linux and Windows retain the
+existing Rust dependencies and require no BLAS installation.
 
-The tile now depends on `ceil(rows / workers)`, rounded **up** to a power of two
-and clamped to 64–512 rows. The existing memory cap can further reduce it; a cap
-below 64 still selects direct assignment. Centroid tiles remain at most 1,024
-rows. This changes scheduling, while retaining exhaustive scoring, ambiguity
-refinement, tie handling and non-finite fallbacks. There is no public API change.
+The private backend wrapper accepts contiguous row-major input and output slices,
+checks their shapes before FFI, and logically transposes the centroid matrix
+without copying it. It uses the legacy LP64 symbol for compatibility with older
+macOS versions, with checked integer conversion and a portable fallback for shapes
+outside its range. The system framework dispatches CPU features. This changes
+only the assignment GEMM; PCA and other `faer` uses are unchanged.
 
-For 1,000 queries, the selected row tiles are 512, 256, 128, 128 and 64 for
-1, 4, 8, 12 and 16 workers respectively. A 65,536-row streaming batch still
-selects 512 with sixteen workers. Rounding up balances independent tasks against
-packing overhead: it need not produce a task for every worker. The 64-row minimum
-also limits parallelism for very small batches.
+Rayon parallelizes row tiles. The preferred row count is `ceil(rows / workers)`,
+rounded up to a power of two and clamped to 64–512; centroid tiles hold at most
+1,024 rows. The existing 128 MiB aggregate score-scratch cap can further reduce
+row tiles, or select direct assignment if fewer than 64 rows fit. For 1,000
+queries, row tiles are 512 / 256 / 128 / 128 / 64 with 1 / 4 / 8 / 12 / 16
+workers. Full 65,536-row streaming batches retain 512-row tiles at sixteen workers.
+
+Accelerate owns its internal threading policy. The library does not alter BLAS
+settings or environment variables, so a requested Rayon worker count is not a
+promise about the total number of native threads. A separate process-startup
+`VECLIB_MAXIMUM_THREADS=1` ablation below checks nested-thread sensitivity without
+changing a host application's BLAS configuration or requiring newer macOS APIs.
+
+## Numerical behavior
+
+Accelerate still computes `f32` products. The L2 norm identity can lose precision
+through cancellation, and dot-product rounding can reorder nearly tied scores.
+The existing uncertainty bounds, candidate refinement, direct near-tie fallback,
+non-finite handling and subnormal margin are retained. No safeguards were removed,
+and no public API changed. Tests exercise the selected backend and the portable
+backend against a direct `f64` product with an absolute-plus-relative reduction
+bound, and assignment tests check direct-reference labels.
 
 ## Environment and inputs
 
-Apple M3 Max, 16 physical cores, 64 GiB, macOS 26.7.1, aarch64/NEON;
+Apple M3 Max, sixteen physical cores, 64 GiB, macOS 26.7.1, aarch64/NEON;
 Rust 1.99.0, optimized `perf` profile (release, thin LTO, one codegen unit),
-without the library's separate `perf` feature or `target-cpu=native`.
-Worker counts are explicit Rayon pool sizes. Benchmarks execute serially.
+without `target-cpu=native` or the separate library `perf` feature.
+Performance workloads ran serially, with no concurrent compilation or tests.
 
-Only the user's local datasets were used:
+Only the user's complete local datasets were used:
 
-| Dataset | Full source rows | Dimensions | Final centroids | Native queries | Metric |
+| Dataset | Source rows | Dimensions | Fixed final centroids | Native queries | Metric |
 | --- | ---: | ---: | ---: | ---: | --- |
 | GIST | 1,000,000 | 960 | 3,943 | 1,000 | Squared L2 |
 | Cohere large | 10,000,000 | 768 | 24,881 | 1,000 | Cosine |
 
 GIST comes from `gist-960-euclidean.hdf5`, losslessly converted to fvecs outside
-timing. Cohere comes from `cohere-large-10m.fvecs` and its native
-`cohere-large-10m-queries.fvecs`. Final original-space centroid files were retained
-from the full-corpus exact-training experiment (seed 42, PCA128, ten maximum
-iterations, tolerance 0.01). Every source row participated in that experiment;
-this study reuses the same final models instead of retraining for each row policy.
-Cosine inputs and centroids are normalized, then searched with negative dot product.
+timing. Cohere comes from `cohere-large-10m.fvecs` and its native query file.
+Fixed final original-space centroids come from the earlier full-source training
+experiment (seed 42, PCA128, ten maximum iterations, tolerance 0.01). This study
+reuses those models; it does not retrain for each backend. Cosine vectors and
+centroids are normalized, then searched with negative dot product.
 
-## Row-policy ablation
+## Backend and row-policy ablation
 
-The native-query ablation uses every native query. It warms each policy once,
-then reports the median of seven assignment calls, including centroid norm
-refresh and tile allocation. Loading, query normalization and workspace creation
-are outside these timers. Each policy's labels equal the baseline labels.
+Every native query participates. Each configuration warms once and times seven
+assignments, including centroid norm refresh and score allocation. Input loading,
+normalization and workspace creation are outside these query timers. At sixteen
+workers, values are medians of three run medians in milliseconds:
 
-The following table records the experiment used to choose rounding. All values
-are milliseconds. The baseline is the previous 512-row preference; every policy
-also obeys the same scratch cap.
-
-| Dataset | Workers | 512 | 256 | 128 | 64 | Adaptive down | Adaptive up (selected) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| GIST | 1 | 77.892 | 81.098 | 85.538 | 93.318 | 80.294 | 79.457 |
-| GIST | 4 | 39.726 | 21.922 | 22.596 | 24.936 | 22.971 | 21.963 |
-| GIST | 8 | 39.981 | 21.334 | 11.433 | 12.626 | 12.695 | 11.516 |
-| GIST | 12 | 40.413 | 21.113 | 11.345 | 12.525 | 12.578 | 11.494 |
-| GIST | 16 | 40.507 | 21.430 | 11.374 | 10.718 | 10.943 | 10.578 |
-| Cohere | 1 | 460.684 | 474.532 | 503.154 | 555.180 | 453.102 | 451.646 |
-| Cohere | 4 | 237.814 | 129.358 | 130.494 | 144.431 | 133.474 | 129.260 |
-| Cohere | 8 | 229.919 | 125.292 | 70.708 | 77.433 | 76.936 | 70.940 |
-| Cohere | 12 | 226.574 | 122.694 | 71.146 | 71.213 | 71.692 | 69.218 |
-| Cohere | 16 | 228.393 | 124.072 | 70.136 | 58.365 | 60.082 | 60.548 |
-
-Fixed 64-row tiles penalize the one-worker cases through additional packing and
-task overhead. Adaptive up keeps 512 there, and performs better than adaptive
-down at eight and twelve workers in this experiment. Both rounding rules choose
-64 at sixteen workers; differences between those entries measure run variation.
-Policies execute in a fixed order, so small differences are not statistically
-established gains. This supports adaptive sizing, rather than a universal optimum
-for these constants or for other CPUs.
-
-## Final implementation verification
-
-A fresh run of the final implementation produced these query medians (ms):
-
-| Dataset | Workers | Baseline | Current | Speedup |
-| --- | ---: | ---: | ---: | ---: |
-| GIST | 1 | 77.395 | 79.272 | 0.976× |
-| GIST | 4 | 39.568 | 21.801 | 1.815× |
-| GIST | 8 | 39.756 | 11.376 | 3.495× |
-| GIST | 12 | 40.619 | 11.288 | 3.598× |
-| GIST | 16 | 40.841 | 10.705 | 3.815× |
-| Cohere | 1 | 460.130 | 453.033 | 1.016× |
-| Cohere | 4 | 231.356 | 128.010 | 1.807× |
-| Cohere | 8 | 228.190 | 70.598 | 3.232× |
-| Cohere | 12 | 225.407 | 69.748 | 3.232× |
-| Cohere | 16 | 225.714 | 61.265 | 3.684× |
-
-Full-corpus final assignment, sixteen workers:
-
-| Dataset | Passes per variant | Baseline assign s | Current assign s | Baseline wall s | Current wall s |
+| Dataset | faer 512 | faer adaptive | matrixmultiply adaptive | Accelerate 512 | Accelerate adaptive |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| GIST | 3 | 8.224 | 8.039 | 9.053 | 8.880 |
-| Cohere | 1 | 443.414 | 439.106 | 451.949 | 446.673 |
+| GIST | 40.412 | 10.475 | 10.245 | 6.624 | 4.494 |
+| Cohere | 228.410 | 61.299 | 56.954 | 55.796 | 34.332 |
 
-The GIST bulk timings overlap run variation. Every full batch uses the same
-512-row tile under baseline and current. The Cohere comparison is a single complete pass
-per variant, so small differences cannot establish a bulk improvement.
+Accelerate alone improves the adaptive implementation by 2.33x / 1.79x.
+Adaptive row scheduling still helps Accelerate by 1.47x / 1.63x over fixed 512.
+The row optimization therefore remains part of the same change. `matrixmultiply`
+0.3.11 was substituted only in the temporary investigation, with its internal
+threading disabled because Rayon already distributes tiles; it adds no production
+dependency and these results do not establish its performance on Linux.
+All query labels match the faer baseline under every tested configuration.
 
-Full assignment reads **all** source vectors, normalizes Cohere batches, creates
-workspaces, counts memberships and writes one little-endian u32 label per row.
-The 65,536-row batch size limits streaming memory; it does not limit dataset size.
-Assignment time excludes these surrounding stages; wall time includes them.
-Input cache state is uncontrolled and output flushes are buffered, without fsync.
-Every full output is compared byte-for-byte with the existing exact full-corpus
-oracle, including label count and source order.
+Worker sensitivity, adaptive tiles (one seven-call run at 1 and 8 workers;
+three runs at 16):
 
-This addresses small-batch exact assignment. It does not establish a full K-means
-training speedup, a Faiss win, or a new state-of-the-art clustering method.
-Large batches already provide many independent tasks and retain 512-row tiles.
-Other CPUs and intermediate batch sizes need their own measurements.
-
-## Profiling the remaining Faiss gap
-
-All measurements below use the same complete 1,000-query sets and full-trained
-centroids, sixteen requested workers and the environment above. Native macOS
-`sample` captured eight seconds at 1 ms intervals after loading and warm-up,
-while each implementation repeatedly assigned the complete query set. Rust
-stacks identify `gemm_f32`'s NEON `4x4x4` microkernel and operand packing. Faiss
-stacks identify Apple Accelerate `SGEMM`/`libBLAS`; some private BLAS symbols are
-stripped, so these traces do not establish which Apple matrix instructions run.
-
-After excluding wait frames, roughly 87% of GIST and 79% of Cohere Rust samples
-are in GEMM/packing. These are sample proportions, not wall-time percentages.
-Temporary stage timers give the following shares of **summed worker-stage
-elapsed time**, excluding the separate centroid norm refresh:
-
-| Stage | GIST | Cohere |
-| --- | ---: | ---: |
-| GEMM, including packing | 92.93% | 86.43% |
-| Score scan and L2 candidate refinement | 6.56% | 3.66% |
-| Final label selection / direct fallback | <0.01% | 9.87% |
-| Scratch allocation | 0.51% | 0.04% |
-
-Worker timers overlap and cannot be added to assignment wall time. Centroid norm
-refresh separately averages 0.47 ms on GIST and 3.28 ms on Cohere. GIST refines
-21,210 candidate distances per call and performs no full direct rescans. Cohere's
-numerical uncertainty guard rescans all 24,881 centroids for 31 queries (3.1%).
-
-To isolate the backend, a temporary macOS-only experiment replaced only the GEMM
-call with Accelerate `cblas_sgemm`, preserving row/centroid tiles, score scanning,
-norm refresh and numerical guards. Three runs per variant alternate backend
-order; each run reports seven-call medians after warm-up. Every query label
-matches between backends. Medians of those run medians:
-
-| Dataset | Current faer | Accelerate experiment | Fresh Faiss exact flat |
+| Dataset | Workers | faer ms | Accelerate ms |
 | --- | ---: | ---: | ---: |
-| GIST | 11.27 ms | 4.50 ms | 6.22 ms |
-| Cohere | 62.60 ms | 35.96 ms | 31.51 ms |
+| GIST | 1 | 81.841 | 12.722 |
+| GIST | 8 | 11.481 | 4.405 |
+| GIST | 16 | 10.475 | 4.494 |
+| Cohere | 1 | 466.126 | 122.609 |
+| Cohere | 8 | 71.493 | 40.395 |
+| Cohere | 16 | 61.299 | 34.332 |
 
-The backend is the largest measured cause of the gap. Allocation is a small
-share. Faiss also prefers 4,096-query BLAS blocks (database blocks 1,024), whereas
-our adaptive sixteen-worker query tile is 64; the observed Rust packing work
-makes layout/packing reuse another useful target. The backend experiment retains
-our tiling, so its improvement does not depend on adopting Faiss's block policy.
-Accelerate's internal threads remain independently uncontrolled.
+With `VECLIB_MAXIMUM_THREADS=1`, sixteen-worker Accelerate medians were
+4.501 ms / 33.146 ms (three runs). The gain persists under this requested cap;
+actual BLAS thread counts were not independently measured. Small differences
+between configurations are subject to run variation and fixed benchmark order.
+One CPU does not establish optimal constants or Intel Mac performance.
 
-A separate diagnostic bypass of the Cohere direct-rescan guard reduced faer
-57.21 → 50.28 ms and Accelerate 34.30 → 21.44 ms (three alternating runs,
-seven calls each). All fixture labels still matched. This identifies fallback
-cost; it does **not** justify removing the guard for general inputs. A useful
-follow-up is to refine only candidates admitted by conservative score bounds,
-rather than rescanning every centroid for an ambiguous query. Existing near-tie,
-overflow and subnormal tests must continue to pass.
+## Full-corpus final assignment
 
-The backend swap, guard bypass, counters and sampling loop exist only in the
-local investigation artifacts. Production behavior remains the adaptive row
-selection. These measurements cover query assignment, not full Faiss training
-or full-corpus Accelerate assignment, and one CPU does not establish a portable
-backend choice.
+Fresh full passes use adaptive tiles and all source rows, streamed in 65,536-row
+batches. This batch size bounds memory and never limits dataset size. Assignment
+seconds exclude input reading, normalization, workspace creation and label output;
+wall seconds include those stages. GIST Accelerate values are medians of three
+passes; other cells represent one pass each.
 
-## Reproduction
+| Dataset | Passes faer / Accelerate | faer assign s | Accelerate assign s | Assignment speedup | faer wall s | Accelerate wall s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GIST 1M | 1 / 3 | 7.148 | 2.902 | 2.46x | 8.113 | 3.732 |
+| Cohere 10M | 1 / 1 | 446.689 | 213.867 | 2.09x | 454.174 | 222.501 |
 
-The isolated benchmark harness is under `benches/gemm_parallelism/`. Preparation
-archives the checkout's HEAD, overlays the working tree's matrix source, and adds
-private-workspace exports and row-policy overrides **only to a temporary copy**.
-It requires Python 3.12+ and an empty destination. No benchmark hook is compiled
-into the production library.
+Every full label file is byte-identical to the existing exact full-corpus oracle,
+including row count and source order; neither dataset has an empty cluster under
+these fixed models. File cache state is uncontrolled, output uses buffered flush
+without fsync, and single-pass cells provide limited statistical evidence.
+These are final-assignment results, not full training speedups or a full-corpus
+comparison to Faiss.
+
+## Lessons from other implementations
+
+[superkmeans-rs](https://github.com/paradedb/superkmeans-rs/blob/66d2e86bce7d4c6e9b0123bbcec0ca476ba36338/README.md#blas-backends)
+also provides a portable default plus Accelerate/OpenBLAS backends. Its
+[macOS batching](https://github.com/paradedb/superkmeans-rs/blob/66d2e86bce7d4c6e9b0123bbcec0ca476ba36338/src/batch.rs)
+uses 256-row tasks, larger centroid tiles, and retained score buffers.
+These are alternatives to measure, not constants to copy without evidence.
+Its [later training rounds](https://github.com/paradedb/superkmeans-rs/blob/66d2e86bce7d4c6e9b0123bbcec0ca476ba36338/src/superkmeans.rs)
+use previous assignments and partial-dimensional ADSampling pruning. Statistical
+pruning is a separate accuracy tradeoff from our agreed exact flat training path.
+The Rust port's `layout.rs` explicitly retains plain row-major centroids instead
+of the original C++ hybrid layout. Its Cohere benchmarks use different dimensions
+and cluster counts, so their claims do not establish performance on our inputs.
+
+Prior profiling identified GEMM/packing as the main bottleneck. Cohere also has
+expensive direct rescans on ambiguous rows. Conservative candidate refinement is
+a useful next target; replacing GEMM does not justify bypassing the accuracy guard.
+
+## Reproduction and checks
+
+The minimal maintained benchmark under `benches/gemm_parallelism/` archives HEAD,
+overlays the working matrix/backend sources, and exposes private workspace and
+backend/row-policy overrides only in a temporary copy. No benchmark hooks enter
+the production API. Preparation requires Python 3.12+ and an empty destination.
 
 ```sh
 python3.12 benches/gemm_parallelism/prepare.py /tmp/gathers-gemm-bench
 cargo build --offline --profile perf -p gathers-cli --example query_compare \
   --manifest-path /tmp/gathers-gemm-bench/Cargo.toml
-
 /tmp/gathers-gemm-bench/target/perf/examples/query_compare \
-  /path/to/gist-queries.fvecs /path/to/gist-exact.fvecs l2 16
-/tmp/gathers-gemm-bench/target/perf/examples/query_compare \
-  /path/to/cohere-large-10m-queries.fvecs /path/to/cohere-exact.fvecs cos 16
+  QUERY_FVECS CENTROID_FVECS l2_OR_cos 16
 ```
 
-Repeat with 1, 4, 8, 12 and 16 workers. Supply final original-space centroids
-trained on all source rows. The maintained harness compares the baseline 512-row
-preference (policy 512) with production adaptive sizing (policy 1), writes JSON
-medians and checks all query labels. The broader tile/rounding ablation and
-full-corpus streaming validation were investigation-only harnesses, retained with
-the raw local experiment artifacts rather than duplicated in the repository.
+The harness compares faer/Accelerate crossed with fixed512/adaptive scheduling,
+reports seven-call medians, and checks all labels. Repeat with 1 and 8 workers,
+and optionally set `VECLIB_MAXIMUM_THREADS=1` before process startup. On non-macOS
+both backend choices use faer. Supply full native query sets and final original-space
+centroids trained on all source rows. Broader matrixmultiply and full-corpus
+harnesses remain local investigation artifacts.
 
-Tests cover scratch limits, worker-count sensitivity, one-row tile tails,
-65-dimensional SIMD tails, crossing the 1,024-centroid tile boundary, and direct
-reference label equality for squared L2 and negative dot product. Existing
-near-tie, overflow, underflow and workspace-reuse coverage is retained.
+Required checks: `make format lint lint-ast test-ast test`. Existing assignment
+coverage includes worker/score budgets, row/centroid/vector tails, workspace reuse,
+near ties, common-offset cancellation, overflow and subnormal scores. The one new
+product test checks backend layout, output replacement, empty tiles and direct
+product tolerance. Linux and Intel macOS compile checks are recorded separately.
