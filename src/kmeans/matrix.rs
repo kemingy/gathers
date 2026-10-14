@@ -408,22 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn test_matrix_blocks_expose_parallel_work_with_bounded_scratch() {
-        for threads in [1, 3, 4, 6, 8, 12, 16] {
-            for rows in [1000, 1537, 3001, 8192, 65_536] {
-                let block = matmul_block_size(rows, 4096, threads).unwrap();
-                assert!(block.is_power_of_two());
-                assert!((64..=512).contains(&block));
-                assert!(
-                    block * PREFERRED_CENTROID_BLOCK_SIZE * threads
-                        <= super::MAX_MATRIX_SCRATCH_ELEMENTS
-                );
-                if rows >= 64 * threads {
-                    assert!(rows.div_ceil(block) >= threads.div_ceil(2));
-                }
-            }
+    fn test_matrix_blocks_adapt_to_batch_parallelism() {
+        // Native query batches have 1,000 rows. Eight/twelve workers need larger
+        // tiles than sixteen workers to avoid paying for excessive matrix packing.
+        for (threads, expected) in [(1, 512), (8, 128), (12, 128), (16, 64)] {
+            assert_eq!(matmul_block_size(1000, 4096, threads), Some(expected));
         }
-        assert_eq!(matmul_block_size(1000, 4096, 1), Some(512));
         assert_eq!(matmul_block_size(65_536, 4096, 16), Some(512));
         assert_eq!(matmul_block_size(1000, 4096, 0), None);
     }

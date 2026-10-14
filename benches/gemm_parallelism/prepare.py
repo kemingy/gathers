@@ -34,10 +34,7 @@ s = s.replace(
     """    // Benchmark-only alternatives; policy 1 continues through the production helper unchanged.
     let policy = REVIEW_BLOCK.load(std::sync::atomic::Ordering::Relaxed);
     if policy != 1 {
-        let requested = if policy == 2 {
-            1 << num_vectors.div_ceil(num_threads).max(MIN_MATMUL_BLOCK_SIZE).ilog2()
-        } else { policy };
-        return Some(PREFERRED_MATMUL_BLOCK_SIZE.min(1 << max_block_size.ilog2()).min(requested));
+        return Some(PREFERRED_MATMUL_BLOCK_SIZE.min(1 << max_block_size.ilog2()).min(policy));
     }
 """
     + needle,
@@ -58,8 +55,7 @@ pub use matrix::review_set_matrix_block;
 )
 examples = out / "crates/cli/examples"
 examples.mkdir(exist_ok=True)
-for name in ["query_ablate.rs", "final_assign.rs"]:
-    shutil.copy(Path(__file__).parent / name, examples / name)
+shutil.copy(Path(__file__).parent / "query_compare.rs", examples / "query_compare.rs")
 print(
-    f"cargo build --offline --profile perf -p gathers-cli --examples --manifest-path {out / 'Cargo.toml'}"
+    f"cargo build --offline --profile perf -p gathers-cli --example query_compare --manifest-path {out / 'Cargo.toml'}"
 )

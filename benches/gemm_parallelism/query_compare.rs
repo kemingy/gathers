@@ -1,4 +1,4 @@
-//! All native GIST/Cohere queries, benchmark-only row-policy ablation.
+//! Real-data regression comparison for fixed versus adaptive GEMM row blocks.
 #[allow(dead_code)]
 #[path = "../src/fvecs.rs"]
 mod fvecs;
@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     review_set_matrix_block(512);
     workspace.assign(&q.data, &c.data, q.dim, &mut labels);
     let oracle = labels.clone();
-    for policy in [512, 256, 128, 64, 1, 2] {
+    for policy in [512, 1] {
         review_set_matrix_block(policy);
         workspace.assign(&q.data, &c.data, q.dim, &mut labels);
         let times: Vec<_> = (0..7)

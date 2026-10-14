@@ -112,6 +112,65 @@ training speedup, a Faiss win, or a new state-of-the-art clustering method.
 Large batches already provide many independent tasks and retain 512-row tiles.
 Other CPUs and intermediate batch sizes need their own measurements.
 
+## Profiling the remaining Faiss gap
+
+All measurements below use the same complete 1,000-query sets and full-trained
+centroids, sixteen requested workers and the environment above. Native macOS
+`sample` captured eight seconds at 1 ms intervals after loading and warm-up,
+while each implementation repeatedly assigned the complete query set. Rust
+stacks identify `gemm_f32`'s NEON `4x4x4` microkernel and operand packing. Faiss
+stacks identify Apple Accelerate `SGEMM`/`libBLAS`; some private BLAS symbols are
+stripped, so these traces do not establish which Apple matrix instructions run.
+
+After excluding wait frames, roughly 87% of GIST and 79% of Cohere Rust samples
+are in GEMM/packing. These are sample proportions, not wall-time percentages.
+Temporary stage timers give the following shares of **summed worker-stage
+elapsed time**, excluding the separate centroid norm refresh:
+
+| Stage | GIST | Cohere |
+| --- | ---: | ---: |
+| GEMM, including packing | 92.93% | 86.43% |
+| Score scan and L2 candidate refinement | 6.56% | 3.66% |
+| Final label selection / direct fallback | <0.01% | 9.87% |
+| Scratch allocation | 0.51% | 0.04% |
+
+Worker timers overlap and cannot be added to assignment wall time. Centroid norm
+refresh separately averages 0.47 ms on GIST and 3.28 ms on Cohere. GIST refines
+21,210 candidate distances per call and performs no full direct rescans. Cohere's
+numerical uncertainty guard rescans all 24,881 centroids for 31 queries (3.1%).
+
+To isolate the backend, a temporary macOS-only experiment replaced only the GEMM
+call with Accelerate `cblas_sgemm`, preserving row/centroid tiles, score scanning,
+norm refresh and numerical guards. Three runs per variant alternate backend
+order; each run reports seven-call medians after warm-up. Every query label
+matches between backends. Medians of those run medians:
+
+| Dataset | Current faer | Accelerate experiment | Fresh Faiss exact flat |
+| --- | ---: | ---: | ---: |
+| GIST | 11.27 ms | 4.50 ms | 6.22 ms |
+| Cohere | 62.60 ms | 35.96 ms | 31.51 ms |
+
+The backend is the largest measured cause of the gap. Allocation is a small
+share. Faiss also prefers 4,096-query BLAS blocks (database blocks 1,024), whereas
+our adaptive sixteen-worker query tile is 64; the observed Rust packing work
+makes layout/packing reuse another useful target. The backend experiment retains
+our tiling, so its improvement does not depend on adopting Faiss's block policy.
+Accelerate's internal threads remain independently uncontrolled.
+
+A separate diagnostic bypass of the Cohere direct-rescan guard reduced faer
+57.21 → 50.28 ms and Accelerate 34.30 → 21.44 ms (three alternating runs,
+seven calls each). All fixture labels still matched. This identifies fallback
+cost; it does **not** justify removing the guard for general inputs. A useful
+follow-up is to refine only candidates admitted by conservative score bounds,
+rather than rescanning every centroid for an ambiguous query. Existing near-tie,
+overflow and subnormal tests must continue to pass.
+
+The backend swap, guard bypass, counters and sampling loop exist only in the
+local investigation artifacts. Production behavior remains the adaptive row
+selection. These measurements cover query assignment, not full Faiss training
+or full-corpus Accelerate assignment, and one CPU does not establish a portable
+backend choice.
+
 ## Reproduction
 
 The isolated benchmark harness is under `benches/gemm_parallelism/`. Preparation
@@ -122,34 +181,21 @@ into the production library.
 
 ```sh
 python3.12 benches/gemm_parallelism/prepare.py /tmp/gathers-gemm-bench
-cargo build --offline --profile perf -p gathers-cli --examples \
+cargo build --offline --profile perf -p gathers-cli --example query_compare \
   --manifest-path /tmp/gathers-gemm-bench/Cargo.toml
 
-/tmp/gathers-gemm-bench/target/perf/examples/query_ablate \
+/tmp/gathers-gemm-bench/target/perf/examples/query_compare \
   /path/to/gist-queries.fvecs /path/to/gist-exact.fvecs l2 16
-/tmp/gathers-gemm-bench/target/perf/examples/query_ablate \
+/tmp/gathers-gemm-bench/target/perf/examples/query_compare \
   /path/to/cohere-large-10m-queries.fvecs /path/to/cohere-exact.fvecs cos 16
-
-GEMM_POLICY=512 /tmp/gathers-gemm-bench/target/perf/examples/final_assign \
-  /path/to/gist.fvecs /path/to/gist-exact.fvecs /tmp/gist-base.u32 \
-  flat-matrix l2 16 65536
-GEMM_POLICY=1 /tmp/gathers-gemm-bench/target/perf/examples/final_assign \
-  /path/to/gist.fvecs /path/to/gist-exact.fvecs /tmp/gist-current.u32 \
-  flat-matrix l2 16 65536
-cmp /tmp/gist-base.u32 /tmp/gist-current.u32
 ```
 
-Repeat query runs with 1, 4, 8, 12 and 16 workers. For Cohere full assignment,
-replace the source and centroid paths and use `cos`. Repeat full GIST passes
-three times; the reported Cohere bulk comparison uses one complete pass per
-variant. Supply final original-space centroids trained on all source rows.
-
-In the committed harness, policy 1 is production adaptive **up**, policy 2 is
-adaptive **down**, and 64/128/256/512 are fixed alternatives. The earlier rounding
-ablation used the opposite numeric identifiers for the two adaptive policies;
-the table above names the algorithms explicitly. The query program writes JSON
-for every policy and checks all query labels. The streaming program writes JSON
-with stage timers and full membership files for independent comparison.
+Repeat with 1, 4, 8, 12 and 16 workers. Supply final original-space centroids
+trained on all source rows. The maintained harness compares the baseline 512-row
+preference (policy 512) with production adaptive sizing (policy 1), writes JSON
+medians and checks all query labels. The broader tile/rounding ablation and
+full-corpus streaming validation were investigation-only harnesses, retained with
+the raw local experiment artifacts rather than duplicated in the repository.
 
 Tests cover scratch limits, worker-count sensitivity, one-row tile tails,
 65-dimensional SIMD tails, crossing the 1,024-centroid tile boundary, and direct
