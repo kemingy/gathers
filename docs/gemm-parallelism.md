@@ -10,8 +10,8 @@ The shared private backend wrapper accepts row-major matrices and logical input
 transposes, checks their shapes and strides before FFI, and transposes the centroid
 matrix without copying it. It uses the legacy LP64 symbol for compatibility with older
 macOS versions, with checked integer conversion and a portable fallback for shapes
-outside its range. The system framework dispatches CPU features. PCA covariance, projection, and
-inverse projection use the same wrapper; its eigendecomposition still uses `faer`.
+outside its range. The system framework dispatches CPU features. PCA covariance uses checked
+SYRK; projection and inverse projection share SGEMM. Its eigendecomposition still uses `faer`.
 See [PCA performance](./pca-performance.md) for the bounded-memory pipeline and measurements.
 
 Rayon parallelizes row tiles. The preferred row count is `ceil(rows / workers)`,
@@ -26,6 +26,13 @@ settings or environment variables, so a requested Rayon worker count is not a
 promise about the total number of native threads. A separate process-startup
 `VECLIB_MAXIMUM_THREADS=1` ablation below checks nested-thread sensitivity without
 changing a host application's BLAS configuration or requiring newer macOS APIs.
+
+For dimensions 128 and above on Apple Silicon macOS, batches with at least sixteen rows and
+4,096 query values use a lower crossover of 32,768 vector-centroid comparisons. Smaller batches,
+64–127D inputs, Intel macOS and other platforms retain the previous 524,288-comparison cutoff;
+below 64D it remains 4,194,304 comparisons. This keeps single queries on the existing direct path
+at the tested cluster counts. See [Accelerate refinements](./accelerate-refinements.md) for the
+full-data PCA128 checks, batch sensitivity and rejected GEMV experiment.
 
 ## Numerical behavior
 
@@ -161,3 +168,14 @@ coverage includes worker/score budgets, row/centroid/vector tails, workspace reu
 near ties, common-offset cancellation, overflow and subnormal scores. The one new
 product test checks backend layout, output replacement, empty tiles and direct
 product tolerance. Linux and Intel macOS compile checks are recorded separately.
+
+To compare the previous and current crossover on the complete native query file, append a
+processing batch size to `query_compare`. This mode includes workspace setup and direct SIMD
+fallback, and never caps the number of queries:
+
+```console
+/tmp/gathers-gemm-bench/target/perf/examples/query_compare /private/tmp/pr65-real-data/gist-queries.fvecs /private/tmp/pr65-exact-data/gist-exact.fvecs l2 16 64
+```
+
+This exercises the private matrix assignment implementation through temporary hooks. Python's
+standalone `batch_assign` routing is unchanged; these results do not claim its runtime.

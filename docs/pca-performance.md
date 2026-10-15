@@ -1,7 +1,7 @@
 # Bounded-memory PCA with Accelerate
 
-PCA covariance, projection, and inverse projection use the shared checked Accelerate SGEMM
-wrapper on macOS. Other platforms, unsupported strides, and dimensions outside the legacy BLAS
+PCA covariance uses checked Accelerate SYRK on macOS; projection and inverse projection use
+the shared checked SGEMM wrapper. Other platforms, unsupported strides, and dimensions outside the legacy BLAS
 integer range fall back to `faer`. The eigensolver remains `faer`; no new dependency, Cargo
 feature, or system BLAS installation is required. Assignment keeps its existing numerical guards
 and outer Rayon scheduling. Neither backend changes global or caller-thread BLAS settings.
@@ -9,7 +9,9 @@ and outer Rayon scheduling. Neither backend changes global or caller-thread BLAS
 PCA centers at most 16 MiB of rows at a time, or one complete row for exceptionally wide inputs.
 It reuses the buffer for both covariance formation and transformation, rather than retaining a
 full centered corpus. Block covariance contributions are combined in `f64` and then converted to
-`f32`, avoiding extra `f32` summation error across thousands of blocks. The existing `f64` mean,
+`f32`, avoiding extra `f32` summation error across thousands of blocks. Only the lower covariance
+triangle is formed and accumulated, since the eigensolver explicitly reads `Side::Lower`. The
+portable fallback may form both triangles, but the upper entries are not accumulated. The existing `f64` mean,
 finite-result checks, and overflow errors remain. This changes accumulation order and can change
 principal directions and cluster labels slightly; bitwise reproduction of the previous PCA is
 not promised. Original-space centroid reconstruction still uses the existing accumulation code.
@@ -103,6 +105,10 @@ Scratch sensitivity on full GIST (fit + projection, medians of three):
 16 MiB avoids the 4 MiB scheduling overhead while using one quarter of the scratch of 64 MiB.
 The latter saves about 0.16 s in this stage test; 16 MiB is the current bounded-memory tradeoff,
 not a claim of a universal optimal block size. All these configurations fit every source row.
+
+The subsequent [Accelerate refinements](./accelerate-refinements.md) isolate SYRK and
+lower-triangle accumulation and report measurements against this blocked SGEMM implementation.
+The historical training figures above predate that refinement.
 
 ## Validation and reproduction
 

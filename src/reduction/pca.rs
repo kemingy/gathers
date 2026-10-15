@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::gemm::matmul;
+use crate::gemm::{matmul, symmetric_rank_k_lower};
 use crate::reduction::{
     Reduction, ReductionError, check_finite_result, checked_buffer_len, validate_output_dimension,
     validate_shape,
@@ -135,17 +135,24 @@ impl PCA {
             let centered = &mut centered[..block.len()];
             center_rows(block, &mean, input_dim, centered)?;
             let matrix = MatRef::from_row_major_slice(centered, block.len() / input_dim, input_dim);
-            matmul(
+            symmetric_rank_k_lower(
                 MatMut::from_row_major_slice_mut(&mut covariance, input_dim, input_dim),
-                Accum::Replace,
-                matrix.transpose(),
                 matrix,
                 scale,
                 Par::rayon(0),
             );
-            check_finite_result(&covariance)?;
-            for (sum, &value) in sums.iter_mut().zip(&covariance) {
-                *sum += f64::from(value);
+            // The eigensolver reads Side::Lower. Avoid mirroring, validating, or accumulating
+            // the unused upper triangle on every block; retain f64 sums for computed entries.
+            for (row, (sums, values)) in sums
+                .chunks_mut(input_dim)
+                .zip(covariance.chunks(input_dim))
+                .enumerate()
+            {
+                let values = &values[..=row];
+                check_finite_result(values)?;
+                for (sum, &value) in sums[..=row].iter_mut().zip(values) {
+                    *sum += f64::from(value);
+                }
             }
         }
         for (value, sum) in covariance.iter_mut().zip(sums) {

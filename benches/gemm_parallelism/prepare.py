@@ -43,9 +43,21 @@ s += """\nstatic REVIEW_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomi
 #[allow(missing_docs)]
 pub fn review_set_matrix_block(block: usize) { REVIEW_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed); }
 """
+needle = '    } else if cfg!(all(target_os = "macos", target_arch = "aarch64"))'
+assert s.count(needle) == 1, "crossover helper changed; update benchmark instrumentation"
+s = s.replace(
+    needle,
+    "    } else if REVIEW_CROSSOVER.load(std::sync::atomic::Ordering::Relaxed)\n"
+    '        && cfg!(all(target_os = "macos", target_arch = "aarch64"))',
+)
+s += """\nstatic REVIEW_CROSSOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[allow(missing_docs)]
+pub fn review_use_crossover(enabled: bool) { REVIEW_CROSSOVER.store(enabled, std::sync::atomic::Ordering::Relaxed); }
+"""
 (out / "src/kmeans/matrix.rs").write_text(s)
 # Copy the shared backend and its declaration even when preparing uncommitted changes.
 shutil.copy(repo / "src/lib.rs", out / "src/lib.rs")
+shutil.copy(repo / "src/reduction/pca.rs", out / "src/reduction/pca.rs")
 gemm = (repo / "src/gemm.rs").read_text()
 needle = '    if accelerate::matmul(&dst, accum, lhs, rhs, alpha).is_some() {'
 assert gemm.count(needle) == 1, "backend helper changed; update benchmark instrumentation"
@@ -73,7 +85,7 @@ p.write_text(
     + """\n#[allow(missing_docs)]
 pub use matrix::MatrixAssignmentWorkspace as ReviewMatrix;
 #[allow(missing_docs)]
-pub use matrix::{review_set_matrix_block, review_use_accelerate};
+pub use matrix::{review_set_matrix_block, review_use_accelerate, review_use_crossover};
 """
 )
 examples = out / "crates/cli/examples"

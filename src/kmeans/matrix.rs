@@ -11,6 +11,11 @@ use crate::kmeans::{base_assign, base_assign_parallel};
 const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 19;
 // Matrix setup is proportionally more expensive at dimensions below 64.
 const SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 22;
+// Apple Silicon SGEMM amortizes setup earlier for medium batches at PCA128 and above.
+// Retain the previous cutoff for tiny queries and lower dimensions.
+const ACCELERATE_MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 15;
+const MIN_ACCELERATE_BATCH_ROWS: usize = 16;
+const MIN_ACCELERATE_BATCH_VALUES: usize = 4096;
 // Bound explicit score tiles across Rayon workers to 128 MiB. Their size is
 // vector_block_rows * centroid_block_rows; input vectors and centroids are borrowed.
 const MAX_MATRIX_SCRATCH_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
@@ -25,6 +30,20 @@ const MIN_MATMUL_BLOCK_SIZE: usize = 64;
 const L2_ERROR_BOUND_SAFETY_FACTOR: f32 = 8.0;
 const DOT_ERROR_BOUND_SAFETY_FACTOR: f32 = 1.0;
 const MIN_SUBNORMAL: f32 = f32::from_bits(1);
+
+fn matrix_assignment_threshold(num_vectors: usize, dim: usize) -> usize {
+    if dim < 64 {
+        SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && dim >= 128
+        && num_vectors >= MIN_ACCELERATE_BATCH_ROWS
+        && num_vectors.saturating_mul(dim) >= MIN_ACCELERATE_BATCH_VALUES
+    {
+        ACCELERATE_MATRIX_ASSIGNMENT_THRESHOLD
+    } else {
+        MATRIX_ASSIGNMENT_THRESHOLD
+    }
+}
 
 fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     let mut values = Vec::new();
@@ -177,11 +196,7 @@ impl MatrixAssignmentWorkspace {
         }
         let num_vectors = vecs.len() / dim;
         let comparison_count = num_vectors.checked_mul(num_centroids)?;
-        let assignment_threshold = if dim < 64 {
-            SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD
-        } else {
-            MATRIX_ASSIGNMENT_THRESHOLD
-        };
+        let assignment_threshold = matrix_assignment_threshold(num_vectors, dim);
         if !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
             || num_centroids < 2
             || comparison_count < assignment_threshold
@@ -389,6 +404,40 @@ mod tests {
     use crate::distance::Distance;
     use crate::kmeans::base_assign;
     use crate::utils::normalize;
+
+    #[test]
+    fn medium_batch_crossover_preserves_tiny_queries_and_reference_labels() {
+        let accelerate = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        // Boundaries for the minimum query count, query values, and comparison count.
+        for (dim, rows, count, eligible) in [
+            (768, 15, 2048, false),
+            (768, 16, 2048, accelerate),
+            (128, 31, 1024, false),
+            (128, 32, 1023, false),
+            (128, 32, 1024, accelerate),
+            (128, 33, 1024, accelerate),
+            (129, 32, 1024, accelerate),
+            (64, 64, 1024, false),
+        ] {
+            let vectors: Vec<f32> = (0..rows * dim)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.125)
+                .collect();
+            let centroids: Vec<f32> = (0..count * dim)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.125)
+                .collect();
+            for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+                let workspace = MatrixAssignmentWorkspace::try_new(&vectors, count, dim, distance);
+                assert_eq!(workspace.is_some(), eligible, "{rows}x{count}x{dim}");
+                if let Some(mut workspace) = workspace {
+                    let mut actual = vec![0; rows];
+                    let mut expected = vec![0; rows];
+                    workspace.assign(&vectors, &centroids, dim, &mut actual);
+                    base_assign(&vectors, &centroids, dim, distance, &mut expected);
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_matrix_assignment_adapts_block_size_to_worker_scratch_budget() {
