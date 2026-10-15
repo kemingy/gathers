@@ -6,12 +6,13 @@ Cargo feature, runtime download or system BLAS installation is required. Buildin
 on macOS needs the normal Xcode Command Line Tools. Linux and Windows retain the
 existing Rust dependencies and require no BLAS installation.
 
-The private backend wrapper accepts contiguous row-major input and output slices,
-checks their shapes before FFI, and logically transposes the centroid matrix
-without copying it. It uses the legacy LP64 symbol for compatibility with older
+The shared private backend wrapper accepts row-major matrices and logical input
+transposes, checks their shapes and strides before FFI, and transposes the centroid
+matrix without copying it. It uses the legacy LP64 symbol for compatibility with older
 macOS versions, with checked integer conversion and a portable fallback for shapes
-outside its range. The system framework dispatches CPU features. This changes
-only the assignment GEMM; PCA and other `faer` uses are unchanged.
+outside its range. The system framework dispatches CPU features. PCA covariance, projection, and
+inverse projection use the same wrapper; its eigendecomposition still uses `faer`.
+See [PCA performance](./pca-performance.md) for the bounded-memory pipeline and measurements.
 
 Rayon parallelizes row tiles. The preferred row count is `ceil(rows / workers)`,
 rounded up to a power of two and clamped to 64–512; centroid tiles hold at most

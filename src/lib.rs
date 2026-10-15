@@ -24,6 +24,7 @@
 #![deny(missing_docs)]
 
 pub mod distance;
+mod gemm;
 pub mod kmeans;
 /// Dimensionality-reduction transforms for clustering workloads.
 pub mod reduction;

@@ -44,22 +44,27 @@ s += """\nstatic REVIEW_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomi
 pub fn review_set_matrix_block(block: usize) { REVIEW_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed); }
 """
 (out / "src/kmeans/matrix.rs").write_text(s)
-gemm = (repo / "src/kmeans/matrix/gemm.rs").read_text()
-needle = "    if let (Ok(rows), Ok(cols), Ok(dim)) ="
-assert gemm.count(needle) == 1, (
-    "backend helper changed; update benchmark instrumentation"
-)
+# Copy the shared backend and its declaration even when preparing uncommitted changes.
+shutil.copy(repo / "src/lib.rs", out / "src/lib.rs")
+gemm = (repo / "src/gemm.rs").read_text()
+needle = '    if accelerate::matmul(&dst, accum, lhs, rhs, alpha).is_some() {'
+assert gemm.count(needle) == 1, "backend helper changed; update benchmark instrumentation"
 gemm = gemm.replace(
     needle,
-    "    if REVIEW_ACCELERATE.load(std::sync::atomic::Ordering::Relaxed)\n        && let (Ok(rows), Ok(cols), Ok(dim)) =",
+    "    if REVIEW_ACCELERATE.load(std::sync::atomic::Ordering::Relaxed)\n"
+    "        && accelerate::matmul(&dst, accum, lhs, rhs, alpha).is_some() {",
 )
 gemm += """\nstatic REVIEW_ACCELERATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 #[allow(missing_docs)]
 pub fn review_use_accelerate(enabled: bool) { REVIEW_ACCELERATE.store(enabled, std::sync::atomic::Ordering::Relaxed); }
 """
+(out / "src/gemm.rs").write_text(gemm)
 gemm_path = out / "src/kmeans/matrix/gemm.rs"
 gemm_path.parent.mkdir(exist_ok=True)
-gemm_path.write_text(gemm)
+gemm_path.write_text(
+    (repo / "src/kmeans/matrix/gemm.rs").read_text()
+    + "\n#[allow(missing_docs)]\npub use crate::gemm::review_use_accelerate;\n"
+)
 with (out / "src/kmeans/matrix.rs").open("a") as matrix:
     matrix.write("\n#[allow(missing_docs)]\npub use gemm::review_use_accelerate;\n")
 p = out / "src/kmeans.rs"
