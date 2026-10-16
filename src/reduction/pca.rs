@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::gemm::{matmul, symmetric_rank_k_lower};
+use crate::linalg::{matmul, symmetric_rank_k_lower};
 use crate::reduction::{
     Reduction, ReductionError, check_finite_result, checked_buffer_len, validate_output_dimension,
     validate_shape,

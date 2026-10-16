@@ -32,54 +32,54 @@ assert s.count(needle) == 1, "matrix helper changed; update benchmark instrument
 s = s.replace(
     needle,
     """    // Benchmark-only alternatives; policy 1 continues through the production helper unchanged.
-    let policy = REVIEW_BLOCK.load(std::sync::atomic::Ordering::Relaxed);
+    let policy = BENCH_BLOCK.load(std::sync::atomic::Ordering::Relaxed);
     if policy != 1 {
         return Some(PREFERRED_MATMUL_BLOCK_SIZE.min(1 << max_block_size.ilog2()).min(policy));
     }
 """
     + needle,
 )
-s += """\nstatic REVIEW_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+s += """\nstatic BENCH_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 #[allow(missing_docs)]
-pub fn review_set_matrix_block(block: usize) { REVIEW_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed); }
+pub fn bench_set_matrix_block(block: usize) { BENCH_BLOCK.store(block, std::sync::atomic::Ordering::Relaxed); }
 """
 needle = '    } else if cfg!(all(target_os = "macos", target_arch = "aarch64"))'
 assert s.count(needle) == 1, "crossover helper changed; update benchmark instrumentation"
 s = s.replace(
     needle,
-    "    } else if REVIEW_CROSSOVER.load(std::sync::atomic::Ordering::Relaxed)\n"
+    "    } else if BENCH_CROSSOVER.load(std::sync::atomic::Ordering::Relaxed)\n"
     '        && cfg!(all(target_os = "macos", target_arch = "aarch64"))',
 )
-s += """\nstatic REVIEW_CROSSOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+s += """\nstatic BENCH_CROSSOVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 #[allow(missing_docs)]
-pub fn review_use_crossover(enabled: bool) { REVIEW_CROSSOVER.store(enabled, std::sync::atomic::Ordering::Relaxed); }
+pub fn bench_use_crossover(enabled: bool) { BENCH_CROSSOVER.store(enabled, std::sync::atomic::Ordering::Relaxed); }
 """
 (out / "src/kmeans/matrix.rs").write_text(s)
 # Copy the shared backend and its declaration even when preparing uncommitted changes.
 shutil.copy(repo / "src/lib.rs", out / "src/lib.rs")
 shutil.copy(repo / "src/reduction/pca.rs", out / "src/reduction/pca.rs")
-gemm = (repo / "src/gemm.rs").read_text()
+linalg = (repo / "src/linalg.rs").read_text()
 needle = '    if accelerate::matmul(&dst, accum, lhs, rhs, alpha).is_some() {'
-assert gemm.count(needle) == 1, "backend helper changed; update benchmark instrumentation"
-gemm = gemm.replace(
+assert linalg.count(needle) == 1, "backend helper changed; update benchmark instrumentation"
+linalg = linalg.replace(
     needle,
-    "    if REVIEW_ACCELERATE.load(std::sync::atomic::Ordering::Relaxed)\n"
+    "    if BENCH_ACCELERATE.load(std::sync::atomic::Ordering::Relaxed)\n"
     "        && accelerate::matmul(&dst, accum, lhs, rhs, alpha).is_some() {",
 )
-gemm += """\nstatic REVIEW_ACCELERATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+linalg += """\nstatic BENCH_ACCELERATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 #[allow(missing_docs)]
-pub fn review_use_accelerate(enabled: bool) { REVIEW_ACCELERATE.store(enabled, std::sync::atomic::Ordering::Relaxed); }
+pub fn bench_use_accelerate(enabled: bool) { BENCH_ACCELERATE.store(enabled, std::sync::atomic::Ordering::Relaxed); }
 """
-(out / "src/gemm.rs").write_text(gemm)
+(out / "src/linalg.rs").write_text(linalg)
 p = out / "src/kmeans.rs"
 p.write_text(
     p.read_text()
     + """\n#[allow(missing_docs)]
-pub use matrix::MatrixAssignmentWorkspace as ReviewMatrix;
+pub use matrix::MatrixAssignmentWorkspace as BenchMatrix;
 #[allow(missing_docs)]
-pub use matrix::{review_set_matrix_block, review_use_crossover};
+pub use matrix::{bench_set_matrix_block, bench_use_crossover};
 #[allow(missing_docs)]
-pub use crate::gemm::review_use_accelerate;
+pub use crate::linalg::bench_use_accelerate;
 """
 )
 examples = out / "crates/cli/examples"

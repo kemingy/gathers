@@ -149,6 +149,15 @@ The minimal maintained benchmark under `benches/gemm_parallelism/` archives HEAD
 overlays the working matrix/backend sources, and exposes private workspace and
 backend/row-policy overrides only in a temporary copy. No benchmark hooks enter
 the production API. Preparation requires Python 3.12+ and an empty destination.
+The shared checked operations live in `src/linalg.rs`, with its macOS FFI in a nested
+`accelerate` module. Temporary `bench_*` helpers are injected by `prepare.py`:
+
+- `bench_use_accelerate`: select Accelerate or the portable backend.
+- `bench_set_matrix_block`: select the fixed 512-row policy or the adaptive policy.
+- `bench_use_crossover`: enable the tuned crossover or retain the previous threshold.
+
+`BenchMatrix` exposes the private assignment workspace only in that temporary checkout.
+These helpers and their state are absent from production library sources and builds.
 
 ```sh
 python3.12 benches/gemm_parallelism/prepare.py /tmp/gathers-gemm-bench

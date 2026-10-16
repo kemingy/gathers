@@ -8,8 +8,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use gathers::distance::Distance;
 use gathers::kmeans::{
-    ReviewMatrix, base_assign_parallel, review_set_matrix_block, review_use_accelerate,
-    review_use_crossover,
+    BenchMatrix, base_assign_parallel, bench_set_matrix_block, bench_use_accelerate,
+    bench_use_crossover,
 };
 use gathers::utils::try_normalize_rows;
 fn main() -> Result<()> {
@@ -32,10 +32,10 @@ fn main() -> Result<()> {
         try_normalize_rows(&mut c.data, c.dim, false)?;
         distance = Distance::NegativeDotProduct;
     }
-    let mut workspace = ReviewMatrix::try_new(&q.data, c.len(), q.dim, distance).unwrap();
+    let mut workspace = BenchMatrix::try_new(&q.data, c.len(), q.dim, distance).unwrap();
     let mut labels = vec![0; q.len()];
-    review_use_accelerate(false);
-    review_set_matrix_block(512);
+    bench_use_accelerate(false);
+    bench_set_matrix_block(512);
     workspace.assign(&q.data, &c.data, q.dim, &mut labels);
     let oracle = labels.clone();
     if let Some(batch_rows) = args.get(5) {
@@ -44,10 +44,10 @@ fn main() -> Result<()> {
         let batch_values = batch_rows
             .checked_mul(q.dim)
             .context("batch shape overflow")?;
-        review_use_accelerate(true);
-        review_set_matrix_block(1);
+        bench_use_accelerate(true);
+        bench_set_matrix_block(1);
         for crossover in [false, true] {
-            review_use_crossover(crossover);
+            bench_use_crossover(crossover);
             let mut times = Vec::new();
             for repeat in 0..8 {
                 let start = Instant::now();
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
                     .zip(labels.chunks_mut(batch_rows))
                 {
                     if let Some(mut workspace) =
-                        ReviewMatrix::try_new(vectors, c.len(), q.dim, distance)
+                        BenchMatrix::try_new(vectors, c.len(), q.dim, distance)
                     {
                         workspace.assign(vectors, &c.data, q.dim, labels);
                     } else {
@@ -80,8 +80,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
     for (accelerate, policy) in [(false, 512), (false, 1), (true, 512), (true, 1)] {
-        review_use_accelerate(accelerate);
-        review_set_matrix_block(policy);
+        bench_use_accelerate(accelerate);
+        bench_set_matrix_block(policy);
         workspace.assign(&q.data, &c.data, q.dim, &mut labels);
         let times: Vec<_> = (0..7)
             .map(|_| {

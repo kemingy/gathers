@@ -3,8 +3,8 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelI
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
-use crate::gemm::matmul;
 use crate::kmeans::{base_assign, base_assign_parallel};
+use crate::linalg::matmul;
 
 // These crossover and block-size choices are tuned on Apple Silicon. Other targets use the
 // same safe defaults until platform-specific benchmarks justify changing them.

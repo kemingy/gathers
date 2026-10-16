@@ -1,4 +1,4 @@
-//! Shared dense f32 matrix products, with checked Accelerate dispatch on macOS.
+//! Dense f32 linear-algebra operations, with checked Accelerate dispatch on macOS.
 
 use faer::{Accum, MatMut, MatRef, Par};
 
