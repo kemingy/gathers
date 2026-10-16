@@ -28,6 +28,87 @@ fn score(query: &[f32], centroid: &[f32], distance: Distance) -> f32 {
 }
 
 impl Hierarchy {
+    /// Calibrate full-probe pilots with guarded flat assignment, then rank each
+    /// winner's live cell in the unchanged SIMD routing order. Deeper trees and
+    /// cosine retain the reference traversal. Setup and mapping are per call.
+    pub(crate) fn calibrate_batched(
+        &self,
+        vectors: &[f32],
+        labels: &mut [u32],
+        required: &mut [usize],
+        distance: Distance,
+    ) {
+        self.validate(vectors, self.dim, labels);
+        assert_eq!(labels.len(), required.len());
+        let fallback = |labels: &mut [u32], required: &mut [usize]| {
+            self.probe_parallel(
+                vectors,
+                labels,
+                required,
+                ProbeOptions {
+                    distance,
+                    budget: usize::MAX,
+                    incumbent_centroids: None,
+                },
+            );
+        };
+        if self.levels.len() != 2 || distance == Distance::Cosine {
+            fallback(labels, required);
+            return;
+        }
+        // Original-ID ordering preserves full-probe ties across different cells.
+        let mut centers = vec![0.0; self.levels[0].centroids.len()];
+        let mut cells = vec![0; self.leaf_order.len()];
+        let routing = &self.levels[1];
+        for cell in 0..routing.len() {
+            for position in
+                routing.child_offsets[cell] as usize..routing.child_offsets[cell + 1] as usize
+            {
+                let original = self.leaf_order[position] as usize;
+                centers[original * self.dim..(original + 1) * self.dim].copy_from_slice(
+                    &self.levels[0].centroids[position * self.dim..(position + 1) * self.dim],
+                );
+                cells[original] = cell;
+            }
+        }
+        // The flat fallback uses a different argmin tie rule when overflow or
+        // NaNs invalidate its error bounds. Keep the hierarchy reference for
+        // exceptional inputs; this conservative limit also bounds L2 differences.
+        let limit = (f32::MAX / (8.0 * self.dim as f32)).sqrt();
+        if !vectors.iter().chain(&centers).all(|v| v.abs() <= limit) {
+            fallback(labels, required);
+            return;
+        }
+        if let Some(mut workspace) =
+            MatrixAssignmentWorkspace::try_new(vectors, cells.len(), self.dim, distance)
+        {
+            workspace.assign(vectors, &centers, self.dim, labels);
+        } else {
+            fallback(labels, required);
+            return;
+        }
+        // Match the reference even when no finite candidate can win.
+        if labels.iter().any(|&label| label as usize >= cells.len()) {
+            fallback(labels, required);
+            return;
+        }
+        required
+            .par_chunks_mut(64)
+            .zip(labels.par_chunks(64))
+            .zip(vectors.par_chunks(64 * self.dim))
+            .for_each_init(Vec::new, |scores, ((required, labels), vectors)| {
+                pulp::Arch::new().dispatch(RankPilots {
+                    hierarchy: self,
+                    vectors,
+                    labels,
+                    required,
+                    cells: &cells,
+                    distance,
+                    scores,
+                });
+            });
+    }
+
     /// Group a bounded query batch by its selected cells, then assign each group with
     /// the guarded GEMM workspace. Sparse groups retain its ordinary SIMD fallback.
     /// Deeper trees retain the existing traversal; the two real workloads have one
@@ -135,6 +216,54 @@ impl Hierarchy {
                     }
                 }
             });
+    }
+}
+
+struct RankPilots<'a> {
+    hierarchy: &'a Hierarchy,
+    vectors: &'a [f32],
+    labels: &'a [u32],
+    required: &'a mut [usize],
+    cells: &'a [usize],
+    distance: Distance,
+    scores: &'a mut Vec<f32>,
+}
+
+impl pulp::WithSimd for RankPilots<'_> {
+    type Output = ();
+
+    fn with_simd<S: pulp::Simd>(self, simd: S) {
+        let h = self.hierarchy;
+        let routing = &h.levels[1];
+        for ((query, &label), required) in self
+            .vectors
+            .chunks_exact(h.dim)
+            .zip(self.labels)
+            .zip(self.required)
+        {
+            score_range(
+                simd,
+                &routing.centroids,
+                &routing.norms,
+                query,
+                h.dim,
+                self.distance,
+                self.scores,
+            );
+            let winner = self.cells[label as usize];
+            let entry = |node: usize| ScoreEntry {
+                score: self.scores[node],
+                level: 1,
+                node: node as u32,
+            };
+            *required = 1
+                + (0..routing.len())
+                    .filter(|&cell| {
+                        routing.fine_offsets[cell] != routing.fine_offsets[cell + 1]
+                            && entry(cell) > entry(winner)
+                    })
+                    .count();
+        }
     }
 }
 
@@ -247,6 +376,49 @@ mod tests {
                 .map(|i| ((i / dim % 35) as f32 - 17.0) * 0.0625)
                 .collect();
             for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+                let mut reference = vec![0; 1025];
+                let mut expected = vec![0; 1025];
+                h.probe_parallel(
+                    &vectors,
+                    &mut reference,
+                    &mut expected,
+                    ProbeOptions {
+                        distance,
+                        budget: usize::MAX,
+                        incumbent_centroids: None,
+                    },
+                );
+                let mut labels = vec![0; 1025];
+                let mut required = vec![0; 1025];
+                h.calibrate_batched(&vectors, &mut labels, &mut required, distance);
+                assert_eq!(
+                    labels, reference,
+                    "pilot winners dim={dim}, distance={distance:?}"
+                );
+                assert_eq!(
+                    required, expected,
+                    "pilot ranks dim={dim}, distance={distance:?}"
+                );
+                h.calibrate_batched(&[], &mut [], &mut [], distance);
+                // One exceptional row must preserve the full-probe label and rank,
+                // including the no-winner sentinel for an all-NaN score row.
+                for value in [f32::NAN, f32::INFINITY, f32::MAX] {
+                    let mut exceptional = vectors.clone();
+                    exceptional[..dim].fill(value);
+                    h.probe_parallel(
+                        &exceptional,
+                        &mut reference,
+                        &mut expected,
+                        ProbeOptions {
+                            distance,
+                            budget: usize::MAX,
+                            incumbent_centroids: None,
+                        },
+                    );
+                    h.calibrate_batched(&exceptional, &mut labels, &mut required, distance);
+                    assert_eq!(labels, reference);
+                    assert_eq!(required, expected);
+                }
                 for budget in [1, 2, usize::MAX] {
                     for incumbent in [false, true] {
                         let options = ProbeOptions {

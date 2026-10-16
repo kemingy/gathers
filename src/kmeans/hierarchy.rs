@@ -1179,6 +1179,29 @@ mod tests {
             32,
         );
         assert_eq!(batched, actual, "deeper trees retain the SIMD traversal");
+        let mut required = vec![0; queries.len() / dim];
+        hierarchy.probe_parallel(
+            &queries,
+            &mut actual,
+            &mut required,
+            super::ProbeOptions {
+                distance: Distance::SquaredEuclidean,
+                budget: usize::MAX,
+                incumbent_centroids: None,
+            },
+        );
+        let mut batched_required = vec![0; required.len()];
+        hierarchy.calibrate_batched(
+            &queries,
+            &mut batched,
+            &mut batched_required,
+            Distance::SquaredEuclidean,
+        );
+        assert_eq!(batched, actual);
+        assert_eq!(
+            batched_required, required,
+            "deep-tree pilot fallback preserves ranks"
+        );
         let mut greedy = vec![0; 100];
         hierarchy.assign_greedy(&queries, dim, Distance::SquaredEuclidean, &mut greedy);
         assert_eq!(greedy, expected);

@@ -351,3 +351,93 @@ approximate pruning; the GEMM workspace also supports the negative-dot training
 path. Any unified backend selector must account for metric support, batch shape,
 index construction/reuse, and approximation behavior independently of the shared
 hierarchy layer rules and pilot policy.
+
+## GEMM pilot calibration
+
+`--calibration-backend gemm` uses the existing guarded matrix workspace to find
+all pilots' exact fine-centroid winners in a batch. Fine centers are restored to
+original-ID order before assignment so ties across different cells retain the
+full-probe rule. For each winner, calibration counts live cells preceding its
+cell under the same SIMD routing scores and heap ordering, then adds one. Empty
+cells consume no probes. This produces the same required probe count without
+scanning each cell's fine centroids separately. Routing and the budget formula
+remain unchanged; no incumbent is used during calibration.
+
+This shortcut supports one routing layer and the L2/negative-dot training metrics.
+Deeper trees, cosine, ineligible matrix workloads, and exceptional numeric inputs
+retain full-probe SIMD. A conservative coordinate limit avoids invoking the flat
+fallback's different tie rule on non-finite or overflowing scores. Center mapping,
+copying, the numeric check, matrix workspace setup, routing and winner ranking are
+included in calibration timings. No library API or default behavior changes;
+the benchmark's calibration default remains SIMD, independently of
+`--assignment-backend`.
+
+`--calibration-repeats 7` compares both backends seven times at every adaptive
+round, alternating their order, and requires identical pilot labels, every required
+probe count, and the resulting budget. These paired checks/timings occur outside
+training timing. `calibration_s` still includes the actual selected backend plus
+pilot sampling and gathering; paired timings exclude sampling and gathering.
+
+Reproduce the paired calibration comparison on all GIST rows:
+
+```sh
+cargo bench -p gathers-cli --bench adaptive_probe -- \
+  /private/tmp/pr65-real-data/gist.fvecs l2 \
+  --prepared /private/tmp/gathers-full-gist-pca128.fvecs \
+  --assignment-backend gemm --batch-rows 8192 \
+  --calibration-backend gemm --calibration-repeats 7 \
+  --exact-final-rounds 0 --audit-final-probes
+```
+
+For Cohere, use `/Users/keming.yang/workdir/datasets/cohere-large-10m.fvecs cos`,
+`/private/tmp/gathers-full-cohere-pca128.fvecs`, and `--batch-rows 32768`.
+Use `--calibration-backend simd` for the full-probe reference. Both runs retain
+512 pilots and the p99 budget default, all source rows, seed 42 and 16 workers.
+
+On the same M3 Max and full PCA128 workloads described above, seven paired
+measurements per round give the following sums of the ten per-round medians.
+Both paths include their own allocations/setup; these are calibration timings,
+not complete training timings.
+
+| Dataset | SIMD calibration (ms / ten rounds) | GEMM calibration (ms / ten rounds) | Calibration speedup |
+| --- | ---: | ---: | ---: |
+| GIST, all 1M training rows | 25.787 | 17.396 | 1.48x |
+| Cohere, all 10M training rows | 146.757 | 80.335 | 1.83x |
+
+All 512 pilots in each of the twenty dataset-rounds have identical winning labels,
+required probe counts, and budgets across the two backends in every repeat. The
+training budgets and exact final objectives also match the 512/p99 baseline above.
+Final fresh-calibration full-source agreements remain 99.9836% for GIST and
+99.90602% for Cohere, with audit budgets 6 and 11, respectively. No empty clusters
+occur. These observations cover the same seed and cached projections, rather than
+additional initializations or original-space quality.
+
+The isolated calibration savings are about 8 ms and 66 ms per ten training rounds,
+less than 0.2% of total training time. Optimizing calibration alone consequently
+does not establish a useful end-to-end speedup. SIMD remains the experimental CLI
+default; the GEMM variant is available explicitly for comparison.
+
+Two full training trials per backend, in SIMD/GEMM/GEMM/SIMD order, give these
+means and sample standard deviations. Loading/PCA and diagnostic/reference work
+are excluded; grouping, calibration, hierarchy builds and centroid updates are
+included. Only the calibration backend changes. One GEMM trial per dataset also
+runs the paired comparisons and final full-source adaptive audit outside training.
+
+| Dataset | SIMD pilots, training (s) | GEMM pilots, training (s) |
+| --- | ---: | ---: |
+| GIST | 4.706 ± 0.042 | 4.804 ± 0.082 |
+| Cohere | 98.392 ± 1.268 | 98.786 ± 1.945 |
+
+The measured training means are slightly slower with GEMM pilots, rather than
+showing an end-to-end improvement. Two trials cannot establish effects as small
+as the isolated saving; initialization variability was not measured. Commands,
+source/binary hashes, all per-round JSON, and the summary are retained in the
+report directory's `gemm-pilots/`. The interrupted preliminary run before the
+numeric fallback was added is preserved separately and excluded.
+
+For this extension, `make format lint lint-ast test-ast test-rust` passes. Existing
+focused regressions now compare pilot winners and probe counts for both training
+metrics, original-ID ties, empty cells, empty queries, dimension/batch tails,
+non-finite/overflowing rows, and deep-tree fallback. Linux x86-64 and Intel macOS
+benchmark/test compile checks also pass; their binaries are not executed here.
+Python behavior is unchanged and its suite was not rerun for this private experiment.
