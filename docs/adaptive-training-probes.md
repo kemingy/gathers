@@ -441,3 +441,65 @@ metrics, original-ID ties, empty cells, empty queries, dimension/batch tails,
 non-finite/overflowing rows, and deep-tree fallback. Linux x86-64 and Intel macOS
 benchmark/test compile checks also pass; their binaries are not executed here.
 Python behavior is unchanged and its suite was not rerun for this private experiment.
+
+## Native SIFT128 L2 verification
+
+Use every row of the newly supplied local
+`/Users/keming.yang/workdir/datasets/sift/sift_base.fvecs`: 1,000,000 x 128,
+squared L2, K = 3,943. The existing prepared-input argument points directly at
+this source file, which is already 128-dimensional; no PCA, normalization, row
+sampling for training, or dataset rewriting occurs. The separate 100K learning
+and 10K query files are not substitutes for the base corpus. Only calibration
+and the diagnostic holdout use samples.
+
+The same M3 Max, optimized binary from `405bcb0`, 16 workers, seed 42, ten rounds,
+512 pilots/p99 policy, incumbent, and batch 8,192 are used. There are two full
+training trials per pilot backend in SIMD/GEMM/GEMM/SIMD order, followed by two
+exact-training baselines, all serial with no concurrent compilation or tests.
+No exact cleanup rounds are added to adaptive training. Means and sample standard
+deviations cover training; loading and diagnostic/final audits are excluded.
+
+| Method | Training (s) | Final exact-assigned mean squared L2 |
+| --- | ---: | ---: |
+| Exact flat GEMM | 5.677 ± 0.027 | 44846.94449 |
+| Adaptive, SIMD pilots, grouped GEMM assignments | 4.369 ± 0.049 | 44848.34650 |
+| Adaptive, GEMM pilots, grouped GEMM assignments | 4.281 ± 0.018 | 44848.34650 |
+
+Adaptive training with GEMM pilots is **1.33x faster than exact training** in
+these trials, with a **+0.00313%** objective gap. This comparison changes assignment
+from exact to adaptive; it is distinct from the pilot-backend comparison.
+Pilot GEMM itself improves paired calibration from 25.842 ms to 17.685 ms across
+ten rounds (sum of seven-repeat per-round medians), or **1.46x**. That saves only
+8.16 ms, about 0.19% of training. The observed 2% difference between adaptive
+training means cannot be attributed to that isolated saving from two trials.
+No automatic backend or budget default changes follow from this verification.
+
+All 512 pilot winners, required counts and budgets match full-probe SIMD at every
+round across seven alternating-order paired repeats. Comparing grouped GEMM
+against SIMD on all 1M rows in each of ten rounds gives **zero differences across
+10M assignments**. The four adaptive trials have identical budgets
+`7, 6, 6, 6, 5, 6, 5, 7, 6, 7` and final objective. Every trial completes without
+empty training or final clusters.
+
+After the final centroid update, fresh pilot calibration selects budget 6. Adaptive
+assignment with the incumbent agrees with exact full scan at those same final
+centroids on **999,903 / 1,000,000 rows (99.9903%)**. This is not a comparison of
+label IDs between independently trained exact and adaptive models. Only one
+initialization is covered; the two timing trials reuse it.
+
+Reproduce the full-source equivalence and calibration checks:
+
+```sh
+cargo bench -p gathers-cli --bench adaptive_probe -- \
+  /Users/keming.yang/workdir/datasets/sift/sift_base.fvecs l2 \
+  --prepared /Users/keming.yang/workdir/datasets/sift/sift_base.fvecs \
+  --assignment-backend gemm --batch-rows 8192 \
+  --calibration-backend gemm --calibration-repeats 7 --compare-backends \
+  --exact-final-rounds 0 --audit-final-probes
+```
+
+Use `--calibration-backend simd` for the pilot ablation, and `--method exact`
+without comparison/audit switches for the exact-training baseline. Commands,
+metadata, binary hash and per-round results are retained under the report directory's
+`sift-native128/`. Verification uses the previously checked binary unchanged;
+this addition updates only the documentation and records the new dataset evidence.
