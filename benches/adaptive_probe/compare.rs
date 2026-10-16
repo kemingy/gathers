@@ -65,6 +65,18 @@ struct Args {
     /// random seed for initialization, calibration and audits
     #[argh(option, default = "42")]
     seed: u64,
+    /// assignment backend: simd or gemm
+    #[argh(option, default = "String::from(\"simd\")")]
+    assignment_backend: String,
+    /// maximum source rows grouped together for leaf GEMMs
+    #[argh(option, default = "32768")]
+    batch_rows: usize,
+    /// compare every full-source probing assignment against the SIMD backend
+    #[argh(switch)]
+    compare_backends: bool,
+    /// audit final adaptive labels against exact assignment on every source row
+    #[argh(switch)]
+    audit_final_probes: bool,
     /// omit previous-assignment incumbent (ablation)
     #[argh(switch)]
     no_incumbent: bool,
@@ -142,6 +154,11 @@ fn main() -> Result<()> {
         matches!(args.metric, Distance::SquaredEuclidean | Distance::Cosine),
         "use l2 or cos"
     );
+    ensure!(
+        matches!(args.assignment_backend.as_str(), "simd" | "gemm"),
+        "invalid backend"
+    );
+    ensure!(args.batch_rows > 0, "batch rows must be positive");
     ensure!(
         matches!(args.method.as_str(), "exact" | "adaptive" | "fixed"),
         "invalid method"
@@ -257,11 +274,33 @@ fn main() -> Result<()> {
         } else {
             None
         };
+        let comparison_setup_start = Instant::now();
+        let prior_labels = (args.compare_backends && approximate).then(|| labels.clone());
+        let comparison_setup_s = comparison_setup_start.elapsed().as_secs_f64();
         let start = Instant::now();
         if let Some(h) = &h {
+            let options = ProbeOptions {
+                distance,
+                budget: selected_budget,
+                incumbent_centroids: (iteration > 0 && !args.no_incumbent)
+                    .then_some(centroids.as_slice()),
+            };
+            if args.assignment_backend == "gemm" {
+                h.probe_batched(&vectors, &mut labels, options, args.batch_rows);
+            } else {
+                h.probe_parallel(&vectors, &mut labels, &mut [], options);
+            }
+        } else {
+            exact(&vectors, &centroids, dim, distance, &mut labels);
+        }
+        let assignment_s = start.elapsed().as_secs_f64();
+        let diagnostic_start = Instant::now();
+        let mut reference_assignment_s = None;
+        let backend_mismatches = if let (Some(h), Some(mut reference)) = (&h, prior_labels) {
+            let reference_start = Instant::now();
             h.probe_parallel(
                 &vectors,
-                &mut labels,
+                &mut reference,
                 &mut [],
                 ProbeOptions {
                     distance,
@@ -270,11 +309,20 @@ fn main() -> Result<()> {
                         .then_some(centroids.as_slice()),
                 },
             );
+            reference_assignment_s = Some(reference_start.elapsed().as_secs_f64());
+            let mismatches = labels
+                .iter()
+                .zip(&reference)
+                .filter(|(a, b)| a != b)
+                .count();
+            ensure!(
+                mismatches == 0,
+                "batched/SIMD assignment mismatches: {mismatches}"
+            );
+            Some(mismatches)
         } else {
-            exact(&vectors, &centroids, dim, distance, &mut labels);
-        }
-        let assignment_s = start.elapsed().as_secs_f64();
-        let diagnostic_start = Instant::now();
+            None
+        };
         let assigned_audit: Vec<_> = audit_indices.iter().map(|&i| labels[i]).collect();
         let mut exact_audit = vec![0; audit_indices.len()];
         exact(&audit, &centroids, dim, distance, &mut exact_audit);
@@ -293,7 +341,7 @@ fn main() -> Result<()> {
             );
         }
         let audit_objective = objective(&audit, &centroids, dim, distance, &exact_audit);
-        let round_diagnostic_s = diagnostic_start.elapsed().as_secs_f64();
+        let round_diagnostic_s = diagnostic_start.elapsed().as_secs_f64() + comparison_setup_s;
         diagnostic_s += round_diagnostic_s;
         let start = Instant::now();
         let empties = empty_count(&labels, count);
@@ -310,7 +358,7 @@ fn main() -> Result<()> {
         completed += 1;
         println!(
             "{}",
-            json!({"phase":"round", "method":args.method, "pilots":args.pilots, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
+            json!({"phase":"round", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
         );
         if empties != 0 {
             stopped_empty = empties;
@@ -323,9 +371,42 @@ fn main() -> Result<()> {
     let final_exact_assignment_s = start.elapsed().as_secs_f64();
     let final_objective = objective(&vectors, &centroids, dim, distance, &final_labels);
     let final_empty = empty_count(&final_labels, count);
+    let final_probe_start = Instant::now();
+    let final_probe_audit = if args.audit_final_probes && args.method != "exact" {
+        let h = Hierarchy::build(
+            &centroids,
+            dim,
+            Some(args.seed.wrapping_add(args.iterations as u64)),
+        )
+        .expect("dataset must support hierarchy");
+        let mut pilot_rng =
+            StdRng::seed_from_u64(args.seed.wrapping_add(20_000 + args.iterations as u64));
+        let indices = sample_indices(rows, args.pilots, &mut pilot_rng);
+        let (selected_budget, _, _) = calibrate(&h, &gather(&vectors, dim, &indices), distance);
+        let options = ProbeOptions {
+            distance,
+            budget: selected_budget,
+            incumbent_centroids: (!args.no_incumbent).then_some(centroids.as_slice()),
+        };
+        if args.assignment_backend == "gemm" {
+            h.probe_batched(&vectors, &mut labels, options, args.batch_rows);
+        } else {
+            h.probe_parallel(&vectors, &mut labels, &mut [], options);
+        }
+        let matches = labels
+            .iter()
+            .zip(&final_labels)
+            .filter(|(a, b)| a == b)
+            .count();
+        Some(
+            json!({"budget":selected_budget, "matches":matches, "rows":rows, "agreement":matches as f64 / rows as f64}),
+        )
+    } else {
+        None
+    };
     println!(
         "{}",
-        json!({"phase":"summary", "method":args.method, "pilots":args.pilots, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
+        json!({"phase":"summary", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
     );
     Ok(())
 }

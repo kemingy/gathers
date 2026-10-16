@@ -196,3 +196,109 @@ all. The Python suite passes all 73 tests.
 `cargo check --offline -p gathers-cli --bench adaptive_probe --target TARGET` passes
 for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`. These are compile checks;
 all runtime timing and dataset evidence above is from Apple Silicon.
+
+## Grouped leaf GEMM experiment
+
+`--assignment-backend gemm` retains the full-probe pilot calibration and routing
+scores from the SIMD implementation. For a hierarchy with one routing layer, each
+bounded source batch selects the same nonempty cells, groups query indices by
+selected cell, gathers each group's vectors, and calls the existing guarded matrix
+assignment workspace against that cell's fine centroids. Sparse groups retain the
+workspace's normal SIMD fallback. Each cell's centers are sorted by original ID so
+local argmin ties preserve the hierarchy's original-ID tie rule. Winners from all
+selected cells are merged with the previous assignment's centroid, reevaluated at
+its current coordinates. Deeper trees retain the existing SIMD traversal.
+
+The initial experiment batches the fine scans only. Routing still uses the original
+SIMD scores, making the selected cells directly comparable. It does not change the
+pilot policy or introduce a new default into the library. `--batch-rows` bounds query
+grouping memory and controls the GEMM size/parallelism tradeoff. Gathering repeats
+query rows across their selected cells; this additional memory traffic is measured,
+as are grouping, workspace creation, and original-ID remapping.
+
+Use `--compare-backends` to verify every source label against SIMD probing at the
+same centroids and budget in every round. Reference comparisons and their setup are
+excluded from training timing and reported separately; process wall time includes
+them. `--audit-final-probes` additionally rebuilds/calibrates on the final updated
+centroids and compares adaptive labels with the exact final assignment over every
+source row, retaining the current-coordinate incumbent. This final audit is outside
+training time. Its agreement is distinct from the held-out, pre-update per-round
+agreement and from agreement with a separately trained exact model.
+
+```sh
+cargo bench -p gathers-cli --bench adaptive_probe -- \
+  /private/tmp/pr65-real-data/gist.fvecs l2 \
+  --prepared /private/tmp/gathers-full-gist-pca128.fvecs \
+  --method adaptive --pilots 256 --exact-final-rounds 0 \
+  --assignment-backend gemm --batch-rows 32768 \
+  --compare-backends --audit-final-probes
+```
+
+Hardware and projection protocol remain as above. Raw measurements, serial commands,
+and source/binary hashes are under the report directory's `batched-gemm/` subdirectory.
+
+### Grouped GEMM results
+
+Full local source rows, PCA128, ten adaptive rounds, 256 fresh pilots per round,
+seed 42, and no exact cleanup, on the M3 Max/16-worker setup above. All timed runs
+were serial, without concurrent compilation or tests. These are training-stage
+measurements including grouping/gathering and workspace setup, excluding shared PCA
+preparation/loading and quality diagnostics.
+
+| Dataset | Exact flat training | Adaptive SIMD training | Grouped GEMM training | Exact / grouped GEMM |
+| --- | ---: | ---: | ---: | ---: |
+| GIST, 1M rows | 5.566 ± 0.181 s (3 runs) | 14.429 s (1 run) | 4.423 ± 0.076 s (3 runs; batch 8,192) | 1.26x |
+| Cohere, 10M rows | 320.377 s (1 fresh run) | 207.994 s (earlier run above) | 81.680 ± 2.179 s (2 runs; batch 32,768) | 3.92x |
+
+The ± values are sample standard deviations of complete repeated trials with the
+same initialization, not variation across seeds. Cohere's two grouped measurements
+are 83.221 and 80.140 s. The first trial includes full-source SIMD comparisons
+outside training timing; the second omits them. Interleaved diagnostics can still
+influence cache/thermal state. The fresh exact Cohere result is 3.4% slower than the
+earlier 309.955 s baseline; either baseline leaves a substantial improvement.
+
+Batch sensitivity, with all other parameters fixed:
+
+| Maximum source batch rows | GIST training (s) | Cohere training (s) |
+| --- | ---: | ---: |
+| 8,192 | 4.423 ± 0.076 (3 runs) | 86.154 (1 run) |
+| 32,768 | 4.798 (1 run) | 81.680 ± 2.179 (2 runs) |
+| 131,072 | 5.206 (1 run) | 82.230 (1 run) |
+
+The larger batches do not universally win. GIST favors 8,192 here; Cohere's
+32,768/131,072 difference is small relative to the observed repeated-run variation.
+The benchmark default remains 32,768; these results do not introduce an automatic
+production batch-size policy.
+
+At batch 32,768, comparisons against the current SIMD implementation found **zero
+mismatches in all 110 million assignments** (1M + 10M rows, each over ten rounds).
+Cohere assignment totals in that paired trial were 76.716 s for grouped GEMM and
+195.671 s for SIMD; rebuild/calibration/update cost another 6.505 s for the grouped
+training path. The per-round held-out agreements and pilot budgets match the
+previous all-adaptive trajectory. Every tested batch finishes without empty clusters
+and with the same exact final objective as adaptive SIMD: 0.7702690705478242 for
+GIST, 0.09758219875674248 for Cohere. Differences from separately trained exact
+centroids remain +0.0100% and +0.0461%, respectively.
+
+After the final centroid update, a new hierarchy and fresh 256-pilot calibration,
+retaining the current-coordinate incumbent, give full-source agreement with exact
+assignment **against those same final centroids**:
+
+| Dataset | Final calibrated budget | Exact-label matches | Agreement |
+| --- | ---: | ---: | ---: |
+| GIST | 5 | 999,635 / 1,000,000 | 99.9635% |
+| Cohere | 7 | 9,972,716 / 10,000,000 | 99.72716% |
+
+These full-source audits close the earlier missing post-update agreement
+measurement. They do not compare label IDs between separately trained models or
+establish population guarantees for future datasets. Only one initialization was
+tested. Original-space reconstructed-centroid quality remains unmeasured.
+
+For this extension, `make format lint lint-ast test-ast test-rust` passed. The private
+integration target now runs 33 tests, including the existing matrix and
+linear-algebra coverage compiled alongside the hierarchy, a focused grouped-scan
+regression covering both metrics, original-ID ties, incumbents, empty cells, short
+batches and tails, and the existing deep-tree test extended to check SIMD fallback.
+The benchmark and integration target also pass offline compile checks for Linux
+x86-64 and Intel macOS. Python behavior is unchanged; its suite was not rerun for
+this private benchmark extension.
