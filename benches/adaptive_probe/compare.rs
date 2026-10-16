@@ -71,6 +71,12 @@ struct Args {
     /// assignment backend: simd or gemm
     #[argh(option, default = "String::from(\"simd\")")]
     assignment_backend: String,
+    /// pilot backend: simd or gemm (independent of source assignment)
+    #[argh(option, default = "String::from(\"simd\")")]
+    calibration_backend: String,
+    /// paired calibration checks and timings per round, excluded from training time
+    #[argh(option, default = "0")]
+    calibration_repeats: usize,
     /// maximum source rows grouped together for leaf GEMMs
     #[argh(option, default = "32768")]
     batch_rows: usize,
@@ -140,19 +146,24 @@ fn calibrate(
     pilots: &[f32],
     distance: Distance,
     percentile: usize,
+    backend: &str,
 ) -> (usize, Vec<usize>, Vec<u32>) {
     let mut required = vec![0; pilots.len() / 128];
     let mut labels = vec![0; required.len()];
-    h.probe_parallel(
-        pilots,
-        &mut labels,
-        &mut required,
-        ProbeOptions {
-            distance,
-            budget: usize::MAX,
-            incumbent_centroids: None,
-        },
-    );
+    if backend == "gemm" {
+        h.calibrate_batched(pilots, &mut labels, &mut required, distance);
+    } else {
+        h.probe_parallel(
+            pilots,
+            &mut labels,
+            &mut required,
+            ProbeOptions {
+                distance,
+                budget: usize::MAX,
+                incumbent_centroids: None,
+            },
+        );
+    }
     (budget(&required, percentile), required, labels)
 }
 
@@ -165,6 +176,10 @@ fn main() -> Result<()> {
     ensure!(
         matches!(args.assignment_backend.as_str(), "simd" | "gemm"),
         "invalid backend"
+    );
+    ensure!(
+        matches!(args.calibration_backend.as_str(), "simd" | "gemm"),
+        "invalid calibration backend"
     );
     ensure!(args.batch_rows > 0, "batch rows must be positive");
     ensure!(
@@ -272,8 +287,13 @@ fn main() -> Result<()> {
                         .take(args.pilots)
                         .collect();
                 pilot_vectors = gather(&vectors, dim, &indices);
-                let (b, mut required, winners) =
-                    calibrate(&h, &pilot_vectors, distance, args.probe_percentile);
+                let (b, mut required, winners) = calibrate(
+                    &h,
+                    &pilot_vectors,
+                    distance,
+                    args.probe_percentile,
+                    &args.calibration_backend,
+                );
                 calibration_s = start.elapsed().as_secs_f64();
                 required.sort_unstable();
                 p98 = required[(98 * required.len()).div_ceil(100) - 1];
@@ -338,6 +358,36 @@ fn main() -> Result<()> {
         } else {
             None
         };
+        if let Some(h) = h.as_ref().filter(|_| !pilot_vectors.is_empty()) {
+            let mut timings = [Vec::new(), Vec::new()];
+            for repeat in 0..args.calibration_repeats {
+                let mut results = Vec::new();
+                // Alternate order to reduce systematic cache/thermal bias.
+                for backend in if repeat % 2 == 0 {
+                    ["simd", "gemm"]
+                } else {
+                    ["gemm", "simd"]
+                } {
+                    let start = Instant::now();
+                    let result =
+                        calibrate(h, &pilot_vectors, distance, args.probe_percentile, backend);
+                    timings[usize::from(backend == "gemm")].push(start.elapsed().as_secs_f64());
+                    results.push(result);
+                }
+                ensure!(
+                    results[0] == results[1],
+                    "pilot labels, ranks or budgets differ in round {}",
+                    iteration + 1
+                );
+            }
+            if args.calibration_repeats > 0 {
+                println!(
+                    "{}",
+                    json!({"phase":"calibration_comparison", "iteration":iteration+1,
+                    "simd_s":timings[0], "gemm_s":timings[1], "mismatches":0})
+                );
+            }
+        }
         let assigned_audit: Vec<_> = audit_indices.iter().map(|&i| labels[i]).collect();
         let mut exact_audit = vec![0; audit_indices.len()];
         exact(&audit, &centroids, dim, distance, &mut exact_audit);
@@ -373,7 +423,7 @@ fn main() -> Result<()> {
         completed += 1;
         println!(
             "{}",
-            json!({"phase":"round", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p99":p99, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
+            json!({"phase":"round", "calibration_backend":args.calibration_backend, "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p99":p99, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
         );
         if empties != 0 {
             stopped_empty = empties;
@@ -402,6 +452,7 @@ fn main() -> Result<()> {
             &gather(&vectors, dim, &indices),
             distance,
             args.probe_percentile,
+            &args.calibration_backend,
         );
         let options = ProbeOptions {
             distance,
@@ -426,7 +477,7 @@ fn main() -> Result<()> {
     };
     println!(
         "{}",
-        json!({"phase":"summary", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
+        json!({"phase":"summary", "calibration_backend":args.calibration_backend, "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
     );
     Ok(())
 }
