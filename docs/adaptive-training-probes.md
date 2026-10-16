@@ -6,6 +6,9 @@ alongside the exact matrix workspace from `2295538`. No benchmark hooks or new
 public library APIs are exported. The original checkout and its uncommitted changes
 are untouched.
 
+The original protocol and results below use p98; the current experimental defaults
+are specified separately below.
+
 For each approximate Lloyd round:
 
 1. Build a fresh hierarchy from the current fine centroids, using PR65's existing
@@ -46,6 +49,15 @@ The measured objective is in the PCA128 training space: mean squared L2 for GIST
 and mean `1 - dot` for normalized Cohere projections. Original-space reconstructed
 centroid quality and a complete disk-to-output workflow are separate questions.
 Neither pilot p98 nor pilot p100 provides a recall guarantee for unobserved rows.
+
+## Current experimental defaults
+
+The benchmark now defaults to **512 fresh pilots per approximate round** and
+`min(p100, ceil(1.10 * p99))`, using the nearest-rank p99. It remains a private
+experiment; default library training is unchanged. `--probe-percentile 98` and
+`--pilots 256` reproduce the earlier policy. The p98 results below are historical
+measurements, not measurements of the new default. The exact-cleanup and backend
+defaults remain unchanged.
 
 ## Workloads and timing
 
@@ -171,7 +183,7 @@ reconstructed centroid quality.
 cargo bench -p gathers-cli --bench adaptive_probe -- \
   /private/tmp/pr65-real-data/gist.fvecs l2 \
   --prepared /private/tmp/gathers-full-gist-pca128.fvecs \
-  --method adaptive --pilots 256
+  --method adaptive --pilots 256 --probe-percentile 98
 ```
 
 Repeat with `--pilots 512` and `--pilots 1024`; `--method exact` runs the exact
@@ -229,7 +241,7 @@ agreement and from agreement with a separately trained exact model.
 cargo bench -p gathers-cli --bench adaptive_probe -- \
   /private/tmp/pr65-real-data/gist.fvecs l2 \
   --prepared /private/tmp/gathers-full-gist-pca128.fvecs \
-  --method adaptive --pilots 256 --exact-final-rounds 0 \
+  --method adaptive --pilots 256 --probe-percentile 98 --exact-final-rounds 0 \
   --assignment-backend gemm --batch-rows 32768 \
   --compare-backends --audit-final-probes
 ```
@@ -302,3 +314,40 @@ batches and tails, and the existing deep-tree test extended to check SIMD fallba
 The benchmark and integration target also pass offline compile checks for Linux
 x86-64 and Intel macOS. Python behavior is unchanged; its suite was not rerun for
 this private benchmark extension.
+
+## Validation of the 512-pilot p99 default
+
+The new default uses 512 pilots and `min(p100, ceil(1.10 * p99))`. An explicit
+`--probe-percentile 98` preserves the earlier baseline. One full-source trial per
+dataset exercises the actual CLI defaults by omitting both pilot and percentile
+options. All ten rounds use adaptive probing, without exact cleanup, with the same
+PCA128 caches, seed 42, current-coordinate incumbent, M3 Max, and sixteen workers
+as above. GIST uses batch 8,192; Cohere uses batch 32,768. Training includes setup,
+grouping/gathering, assignment and updates, while loading/PCA and audits are excluded.
+
+| Dataset | Training (s) | Final objective difference versus exact training | Full-source final agreement | Final audit budget | Empty final clusters |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GIST, all 1M rows | 4.861 | +0.00686% | 99.9836% | 6 | 0 |
+| Cohere, all 10M rows | 100.233 | +0.02727% | 99.90602% | 11 | 0 |
+
+The ten training budgets are `7, 6, 6, 7, 6, 7, 7, 6, 5, 6` for GIST and
+`17, 11, 11, 10, 11, 11, 8, 13, 16, 13` for Cohere. Final audit agreement is
+against full scan at the same final updated centroids, after fresh calibration,
+with the incumbent; it is not agreement with the separately trained exact model.
+The larger pilot count and percentile jointly improve observed agreement and
+objective gap versus the previous 256/p98 configuration, at additional runtime.
+These single-seed observations do not isolate their individual contributions or
+establish run-to-run variance. Raw commands, JSON results, hashes, and an excluded
+empty-output Cohere attempt are retained under the report directory's `p99-default/`.
+
+The regression covers nearest-rank boundaries, margin rounding, maximum capping,
+and distinct p98/p99 outcomes for 256/512/1,024 pilots. Formatting, Makefile lint,
+AST checks, and Rust workspace tests pass for this default change.
+
+The matrix workspace's existing comparison-count thresholds choose GEMM versus
+**direct SIMD**, not GEMM versus RaBitQ. The latter still lacks a calibrated
+selection rule for the current adaptive hierarchy. RaBitQ supports L2 and uses
+approximate pruning; the GEMM workspace also supports the negative-dot training
+path. Any unified backend selector must account for metric support, batch shape,
+index construction/reuse, and approximation behavior independently of the shared
+hierarchy layer rules and pilot policy.

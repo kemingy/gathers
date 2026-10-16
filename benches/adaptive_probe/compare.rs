@@ -51,8 +51,11 @@ struct Args {
     #[argh(option, default = "String::from(\"adaptive\")")]
     method: String,
     /// calibration rows; no effect on training row count
-    #[argh(option, default = "256")]
+    #[argh(option, default = "policy::DEFAULT_PILOTS")]
     pilots: usize,
+    /// pilot nearest-rank percentile; use 98 to reproduce the historical baseline
+    #[argh(option, default = "policy::DEFAULT_PERCENTILE")]
+    probe_percentile: usize,
     /// exact final rounds, included in iteration limit
     #[argh(option, default = "2")]
     exact_final_rounds: usize,
@@ -132,7 +135,12 @@ fn empty_count(labels: &[u32], count: usize) -> usize {
     sizes.iter().filter(|&&n| n == 0).count()
 }
 
-fn calibrate(h: &Hierarchy, pilots: &[f32], distance: Distance) -> (usize, Vec<usize>, Vec<u32>) {
+fn calibrate(
+    h: &Hierarchy,
+    pilots: &[f32],
+    distance: Distance,
+    percentile: usize,
+) -> (usize, Vec<usize>, Vec<u32>) {
     let mut required = vec![0; pilots.len() / 128];
     let mut labels = vec![0; required.len()];
     h.probe_parallel(
@@ -145,7 +153,7 @@ fn calibrate(h: &Hierarchy, pilots: &[f32], distance: Distance) -> (usize, Vec<u
             incumbent_centroids: None,
         },
     );
-    (budget(&required), required, labels)
+    (budget(&required, percentile), required, labels)
 }
 
 fn main() -> Result<()> {
@@ -162,6 +170,10 @@ fn main() -> Result<()> {
     ensure!(
         matches!(args.method.as_str(), "exact" | "adaptive" | "fixed"),
         "invalid method"
+    );
+    ensure!(
+        (1..=100).contains(&args.probe_percentile),
+        "probe percentile must be in 1..=100"
     );
     ensure!(
         (256..=1024).contains(&args.pilots),
@@ -235,6 +247,7 @@ fn main() -> Result<()> {
         let mut build_s = 0.0;
         let mut calibration_s = 0.0;
         let mut p98 = 0;
+        let mut p99 = 0;
         let mut p100 = 0;
         let mut selected_budget = 0;
         let mut pilot_labels = Vec::new();
@@ -259,10 +272,12 @@ fn main() -> Result<()> {
                         .take(args.pilots)
                         .collect();
                 pilot_vectors = gather(&vectors, dim, &indices);
-                let (b, mut required, winners) = calibrate(&h, &pilot_vectors, distance);
+                let (b, mut required, winners) =
+                    calibrate(&h, &pilot_vectors, distance, args.probe_percentile);
                 calibration_s = start.elapsed().as_secs_f64();
                 required.sort_unstable();
                 p98 = required[(98 * required.len()).div_ceil(100) - 1];
+                p99 = required[(99 * required.len()).div_ceil(100) - 1];
                 p100 = required[required.len() - 1];
                 selected_budget = b;
                 pilot_labels = winners;
@@ -358,7 +373,7 @@ fn main() -> Result<()> {
         completed += 1;
         println!(
             "{}",
-            json!({"phase":"round", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
+            json!({"phase":"round", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p99":p99, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
         );
         if empties != 0 {
             stopped_empty = empties;
@@ -382,7 +397,12 @@ fn main() -> Result<()> {
         let mut pilot_rng =
             StdRng::seed_from_u64(args.seed.wrapping_add(20_000 + args.iterations as u64));
         let indices = sample_indices(rows, args.pilots, &mut pilot_rng);
-        let (selected_budget, _, _) = calibrate(&h, &gather(&vectors, dim, &indices), distance);
+        let (selected_budget, _, _) = calibrate(
+            &h,
+            &gather(&vectors, dim, &indices),
+            distance,
+            args.probe_percentile,
+        );
         let options = ProbeOptions {
             distance,
             budget: selected_budget,
@@ -406,7 +426,7 @@ fn main() -> Result<()> {
     };
     println!(
         "{}",
-        json!({"phase":"summary", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
+        json!({"phase":"summary", "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
     );
     Ok(())
 }
