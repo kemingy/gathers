@@ -52,7 +52,7 @@ fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     Some(values)
 }
 
-fn matmul_block_size(
+pub(crate) fn matmul_block_size(
     num_vectors: usize,
     num_centroids: usize,
     num_threads: usize,
@@ -138,41 +138,39 @@ impl BestTwo {
     }
 }
 
-impl Distance {
-    fn matrix_scale(self) -> f32 {
-        match self {
-            Self::SquaredEuclidean => -2.0,
-            Self::NegativeDotProduct | Self::Cosine => -1.0,
-        }
+fn matrix_scale(distance: Distance) -> f32 {
+    match distance {
+        Distance::SquaredEuclidean => -2.0,
+        Distance::NegativeDotProduct | Distance::Cosine => -1.0,
     }
+}
 
-    fn matrix_norm(self, values: &[f32]) -> f32 {
-        match self {
-            Self::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
-            Self::NegativeDotProduct | Self::Cosine => stable_l2_norm(values),
-        }
+fn matrix_norm(distance: Distance, values: &[f32]) -> f32 {
+    match distance {
+        Distance::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
+        Distance::NegativeDotProduct | Distance::Cosine => stable_l2_norm(values),
     }
+}
 
-    fn matrix_uncertainty(
-        self,
-        gamma: f32,
-        vector_norm: f32,
-        max_centroid_norm: f32,
-        underflow_error: f32,
-    ) -> f32 {
-        match self {
-            // The norm identity can suffer cancellation. The safety factor is an
-            // engineering margin, not part of Higham's gamma_n bound.
-            Self::SquaredEuclidean => {
-                L2_ERROR_BOUND_SAFETY_FACTOR
-                    * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error)
-            }
-            // Cauchy-Schwarz bounds the magnitude of the exact dot product by
-            // ||x||₂ ||c||₂.
-            Self::NegativeDotProduct | Self::Cosine => {
-                DOT_ERROR_BOUND_SAFETY_FACTOR
-                    * (gamma * vector_norm * max_centroid_norm + underflow_error)
-            }
+fn matrix_uncertainty(
+    distance: Distance,
+    gamma: f32,
+    vector_norm: f32,
+    max_centroid_norm: f32,
+    underflow_error: f32,
+) -> f32 {
+    match distance {
+        // The norm identity can suffer cancellation. The safety factor is an
+        // engineering margin, not part of Higham's gamma_n bound.
+        Distance::SquaredEuclidean => {
+            L2_ERROR_BOUND_SAFETY_FACTOR
+                * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error)
+        }
+        // Cauchy-Schwarz bounds the magnitude of the exact dot product by
+        // ||x||₂ ||c||₂.
+        Distance::NegativeDotProduct | Distance::Cosine => {
+            DOT_ERROR_BOUND_SAFETY_FACTOR
+                * (gamma * vector_norm * max_centroid_norm + underflow_error)
         }
     }
 }
@@ -190,13 +188,29 @@ impl MatrixAssignmentWorkspace {
         dim: usize,
         distance: Distance,
     ) -> Option<Self> {
+        Self::try_new_with_threshold(
+            vecs,
+            num_centroids,
+            dim,
+            distance,
+            matrix_assignment_threshold(vecs.len().checked_div(dim)?, dim),
+        )
+    }
+
+    // Explicit inputs let the real-data benchmark compare policies without global overrides.
+    pub(crate) fn try_new_with_threshold(
+        vecs: &[f32],
+        num_centroids: usize,
+        dim: usize,
+        distance: Distance,
+        assignment_threshold: usize,
+    ) -> Option<Self> {
         // Cosine fitting normalizes rows and uses the dot-product workspace instead.
         if distance == Distance::Cosine {
             return None;
         }
         let num_vectors = vecs.len() / dim;
         let comparison_count = num_vectors.checked_mul(num_centroids)?;
-        let assignment_threshold = matrix_assignment_threshold(num_vectors, dim);
         if !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
             || num_centroids < 2
             || comparison_count < assignment_threshold
@@ -210,7 +224,7 @@ impl MatrixAssignmentWorkspace {
             .par_iter_mut()
             .zip(vecs.par_chunks_exact(dim))
             .for_each(|(norm, vector)| {
-                *norm = distance.matrix_norm(vector);
+                *norm = matrix_norm(distance, vector);
             });
         Some(Self {
             distance,
@@ -226,6 +240,23 @@ impl MatrixAssignmentWorkspace {
         dim: usize,
         labels: &mut [u32],
     ) {
+        let block_size = matmul_block_size(
+            labels.len(),
+            centroids.len() / dim,
+            rayon::current_num_threads(),
+        );
+        self.assign_with_kernel(vecs, centroids, dim, labels, block_size, matmul);
+    }
+
+    pub(crate) fn assign_with_kernel(
+        &mut self,
+        vecs: &[f32],
+        centroids: &[f32],
+        dim: usize,
+        labels: &mut [u32],
+        block_size: Option<usize>,
+        multiply: impl Fn(MatMut<'_, f32>, Accum, MatRef<'_, f32>, MatRef<'_, f32>, f32, Par) + Sync,
+    ) {
         let num_centroids = centroids.len() / dim;
         debug_assert_eq!(self.vector_norms.len(), vecs.len() / dim);
         debug_assert_eq!(self.centroid_norms.len(), num_centroids);
@@ -234,7 +265,7 @@ impl MatrixAssignmentWorkspace {
             .par_iter_mut()
             .zip(centroids.par_chunks_exact(dim))
             .for_each(|(norm, centroid)| {
-                *norm = self.distance.matrix_norm(centroid);
+                *norm = matrix_norm(self.distance, centroid);
             });
         let centroid_norms_are_finite = self.centroid_norms.iter().all(|norm| norm.is_finite());
         let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
@@ -248,9 +279,7 @@ impl MatrixAssignmentWorkspace {
         // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
         let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
-        let Some(block_size) =
-            matmul_block_size(labels.len(), num_centroids, rayon::current_num_threads())
-        else {
+        let Some(block_size) = block_size else {
             base_assign_parallel(vecs, centroids, dim, self.distance, labels);
             return;
         };
@@ -264,7 +293,7 @@ impl MatrixAssignmentWorkspace {
         };
         let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
         let scratch_len = block_size * centroid_block_size;
-        let scale = self.distance.matrix_scale();
+        let scale = matrix_scale(self.distance);
         labels
             .par_chunks_mut(block_size)
             .zip(self.vector_norms.par_chunks(block_size))
@@ -293,7 +322,7 @@ impl MatrixAssignmentWorkspace {
                         let tile_start = tile_index * centroid_block_size;
                         let tile_rows = centroid_norm_tile.len();
                         let scores = &mut scores[..block_rows * tile_rows];
-                        matmul(
+                        multiply(
                             MatMut::from_row_major_slice_mut(scores, block_rows, tile_rows),
                             Accum::Replace,
                             MatRef::from_row_major_slice(vectors, block_rows, dim),
@@ -363,7 +392,8 @@ struct ScoreContext<'a> {
 impl ScoreContext<'_> {
     fn ambiguity(&self, vector_norm: f32) -> f32 {
         // Two estimates can each err in opposite directions by this uncertainty.
-        2.0 * self.distance.matrix_uncertainty(
+        2.0 * matrix_uncertainty(
+            self.distance,
             self.gamma,
             vector_norm,
             self.max_centroid_norm,

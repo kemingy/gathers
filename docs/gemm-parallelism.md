@@ -145,34 +145,32 @@ a useful next target; replacing GEMM does not justify bypassing the accuracy gua
 
 ## Reproduction and checks
 
-The minimal maintained benchmark under `benches/gemm_parallelism/` archives HEAD,
-overlays the working matrix/backend sources, and exposes private workspace and
-backend/row-policy overrides only in a temporary copy. No benchmark hooks enter
-the production API. Preparation requires Python 3.12+ and an empty destination.
-The shared checked operations live in `src/linalg.rs`, with its macOS FFI in a nested
-`accelerate` module. Temporary `bench_*` helpers are injected by `prepare.py`:
-
-- `bench_use_accelerate`: select Accelerate or the portable backend.
-- `bench_set_matrix_block`: select the fixed 512-row policy or the adaptive policy.
-- `bench_use_crossover`: enable the tuned crossover or retain the previous threshold.
-
-`BenchMatrix` exposes the private assignment workspace only in that temporary checkout.
-These helpers and their state are absent from production library sources and builds.
+The maintained Cargo benchmark under `benches/gemm_parallelism/` compiles the
+private assignment and linear-algebra modules directly from their production paths.
+It uses explicit threshold, row-tile, and kernel parameters; production entry points
+supply the normal defaults. There are no public benchmark APIs, global overrides,
+source-rewriting scripts, Python preparation steps, or temporary checkouts. Cargo
+and `make lint` check the harness against the current sources.
 
 ```sh
-python3.12 benches/gemm_parallelism/prepare.py /tmp/gathers-gemm-bench
-cargo build --offline --profile perf -p gathers-cli --example query_compare \
-  --manifest-path /tmp/gathers-gemm-bench/Cargo.toml
-/tmp/gathers-gemm-bench/target/perf/examples/query_compare \
-  QUERY_FVECS CENTROID_FVECS l2_OR_cos 16
+cargo bench -p gathers-cli --bench gemm_parallelism -- \
+  QUERY_FVECS CENTROID_FVECS l2 --threads 16
 ```
 
-The harness compares faer/Accelerate crossed with fixed512/adaptive scheduling,
-reports seven-call medians, and checks all labels. Repeat with 1 and 8 workers,
-and optionally set `VECLIB_MAXIMUM_THREADS=1` before process startup. On non-macOS
-both backend choices use faer. Supply full native query sets and final original-space
-centroids trained on all source rows. Broader matrixmultiply and full-corpus
-harnesses remain local investigation artifacts.
+Use `cos` for Cohere. With no input arguments, the target prints help, so checking
+all Cargo targets requires no local datasets. The default mode compares faer and
+Accelerate crossed with fixed512/adaptive scheduling; non-macOS runs only faer.
+Both row policies respect the production scratch cap. Each case warms once and
+reports seven-call medians as JSON lines. Input loading, normalization, reference
+assignment, and workspace creation are outside these timers; centroid norm refresh
+and score scratch allocation remain included. Every warmup and measured call checks
+all labels against direct SIMD assignment. `--repeats N` changes the sample count;
+`median_ms` also handles even sample counts.
+
+Repeat with 1 and 8 workers, and optionally set `VECLIB_MAXIMUM_THREADS=1` before
+process startup. Supply full native query sets and final original-space centroids
+trained on all source rows. The harness reads every input row and has no dataset cap.
+Broader matrixmultiply and full-corpus harnesses remain local investigation artifacts.
 
 Required checks: `make format lint lint-ast test-ast test`. Existing assignment
 coverage includes worker/score budgets, row/centroid/vector tails, workspace reuse,
@@ -181,13 +179,18 @@ cover input transposes, padded output, replacement/accumulation, empty products,
 dimensions, symmetric products, and direct-reference tolerance for both backends. Linux and
 Intel macOS compile checks are recorded separately.
 
-To compare the previous and current crossover on the complete native query file, append a
-processing batch size to `query_compare`. This mode includes workspace setup and direct SIMD
-fallback, and never caps the number of queries:
+To compare the previous and current crossover on the complete native query file,
+use `--batch-rows`. This mode includes workspace setup and direct SIMD fallback:
 
-```console
-/tmp/gathers-gemm-bench/target/perf/examples/query_compare /private/tmp/pr65-real-data/gist-queries.fvecs /private/tmp/pr65-exact-data/gist-exact.fvecs l2 16 64
+```sh
+cargo bench -p gathers-cli --bench gemm_parallelism -- \
+  /private/tmp/pr65-real-data/gist-queries.fvecs \
+  /private/tmp/pr65-exact-data/gist-exact.fvecs l2 --threads 16 --batch-rows 64
 ```
 
-This exercises the private matrix assignment implementation through temporary hooks. Python's
-standalone `batch_assign` routing is unchanged; these results do not claim its runtime.
+Batch mode compares the historical and current thresholds with adaptive scheduling
+and the platform backend. `matrix_batches` reports how many batches used the matrix
+workspace; a smaller final batch may use direct assignment. The default mode reports
+this count as zero or one. `batch_rows` controls processing granularity, never the
+dataset row count. Python's standalone `batch_assign` routing is unchanged; these
+results do not claim its runtime.

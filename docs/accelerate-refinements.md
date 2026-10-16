@@ -94,15 +94,15 @@ Commands, all timing vectors and the temporary sources are retained in the local
 
 ## Reproduction
 
-The maintained isolated benchmark supports the crossover comparison:
+The maintained Cargo benchmark supports the crossover comparison:
 
 ```console
-python3.12 benches/gemm_parallelism/prepare.py /tmp/gathers-gemm-refinements
-cargo build --offline --profile perf -p gathers-cli --example query_compare --manifest-path /tmp/gathers-gemm-refinements/Cargo.toml
-/tmp/gathers-gemm-refinements/target/perf/examples/query_compare /private/tmp/pr65-real-data/gist-queries.fvecs /private/tmp/pr65-exact-data/gist-exact.fvecs l2 16 64
+cargo bench -p gathers-cli --bench gemm_parallelism -- \
+  /private/tmp/pr65-real-data/gist-queries.fvecs \
+  /private/tmp/pr65-exact-data/gist-exact.fvecs l2 --threads 16 --batch-rows 64
 ```
 
-The optional last argument controls processing granularity, never the dataset row count. Its timer includes workspace creation and fallback. The default four-backend/policy comparison retains its original timing boundaries.
+`--batch-rows` controls processing granularity, never the dataset row count. Its timer includes workspace creation and fallback. The default backend/row-policy comparison retains its original timing boundaries. See [reproduction details](./gemm-parallelism.md#reproduction-and-checks) for the JSON fields and label checks.
 
 Full-data PCA ablations and rejected alternatives stay in an external investigation harness rather than adding production flags or benchmark targets. Commands, sources, temporary hooks, all raw timing vectors and logs are saved in the accompanying local `gathers-gemm-parallelism/accelerate-extra` report directory.
 
@@ -112,4 +112,4 @@ The production library, without investigation hooks, repeated full-source PCA fi
 
 `make format lint lint-ast test-ast test-rust` passed, along with all 73 Python tests through `make test-python`. Linux x86_64 library and Intel macOS library/test compile checks passed; cross-target tests were not executed. The new focused tests cover symmetric-product layouts, padding, tails, empty reductions, portable fallback, crossover boundaries and L2/dot assignment labels.
 
-The maintained isolated benchmark built successfully and checked both crossover policies against its existing reference labels on all 1,000 native queries. A seven-sample reproduction run on GIST with 64 rows per call measured 346.102 ms previously and 25.319 ms currently. The corresponding Cohere run with sixteen rows per call measured 1,525.143 ms previously and 431.449 ms currently, also with identical labels. Raw vectors are retained separately from the three-sample ablation table above.
+The earlier isolated benchmark built successfully and checked both crossover policies against its existing reference labels on all 1,000 native queries. A seven-sample reproduction run on GIST with 64 rows per call measured 346.102 ms previously and 25.319 ms currently. The corresponding Cohere run with sixteen rows per call measured 1,525.143 ms previously and 431.449 ms currently, also with identical labels. Raw vectors are retained separately from the three-sample ablation table above.

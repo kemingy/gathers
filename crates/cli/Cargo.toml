@@ -24,4 +24,11 @@ rayon.workspace = true
 serde_json = "1.0"
 
 [dev-dependencies]
+faer.workspace = true
+seed-rand = { path = "../seed_rand" }
 tempfile = "3"
+
+[[bench]]
+name = "gemm_parallelism"
+path = "../../benches/gemm_parallelism/compare.rs"
+harness = false
