@@ -503,3 +503,25 @@ without comparison/audit switches for the exact-training baseline. Commands,
 metadata, binary hash and per-round results are retained under the report directory's
 `sift-native128/`. Verification uses the previously checked binary unchanged;
 this addition updates only the documentation and records the new dataset evidence.
+
+## Cleanup verification
+
+Pilot calibration and alternating-order backend comparisons now live in the private
+`calibration` benchmark module, with named result fields. The benchmark uses one
+training-dimension constant and expands JSON reporting for readability. Grouped
+centroid setup sorts source positions within each cell, removing the reverse-ID
+lookup while preserving original-ID ties. Scratch names distinguish local labels
+from original IDs, and pilot ranking reuses the hierarchy's block-size constant.
+Numeric safeguards, CLI defaults and JSON field names are preserved.
+
+One full ten-round regression run on each of SIFT, GIST and Cohere matches the
+pre-cleanup budgets, per-round held-out recall and objectives, output schemas,
+final objectives and final full-source agreements. Seven paired pilot comparisons
+per round have no differences. SIFT additionally rechecks all 10M grouped/SIMD
+assignments with zero differences. These are behavior checks, not new speedup
+estimates; commands, source/binary hashes and results are under `cleanup/` in the
+report directory.
+
+The existing integration regressions and `make format lint lint-ast test-ast
+test-rust` pass. Benchmark and integration-test compile checks also pass for Linux
+x86-64 and Intel macOS. Tests and public/Python behavior are unchanged.

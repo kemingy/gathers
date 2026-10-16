@@ -29,8 +29,15 @@ mod linalg;
 #[path = "../../src/kmeans/matrix.rs"]
 mod matrix;
 
+mod calibration;
+#[allow(unused_imports)]
+mod policy;
+
+use calibration::{Calibration, calibrate};
 use hierarchy::{Hierarchy, ProbeOptions};
 use matrix::MatrixAssignmentWorkspace;
+
+const TRAINING_DIM: usize = 128;
 
 /// Test adaptive probing with full source rows and exact final audits.
 #[derive(FromArgs)]
@@ -41,7 +48,7 @@ struct Args {
     /// source distance: l2 or cos
     #[argh(positional)]
     metric: Distance,
-    /// cache of full-source-fitted PCA128 rows; created if absent
+    /// prepared 128D rows (native or PCA); fit full-source PCA if absent
     #[argh(option)]
     prepared: PathBuf,
     /// only prepare the full projection cache
@@ -98,10 +105,6 @@ fn gather(vectors: &[f32], dim: usize, indices: &[usize]) -> Vec<f32> {
         .collect()
 }
 
-#[allow(unused_imports)]
-mod policy;
-use policy::budget;
-
 fn exact(vectors: &[f32], centroids: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
     if let Some(mut workspace) =
         MatrixAssignmentWorkspace::try_new(vectors, centroids.len() / dim, dim, distance)
@@ -139,32 +142,6 @@ fn empty_count(labels: &[u32], count: usize) -> usize {
         sizes[label as usize] += 1;
     }
     sizes.iter().filter(|&&n| n == 0).count()
-}
-
-fn calibrate(
-    h: &Hierarchy,
-    pilots: &[f32],
-    distance: Distance,
-    percentile: usize,
-    backend: &str,
-) -> (usize, Vec<usize>, Vec<u32>) {
-    let mut required = vec![0; pilots.len() / 128];
-    let mut labels = vec![0; required.len()];
-    if backend == "gemm" {
-        h.calibrate_batched(pilots, &mut labels, &mut required, distance);
-    } else {
-        h.probe_parallel(
-            pilots,
-            &mut labels,
-            &mut required,
-            ProbeOptions {
-                distance,
-                budget: usize::MAX,
-                incumbent_centroids: None,
-            },
-        );
-    }
-    (budget(&required, percentile), required, labels)
 }
 
 fn main() -> Result<()> {
@@ -214,16 +191,23 @@ fn main() -> Result<()> {
         if args.metric == Distance::Cosine {
             try_normalize_rows(&mut raw.data, raw.dim, false)?;
         }
-        let pca = PCA::fit(&raw.data, raw.dim, 128)?;
+        let pca = PCA::fit(&raw.data, raw.dim, TRAINING_DIM)?;
         let mut projected = pca.transform(&raw.data)?;
         drop(raw);
         if args.metric == Distance::Cosine {
-            try_normalize_rows(&mut projected, 128, true)?;
+            try_normalize_rows(&mut projected, TRAINING_DIM, true)?;
         }
-        fvecs::write(&args.prepared, &projected, 128)?;
+        fvecs::write(&args.prepared, &projected, TRAINING_DIM)?;
         println!(
             "{}",
-            json!({"phase":"prepare", "rows": rows, "original_dim": original_dim, "dim":128, "seconds":started.elapsed().as_secs_f64(), "pca_fit_rows":rows})
+            json!({
+                "phase":"prepare",
+                "rows": rows,
+                "original_dim": original_dim,
+                "dim":TRAINING_DIM,
+                "seconds":started.elapsed().as_secs_f64(),
+                "pca_fit_rows":rows,
+            })
         );
     }
     if args.prepare_only {
@@ -231,11 +215,11 @@ fn main() -> Result<()> {
     }
     let prepared = fvecs::read(&args.prepared, None)?;
     ensure!(
-        prepared.len() == rows && prepared.dim == 128,
-        "cache must contain every source row at PCA128"
+        prepared.len() == rows && prepared.dim == TRAINING_DIM,
+        "prepared input must contain every source row at 128 dimensions"
     );
     let vectors = prepared.data;
-    let dim = 128;
+    let dim = TRAINING_DIM;
     let distance = if args.metric == Distance::Cosine {
         Distance::NegativeDotProduct
     } else {
@@ -287,7 +271,11 @@ fn main() -> Result<()> {
                         .take(args.pilots)
                         .collect();
                 pilot_vectors = gather(&vectors, dim, &indices);
-                let (b, mut required, winners) = calibrate(
+                let Calibration {
+                    budget,
+                    mut required,
+                    labels: winners,
+                } = calibrate(
                     &h,
                     &pilot_vectors,
                     distance,
@@ -299,7 +287,7 @@ fn main() -> Result<()> {
                 p98 = required[(98 * required.len()).div_ceil(100) - 1];
                 p99 = required[(99 * required.len()).div_ceil(100) - 1];
                 p100 = required[required.len() - 1];
-                selected_budget = b;
+                selected_budget = budget;
                 pilot_labels = winners;
             } else {
                 let parents = ((count as f64).sqrt() as usize).min(count / 196);
@@ -359,34 +347,14 @@ fn main() -> Result<()> {
             None
         };
         if let Some(h) = h.as_ref().filter(|_| !pilot_vectors.is_empty()) {
-            let mut timings = [Vec::new(), Vec::new()];
-            for repeat in 0..args.calibration_repeats {
-                let mut results = Vec::new();
-                // Alternate order to reduce systematic cache/thermal bias.
-                for backend in if repeat % 2 == 0 {
-                    ["simd", "gemm"]
-                } else {
-                    ["gemm", "simd"]
-                } {
-                    let start = Instant::now();
-                    let result =
-                        calibrate(h, &pilot_vectors, distance, args.probe_percentile, backend);
-                    timings[usize::from(backend == "gemm")].push(start.elapsed().as_secs_f64());
-                    results.push(result);
-                }
-                ensure!(
-                    results[0] == results[1],
-                    "pilot labels, ranks or budgets differ in round {}",
-                    iteration + 1
-                );
-            }
-            if args.calibration_repeats > 0 {
-                println!(
-                    "{}",
-                    json!({"phase":"calibration_comparison", "iteration":iteration+1,
-                    "simd_s":timings[0], "gemm_s":timings[1], "mismatches":0})
-                );
-            }
+            calibration::compare(
+                h,
+                &pilot_vectors,
+                distance,
+                args.probe_percentile,
+                args.calibration_repeats,
+                iteration + 1,
+            )?;
         }
         let assigned_audit: Vec<_> = audit_indices.iter().map(|&i| labels[i]).collect();
         let mut exact_audit = vec![0; audit_indices.len()];
@@ -423,7 +391,35 @@ fn main() -> Result<()> {
         completed += 1;
         println!(
             "{}",
-            json!({"phase":"round", "calibration_backend":args.calibration_backend, "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "backend_mismatches":backend_mismatches, "reference_assignment_s":reference_assignment_s, "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "iteration":iteration+1, "approximate":approximate, "rows":rows, "clusters":count, "dim":dim, "budget":selected_budget, "p98":p98, "p99":p99, "p100":p100, "build_s":build_s, "calibration_s":calibration_s, "assignment_s":assignment_s, "update_s":update_s, "round_s":round_s, "empty_clusters":empties, "shift":diff, "assignment_recall":agreement, "audit_exact_objective":audit_objective})
+            json!({
+                "phase":"round",
+                "calibration_backend":args.calibration_backend,
+                "assignment_backend":args.assignment_backend,
+                "batch_rows":args.batch_rows,
+                "backend_mismatches":backend_mismatches,
+                "reference_assignment_s":reference_assignment_s,
+                "method":args.method,
+                "pilots":args.pilots,
+                "probe_percentile":args.probe_percentile,
+                "iteration":iteration+1,
+                "approximate":approximate,
+                "rows":rows,
+                "clusters":count,
+                "dim":dim,
+                "budget":selected_budget,
+                "p98":p98,
+                "p99":p99,
+                "p100":p100,
+                "build_s":build_s,
+                "calibration_s":calibration_s,
+                "assignment_s":assignment_s,
+                "update_s":update_s,
+                "round_s":round_s,
+                "empty_clusters":empties,
+                "shift":diff,
+                "assignment_recall":agreement,
+                "audit_exact_objective":audit_objective,
+            })
         );
         if empties != 0 {
             stopped_empty = empties;
@@ -447,7 +443,7 @@ fn main() -> Result<()> {
         let mut pilot_rng =
             StdRng::seed_from_u64(args.seed.wrapping_add(20_000 + args.iterations as u64));
         let indices = sample_indices(rows, args.pilots, &mut pilot_rng);
-        let (selected_budget, _, _) = calibrate(
+        let calibration = calibrate(
             &h,
             &gather(&vectors, dim, &indices),
             distance,
@@ -456,7 +452,7 @@ fn main() -> Result<()> {
         );
         let options = ProbeOptions {
             distance,
-            budget: selected_budget,
+            budget: calibration.budget,
             incumbent_centroids: (!args.no_incumbent).then_some(centroids.as_slice()),
         };
         if args.assignment_backend == "gemm" {
@@ -469,15 +465,44 @@ fn main() -> Result<()> {
             .zip(&final_labels)
             .filter(|(a, b)| a == b)
             .count();
-        Some(
-            json!({"budget":selected_budget, "matches":matches, "rows":rows, "agreement":matches as f64 / rows as f64}),
-        )
+        Some(json!({
+            "budget":calibration.budget,
+            "matches":matches,
+            "rows":rows,
+            "agreement":matches as f64 / rows as f64,
+        }))
     } else {
         None
     };
     println!(
         "{}",
-        json!({"phase":"summary", "calibration_backend":args.calibration_backend, "assignment_backend":args.assignment_backend, "batch_rows":args.batch_rows, "final_probe_audit":final_probe_audit, "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(), "method":args.method, "pilots":args.pilots, "probe_percentile":args.probe_percentile, "seed":args.seed, "threads":args.threads, "rows":rows, "clusters":count, "dim":dim, "original_dim":original_dim, "completed_rounds":completed, "stopped_empty":stopped_empty, "training_s":training_s, "diagnostic_s":diagnostic_s, "final_exact_assignment_s":final_exact_assignment_s, "final_exact_objective":final_objective, "final_empty_clusters":final_empty, "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(), "incumbent":!args.no_incumbent, "exact_final_rounds":args.exact_final_rounds})
+        json!({
+            "phase":"summary",
+            "calibration_backend":args.calibration_backend,
+            "assignment_backend":args.assignment_backend,
+            "batch_rows":args.batch_rows,
+            "final_probe_audit":final_probe_audit,
+            "final_probe_audit_s":final_probe_start.elapsed().as_secs_f64(),
+            "method":args.method,
+            "pilots":args.pilots,
+            "probe_percentile":args.probe_percentile,
+            "seed":args.seed,
+            "threads":args.threads,
+            "rows":rows,
+            "clusters":count,
+            "dim":dim,
+            "original_dim":original_dim,
+            "completed_rounds":completed,
+            "stopped_empty":stopped_empty,
+            "training_s":training_s,
+            "diagnostic_s":diagnostic_s,
+            "final_exact_assignment_s":final_exact_assignment_s,
+            "final_exact_objective":final_objective,
+            "final_empty_clusters":final_empty,
+            "wall_with_diagnostics_s":wall.elapsed().as_secs_f64(),
+            "incumbent":!args.no_incumbent,
+            "exact_final_rounds":args.exact_final_rounds,
+        })
     );
     Ok(())
 }
