@@ -5,18 +5,18 @@ use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, neg_dot_product, squared_euclidean};
-use crate::hierarchy::{Hierarchy, ProbeOptions, ScoreEntry, score_range};
+use crate::hierarchy::{Hierarchy, ProbeOptions, RAYON_BLOCK_SIZE, ScoreEntry, score_range};
 use crate::kmeans::base_assign_parallel;
 use crate::matrix::MatrixAssignmentWorkspace;
 
 #[derive(Default)]
-struct Scratch {
+struct BatchScratch {
     groups: Vec<Vec<usize>>,
     routing_scores: Vec<f32>,
     order: Vec<usize>,
     gathered: Vec<f32>,
-    winners: Vec<u32>,
-    best: Vec<f32>,
+    local_labels: Vec<u32>,
+    best_scores: Vec<f32>,
 }
 
 fn score(query: &[f32], centroid: &[f32], distance: Distance) -> f32 {
@@ -58,7 +58,7 @@ impl Hierarchy {
         }
         // Original-ID ordering preserves full-probe ties across different cells.
         let mut centers = vec![0.0; self.levels[0].centroids.len()];
-        let mut cells = vec![0; self.leaf_order.len()];
+        let mut centroid_cells = vec![0; self.leaf_order.len()];
         let routing = &self.levels[1];
         for cell in 0..routing.len() {
             for position in
@@ -68,7 +68,7 @@ impl Hierarchy {
                 centers[original * self.dim..(original + 1) * self.dim].copy_from_slice(
                     &self.levels[0].centroids[position * self.dim..(position + 1) * self.dim],
                 );
-                cells[original] = cell;
+                centroid_cells[original] = cell;
             }
         }
         // The flat fallback uses a different argmin tie rule when overflow or
@@ -79,30 +79,24 @@ impl Hierarchy {
             fallback(labels, required);
             return;
         }
-        if let Some(mut workspace) =
-            MatrixAssignmentWorkspace::try_new(vectors, cells.len(), self.dim, distance)
-        {
-            workspace.assign(vectors, &centers, self.dim, labels);
-        } else {
+        let Some(mut workspace) =
+            MatrixAssignmentWorkspace::try_new(vectors, centroid_cells.len(), self.dim, distance)
+        else {
             fallback(labels, required);
             return;
-        }
-        // Match the reference even when no finite candidate can win.
-        if labels.iter().any(|&label| label as usize >= cells.len()) {
-            fallback(labels, required);
-            return;
-        }
+        };
+        workspace.assign(vectors, &centers, self.dim, labels);
         required
-            .par_chunks_mut(64)
-            .zip(labels.par_chunks(64))
-            .zip(vectors.par_chunks(64 * self.dim))
+            .par_chunks_mut(RAYON_BLOCK_SIZE)
+            .zip(labels.par_chunks(RAYON_BLOCK_SIZE))
+            .zip(vectors.par_chunks(RAYON_BLOCK_SIZE * self.dim))
             .for_each_init(Vec::new, |scores, ((required, labels), vectors)| {
                 pulp::Arch::new().dispatch(RankPilots {
                     hierarchy: self,
                     vectors,
                     labels,
                     required,
-                    cells: &cells,
+                    centroid_cells: &centroid_cells,
                     distance,
                     scores,
                 });
@@ -111,7 +105,7 @@ impl Hierarchy {
 
     /// Group a bounded query batch by its selected cells, then assign each group with
     /// the guarded GEMM workspace. Sparse groups retain its ordinary SIMD fallback.
-    /// Deeper trees retain the existing traversal; the two real workloads have one
+    /// Deeper trees retain the existing traversal; the measured workloads have one
     /// routing layer. Grouping, gathering, and workspace creation are included in timing.
     pub(crate) fn probe_batched(
         &self,
@@ -130,31 +124,29 @@ impl Hierarchy {
         let routing = &self.levels[1];
         // Local argmin resolves ties by local index. Sorting each cell by original
         // centroid ID makes that tie rule agree with the hierarchy's original-ID rule.
-        let mut leaf_order = self.leaf_order.clone();
-        for range in routing.child_offsets.windows(2) {
-            leaf_order[range[0] as usize..range[1] as usize].sort_unstable();
+        let mut positions: Vec<_> = (0..self.leaf_order.len()).collect();
+        for offsets in routing.child_offsets.windows(2) {
+            positions[offsets[0] as usize..offsets[1] as usize]
+                .sort_unstable_by_key(|&position| self.leaf_order[position]);
         }
-        let mut centers = vec![0.0; self.levels[0].centroids.len()];
-        let mut original_to_position = vec![0; leaf_order.len()];
-        for (position, &original) in self.leaf_order.iter().enumerate() {
-            original_to_position[original as usize] = position;
-        }
-        for (out, &original) in centers.chunks_exact_mut(self.dim).zip(&leaf_order) {
-            let position = original_to_position[original as usize];
-            out.copy_from_slice(
+        let mut leaf_order = Vec::with_capacity(positions.len());
+        let mut centers = Vec::with_capacity(self.levels[0].centroids.len());
+        for position in positions {
+            leaf_order.push(self.leaf_order[position]);
+            centers.extend_from_slice(
                 &self.levels[0].centroids[position * self.dim..(position + 1) * self.dim],
             );
         }
         labels
             .par_chunks_mut(batch_rows)
             .zip(vectors.par_chunks(batch_rows * self.dim))
-            .for_each_init(Scratch::default, |scratch, (labels, vectors)| {
+            .for_each_init(BatchScratch::default, |scratch, (labels, vectors)| {
                 scratch.groups.resize_with(routing.len(), Vec::new);
                 for group in &mut scratch.groups {
                     group.clear();
                 }
-                scratch.best.clear();
-                scratch.best.resize(labels.len(), f32::INFINITY);
+                scratch.best_scores.clear();
+                scratch.best_scores.resize(labels.len(), f32::INFINITY);
                 // Routing is deliberately identical to the SIMD reference. GEMM only
                 // changes how the selected fine centroids are evaluated.
                 pulp::Arch::new().dispatch(RouteBatch {
@@ -177,7 +169,7 @@ impl Hierarchy {
                     let start = routing.child_offsets[cell] as usize;
                     let end = routing.child_offsets[cell + 1] as usize;
                     let cell_centers = &centers[start * self.dim..end * self.dim];
-                    scratch.winners.resize(group.len(), 0);
+                    scratch.local_labels.resize(group.len(), 0);
                     if let Some(mut workspace) = MatrixAssignmentWorkspace::try_new(
                         &scratch.gathered,
                         end - start,
@@ -188,7 +180,7 @@ impl Hierarchy {
                             &scratch.gathered,
                             cell_centers,
                             self.dim,
-                            &mut scratch.winners,
+                            &mut scratch.local_labels,
                         );
                     } else {
                         base_assign_parallel(
@@ -196,10 +188,10 @@ impl Hierarchy {
                             cell_centers,
                             self.dim,
                             options.distance,
-                            &mut scratch.winners,
+                            &mut scratch.local_labels,
                         );
                     }
-                    for (&row, &local) in group.iter().zip(&scratch.winners) {
+                    for (&row, &local) in group.iter().zip(&scratch.local_labels) {
                         let candidate = start + local as usize;
                         let original = leaf_order[candidate];
                         let value = score(
@@ -207,10 +199,10 @@ impl Hierarchy {
                             &centers[candidate * self.dim..(candidate + 1) * self.dim],
                             options.distance,
                         );
-                        if value < scratch.best[row]
-                            || (value == scratch.best[row] && original < labels[row])
+                        if value < scratch.best_scores[row]
+                            || (value == scratch.best_scores[row] && original < labels[row])
                         {
-                            scratch.best[row] = value;
+                            scratch.best_scores[row] = value;
                             labels[row] = original;
                         }
                     }
@@ -224,7 +216,7 @@ struct RankPilots<'a> {
     vectors: &'a [f32],
     labels: &'a [u32],
     required: &'a mut [usize],
-    cells: &'a [usize],
+    centroid_cells: &'a [usize],
     distance: Distance,
     scores: &'a mut Vec<f32>,
 }
@@ -250,7 +242,7 @@ impl pulp::WithSimd for RankPilots<'_> {
                 self.distance,
                 self.scores,
             );
-            let winner = self.cells[label as usize];
+            let winner = self.centroid_cells[label as usize];
             let entry = |node: usize| ScoreEntry {
                 score: self.scores[node],
                 level: 1,
@@ -272,7 +264,7 @@ struct RouteBatch<'a> {
     vectors: &'a [f32],
     labels: &'a mut [u32],
     options: ProbeOptions<'a>,
-    scratch: &'a mut Scratch,
+    scratch: &'a mut BatchScratch,
 }
 
 impl pulp::WithSimd for RouteBatch<'_> {
@@ -288,7 +280,7 @@ impl pulp::WithSimd for RouteBatch<'_> {
             .enumerate()
         {
             if let Some(centroids) = self.options.incumbent_centroids {
-                self.scratch.best[row] = score(
+                self.scratch.best_scores[row] = score(
                     query,
                     &centroids[*label as usize * h.dim..(*label as usize + 1) * h.dim],
                     self.options.distance,
