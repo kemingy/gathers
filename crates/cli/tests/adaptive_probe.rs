@@ -6,3 +6,10 @@ use gathers::{distance, kmeans, simd, utils};
 mod hierarchy;
 #[path = "../../../benches/adaptive_probe/policy.rs"]
 mod policy;
+
+#[allow(dead_code, unused_imports)]
+#[path = "../../../src/linalg.rs"]
+mod linalg;
+#[allow(dead_code, unused_imports)]
+#[path = "../../../src/kmeans/matrix.rs"]
+mod matrix;

@@ -24,6 +24,9 @@ use rand::{RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
+#[path = "hierarchy/batched.rs"]
+mod batched;
+
 use crate::distance::Distance;
 use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
 
@@ -1164,6 +1167,18 @@ mod tests {
             .filter(|(left, right)| left == right)
             .count();
         assert!(recall >= 90, "deep-tree best-first recall {recall}/100");
+        let mut batched = vec![0; 100];
+        hierarchy.probe_batched(
+            &queries,
+            &mut batched,
+            super::ProbeOptions {
+                distance: Distance::SquaredEuclidean,
+                budget: super::scan_budget(hierarchy.levels[2].len()),
+                incumbent_centroids: None,
+            },
+            32,
+        );
+        assert_eq!(batched, actual, "deeper trees retain the SIMD traversal");
         let mut greedy = vec![0; 100];
         hierarchy.assign_greedy(&queries, dim, Distance::SquaredEuclidean, &mut greedy);
         assert_eq!(greedy, expected);
