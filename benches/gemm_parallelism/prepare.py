@@ -71,21 +71,15 @@ gemm += """\nstatic REVIEW_ACCELERATE: std::sync::atomic::AtomicBool = std::sync
 pub fn review_use_accelerate(enabled: bool) { REVIEW_ACCELERATE.store(enabled, std::sync::atomic::Ordering::Relaxed); }
 """
 (out / "src/gemm.rs").write_text(gemm)
-gemm_path = out / "src/kmeans/matrix/gemm.rs"
-gemm_path.parent.mkdir(exist_ok=True)
-gemm_path.write_text(
-    (repo / "src/kmeans/matrix/gemm.rs").read_text()
-    + "\n#[allow(missing_docs)]\npub use crate::gemm::review_use_accelerate;\n"
-)
-with (out / "src/kmeans/matrix.rs").open("a") as matrix:
-    matrix.write("\n#[allow(missing_docs)]\npub use gemm::review_use_accelerate;\n")
 p = out / "src/kmeans.rs"
 p.write_text(
     p.read_text()
     + """\n#[allow(missing_docs)]
 pub use matrix::MatrixAssignmentWorkspace as ReviewMatrix;
 #[allow(missing_docs)]
-pub use matrix::{review_set_matrix_block, review_use_accelerate, review_use_crossover};
+pub use matrix::{review_set_matrix_block, review_use_crossover};
+#[allow(missing_docs)]
+pub use crate::gemm::review_use_accelerate;
 """
 )
 examples = out / "crates/cli/examples"

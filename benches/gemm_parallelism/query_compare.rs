@@ -5,7 +5,7 @@ mod fvecs;
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use gathers::distance::Distance;
 use gathers::kmeans::{
     ReviewMatrix, base_assign_parallel, review_set_matrix_block, review_use_accelerate,
@@ -19,6 +19,7 @@ fn main() -> Result<()> {
         "queries centroids metric threads [batch_rows]"
     );
     let threads: usize = args[4].parse()?;
+    ensure!(threads > 0, "threads must be positive");
     rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global()?;
@@ -40,7 +41,9 @@ fn main() -> Result<()> {
     if let Some(batch_rows) = args.get(5) {
         let batch_rows: usize = batch_rows.parse()?;
         ensure!(batch_rows > 0, "batch rows must be positive");
-        let batch_values = batch_rows.checked_mul(q.dim).expect("batch shape overflow");
+        let batch_values = batch_rows
+            .checked_mul(q.dim)
+            .context("batch shape overflow")?;
         review_use_accelerate(true);
         review_set_matrix_block(1);
         for crossover in [false, true] {

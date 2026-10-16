@@ -10,7 +10,9 @@ The shared private backend wrapper accepts row-major matrices and logical input
 transposes, checks their shapes and strides before FFI, and transposes the centroid
 matrix without copying it. It uses the legacy LP64 symbol for compatibility with older
 macOS versions, with checked integer conversion and a portable fallback for shapes
-outside its range. The system framework dispatches CPU features. PCA covariance uses checked
+outside its range. A subsequent comparison of legacy/new LP64 and new ILP64 interfaces found
+no consistent speedup; see [Accelerate refinements](./accelerate-refinements.md#blas-interface-ablation).
+The system framework dispatches CPU features. PCA covariance uses checked
 SYRK; projection and inverse projection share SGEMM. Its eigendecomposition still uses `faer`.
 See [PCA performance](./pca-performance.md) for the bounded-memory pipeline and measurements.
 
@@ -165,9 +167,10 @@ harnesses remain local investigation artifacts.
 
 Required checks: `make format lint lint-ast test-ast test`. Existing assignment
 coverage includes worker/score budgets, row/centroid/vector tails, workspace reuse,
-near ties, common-offset cancellation, overflow and subnormal scores. The one new
-product test checks backend layout, output replacement, empty tiles and direct
-product tolerance. Linux and Intel macOS compile checks are recorded separately.
+near ties, common-offset cancellation, overflow and subnormal scores. Shared backend tests
+cover input transposes, padded output, replacement/accumulation, empty products, zero reduction
+dimensions, symmetric products, and direct-reference tolerance for both backends. Linux and
+Intel macOS compile checks are recorded separately.
 
 To compare the previous and current crossover on the complete native query file, append a
 processing batch size to `query_compare`. This mode includes workspace setup and direct SIMD

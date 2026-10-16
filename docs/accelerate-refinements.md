@@ -60,6 +60,38 @@ The trial replaced single-row SGEMM score tiles with Accelerate SGEMV while reta
 
 GEMV does not improve this path and is not included in production. Its results do not rule out a future cached fixed-centroid implementation. No LAPACK/vDSP replacement, public API or dependency is added.
 
+## BLAS interface ablation
+
+Switching only the BLAS symbols to the newer macOS 13.3+ interface provides no consistent
+performance gain on this machine. These measurements use the same full datasets, fixed models,
+algorithms, numerical guards and sixteen-worker configuration described above. The benchmark
+selects legacy LP64, new LP64 (`$NEWLAPACK`) and new ILP64 (`$NEWLAPACK$ILP64`) in one compiled
+release binary. Enum arguments remain 32-bit; matrix dimensions/strides widen only for ILP64.
+The eigensolver remains faer: this is a BLAS interface comparison, not a LAPACK solver comparison.
+
+| Full dataset / stage | Legacy LP64 s | New LP64 s | New ILP64 s |
+| --- | ---: | ---: | ---: |
+| GIST fit + projection | 1.492 | 1.508 | 1.493 |
+| Cohere fit + projection | 11.118 | 11.258 | 11.028 |
+| GIST final assignment | 2.917 | 2.894 | — |
+| Cohere final assignment | 207.346 | 210.885 | — |
+
+PCA entries are medians of three complete fits/projections after one full-source warmup per
+interface, with rotated API order. Final assignment includes workspace construction and norms,
+uses all original-space rows, and alternates the two LP64 interfaces over three passes each.
+Loading and cosine normalization are excluded. Full Cohere legacy assignments took
+206.851 / 208.600 / 207.346 s; new LP64 took 210.885 / 203.854 / 213.865 s. Paired differences
+change direction and ranges overlap. These are stage measurements, not complete training times.
+
+ILP64 was also tested on every native query at original dimensions and PCA128, with 16/64/1,000
+rows per call, one warmup and seven timed passes per interface. It showed no consistent gain.
+Every source projection had the same all-value bit hash across interfaces, projected queries and
+centroids compared bit-for-bit equal, and all query/full-source labels matched legacy LP64.
+The existing kernel layout/padding/tail/empty/fallback tests also passed through all three APIs
+in an isolated release test. No new production API, OS minimum or dependency is introduced.
+Commands, all timing vectors and the temporary sources are retained in the local
+`gathers-gemm-parallelism/accelerate-api` report directory.
+
 ## Reproduction
 
 The maintained isolated benchmark supports the crossover comparison:

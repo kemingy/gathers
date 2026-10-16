@@ -205,6 +205,8 @@ mod accelerate {
 #[cfg(test)]
 mod tests {
     use faer::{Accum, MatMut, MatRef, Par};
+    use rand::RngExt;
+    use seed_rand::seeded_rng;
 
     use super::{matmul, symmetric_rank_k_lower};
 
@@ -261,7 +263,14 @@ mod tests {
 
     #[test]
     fn matrix_layouts_and_accumulation_match_direct_products() {
-        for (rows, cols, dim) in [(1, 3, 1), (3, 5, 7), (5, 2, 33)] {
+        for (rows, cols, dim) in [
+            (0, 3, 7),
+            (3, 0, 7),
+            (3, 5, 0),
+            (1, 3, 1),
+            (3, 5, 7),
+            (5, 2, 33),
+        ] {
             for transpose_a in [false, true] {
                 for transpose_b in [false, true] {
                     let a: Vec<f32> = (0..rows * dim).map(|i| (i as f32 - 4.0) * 0.125).collect();
@@ -323,5 +332,72 @@ mod tests {
             Par::Seq,
         );
         assert_eq!(out, [7.0, 15.0, 10.0, 22.0]);
+    }
+
+    #[test]
+    fn score_backends_match_direct_rectangular_products() {
+        let mut rng = seeded_rng();
+        // Include single rows, vector tails, and the real-data dimensions.
+        for (rows, cols, dim) in [
+            (1, 3, 1),
+            (3, 5, 33),
+            (65, 17, 65),
+            (2, 3, 768),
+            (3, 2, 960),
+        ] {
+            let vectors: Vec<f32> = (0..rows * dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            let centroids: Vec<f32> = (0..cols * dim)
+                .map(|_| rng.random_range(-1.0..1.0))
+                .collect();
+            for scale in [-1.0, -2.0] {
+                let mut actual = vec![f32::NAN; rows * cols];
+                let mut fallback = actual.clone();
+                let lhs = MatRef::from_row_major_slice(&vectors, rows, dim);
+                let rhs = MatRef::from_row_major_slice(&centroids, cols, dim).transpose();
+                matmul(
+                    MatMut::from_row_major_slice_mut(&mut actual, rows, cols),
+                    Accum::Replace,
+                    lhs,
+                    rhs,
+                    scale,
+                    Par::Seq,
+                );
+                faer::linalg::matmul::matmul(
+                    MatMut::from_row_major_slice_mut(&mut fallback, rows, cols),
+                    Accum::Replace,
+                    lhs,
+                    rhs,
+                    scale,
+                    Par::Seq,
+                );
+                for row in 0..rows {
+                    for col in 0..cols {
+                        let terms = vectors[row * dim..][..dim]
+                            .iter()
+                            .zip(&centroids[col * dim..][..dim]);
+                        let expected: f64 = terms
+                            .clone()
+                            .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                            .sum::<f64>()
+                            * f64::from(scale);
+                        let magnitude: f64 = terms
+                            .map(|(&a, &b)| (f64::from(a) * f64::from(b)).abs())
+                            .sum::<f64>()
+                            * f64::from(scale.abs());
+                        // An absolute-plus-relative reduction bound, including cancellation.
+                        let tolerance =
+                            1e-6 + 4.0 * dim as f64 * f64::from(f32::EPSILON) * magnitude;
+                        for value in [actual[row * cols + col], fallback[row * cols + col]] {
+                            assert!(
+                                (f64::from(value) - expected).abs() <= tolerance,
+                                "shape {rows}x{cols}x{dim}: {value} != {expected}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

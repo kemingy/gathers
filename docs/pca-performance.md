@@ -50,9 +50,7 @@ training timer. GIST uses medians of three runs; Cohere is one full run before a
 Final full-data assignment uses the same guarded original-space flat path for both models,
 streaming 65,536 rows per batch. It includes norm/workspace setup and excludes reading and SSE
 computation. Cohere assignment: 136.673 → 137.982 s.
-Training plus final assignment: 808.095 →
-502.285 s
-(1.61×).
+Training plus final assignment: 808.095 → 502.285 s (1.61×).
 The earlier SuperKMeans + Accelerate + pruning run trained in 558.103 s, so the
 improved PCA pipeline is 1.53× faster in training in this comparison.
 
@@ -61,9 +59,9 @@ improved PCA pipeline is 1.53× faster in training in this comparison.
 | GIST | 1039435.749 | 1039447.091 |
 | Cohere | 396155328.144 | 396157794.062 |
 
-SSE changes are +0.00109% on GIST and
-+0.00062% on Cohere, measured by summing selected-centroid
-squared distances in `f64`. All completed fits and final assignments have zero empty clusters.
+SSE changes are +0.00109% on GIST and +0.00062% on Cohere, measured by summing
+selected-centroid squared distances in `f64`. All completed fits and final assignments have zero
+empty clusters.
 Preserved variance is approximately 86.3867% / 77.8317%. SuperKMeans pruning still has
 approximately 0.57% lower SSE on Cohere; the improvement here is in time and memory, not evidence
 of better clustering quality. Different initial centroids and one seed limit cross-library claims.
