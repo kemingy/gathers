@@ -2,7 +2,7 @@ use faer::{Accum, MatMut, MatRef, Par};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
-use crate::distance::{Distance, squared_euclidean};
+use crate::distance::{Distance, neg_dot_product, squared_euclidean};
 use crate::kmeans::{base_assign, base_assign_parallel};
 use crate::linalg::matmul;
 
@@ -359,14 +359,18 @@ impl MatrixAssignmentWorkspace {
                                         // The approximate best can only decrease as more tiles are
                                         // visited, so this cutoff contains the final cutoff. Refine
                                         // candidates now instead of retaining earlier score tiles.
-                                        if self.distance == Distance::SquaredEuclidean
-                                            && ambiguity.is_finite()
+                                        if ambiguity.is_finite()
                                             && score <= best.best_score + ambiguity
                                         {
-                                            best.update_exact(
-                                                squared_euclidean(vector, centroid),
-                                                index,
-                                            );
+                                            let distance = match self.distance {
+                                                Distance::SquaredEuclidean => {
+                                                    squared_euclidean(vector, centroid)
+                                                }
+                                                Distance::NegativeDotProduct | Distance::Cosine => {
+                                                    neg_dot_product(vector, centroid)
+                                                }
+                                            };
+                                            best.update_exact(distance, index);
                                         }
                                     });
                             });
@@ -407,14 +411,17 @@ impl ScoreContext<'_> {
 
     fn assign(&self, vector: &[f32], vector_norm: f32, best: BestTwo) -> u32 {
         let ambiguity = self.ambiguity(vector_norm);
-        let invalid = !self.centroid_norms_are_finite
+        // Gamma scaling can leave a finite error bound even when unscaled dot products
+        // overflow. GEMM and the direct kernel can then overflow differently; retain the
+        // full scan because the finite-arithmetic error model cannot prune those scores.
+        let dot_magnitude_overflows = self.distance != Distance::SquaredEuclidean
+            && !(vector_norm * self.max_centroid_norm + ambiguity).is_finite();
+        let invalid = dot_magnitude_overflows
+            || !self.centroid_norms_are_finite
             || !vector_norm.is_finite()
             || !ambiguity.is_finite()
             || !best.best_score.is_finite();
-        let use_direct = invalid
-            || (self.distance == Distance::NegativeDotProduct
-                && best.second_best_score - best.best_score <= ambiguity);
-        if use_direct {
+        if invalid {
             let mut direct = [0];
             base_assign(
                 vector,
@@ -424,8 +431,8 @@ impl ScoreContext<'_> {
                 &mut direct,
             );
             direct[0]
-        } else if self.distance == Distance::SquaredEuclidean
-            && (best.best_score < 0.0 || best.second_best_score - best.best_score <= ambiguity)
+        } else if (self.distance == Distance::SquaredEuclidean && best.best_score < 0.0)
+            || best.second_best_score - best.best_score <= ambiguity
         {
             best.exact_best_index as u32
         } else {
@@ -719,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_matrix_dot_product_falls_back_for_near_ties() {
+    fn test_matrix_dot_product_refines_near_ties() {
         let mut rng = StdRng::seed_from_u64(7);
         let dim = 64;
         let num_vectors = 8192;
@@ -764,6 +771,136 @@ mod tests {
         .unwrap();
         workspace.assign(&vecs, &centroids, dim, &mut actual);
 
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dot_refinement_preserves_late_winners_and_first_ties_across_tiles() {
+        let dim = 65;
+        let rows = 3;
+        let count = PREFERRED_CENTROID_BLOCK_SIZE + 2;
+        let mut vectors = vec![0.0; rows * dim];
+        for vector in vectors.chunks_exact_mut(dim) {
+            vector[0] = 1.0;
+        }
+        let mut centroids = vec![0.0; count * dim];
+        centroids[0] = 1.0;
+        // The true winner appears in the second tile and ties its next neighbor.
+        for index in [
+            PREFERRED_CENTROID_BLOCK_SIZE,
+            PREFERRED_CENTROID_BLOCK_SIZE + 1,
+        ] {
+            centroids[index * dim] = 1.0 + 4.0 * f32::EPSILON;
+        }
+        let mut expected = vec![0; rows];
+        base_assign(
+            &vectors,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        assert_eq!(expected, vec![PREFERRED_CENTROID_BLOCK_SIZE as u32; rows]);
+        let mut workspace = MatrixAssignmentWorkspace::try_new_with_threshold(
+            &vectors,
+            count,
+            dim,
+            Distance::NegativeDotProduct,
+            0,
+        )
+        .unwrap();
+        let mut actual = vec![0; rows];
+        workspace.assign_with_kernel(
+            &vectors,
+            &centroids,
+            dim,
+            &mut actual,
+            Some(64),
+            |mut dst, accum, lhs, rhs, alpha, parallelism| {
+                crate::linalg::matmul(dst.as_mut(), accum, lhs, rhs, alpha, parallelism);
+                // Simulate admissible GEMM rounding that makes centroid zero look best.
+                // The perturbation is smaller than the existing dimension error bound.
+                for row in 0..dst.nrows() {
+                    for col in 0..dst.ncols() {
+                        dst[(row, col)] = dst[(row, col)].round();
+                    }
+                }
+            },
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dot_refinement_retains_full_scan_when_bound_overflows() {
+        let dim = 65;
+        let mut vector = vec![0.0; dim];
+        vector[0] = 1e30;
+        let mut centroids = vec![0.0; 2 * dim];
+        centroids[0] = -1e30;
+        centroids[dim] = 1e-30;
+        let mut expected = [0];
+        base_assign(
+            &vector,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        assert_eq!(expected, [1]);
+        let mut workspace = MatrixAssignmentWorkspace::try_new_with_threshold(
+            &vector,
+            2,
+            dim,
+            Distance::NegativeDotProduct,
+            0,
+        )
+        .unwrap();
+        let mut actual = [0];
+        workspace.assign(&vector, &centroids, dim, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn dot_refinement_retains_full_scan_for_overflow_hidden_by_gemm() {
+        let dim = 65;
+        let mut vector = vec![0.0; dim];
+        vector[0] = 1e20;
+        let mut centroids = vec![0.0; 3 * dim];
+        centroids[0] = 1e20;
+        centroids[dim] = 1e-20;
+        centroids[2 * dim] = 1e-20;
+        let mut expected = [0];
+        base_assign(
+            &vector,
+            &centroids,
+            dim,
+            Distance::NegativeDotProduct,
+            &mut expected,
+        );
+        assert_eq!(expected, [0]);
+        let mut workspace = MatrixAssignmentWorkspace::try_new_with_threshold(
+            &vector,
+            3,
+            dim,
+            Distance::NegativeDotProduct,
+            0,
+        )
+        .unwrap();
+        let mut actual = [0];
+        workspace.assign_with_kernel(
+            &vector,
+            &centroids,
+            dim,
+            &mut actual,
+            Some(64),
+            |mut dst, _, _, _, _, _| {
+                // An overflowed centroid may be NaN in GEMM but -infinity in the
+                // direct kernel. The finite tied scores must still invoke the full scan.
+                dst[(0, 0)] = f32::NAN;
+                dst[(0, 1)] = -1.0;
+                dst[(0, 2)] = -1.0;
+            },
+        );
         assert_eq!(actual, expected);
     }
 

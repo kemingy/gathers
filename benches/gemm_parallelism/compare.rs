@@ -3,6 +3,7 @@
 //! Compile the private implementation in this target instead of exporting benchmark APIs.
 //! Paths are checked by Cargo and Clippy; there is no generated or patched Rust source.
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
@@ -45,16 +46,38 @@ struct Args {
     /// queries per processing batch; includes workspace setup when supplied
     #[argh(option)]
     batch_rows: Option<usize>,
+    /// restrict backend comparison to faer or accelerate
+    #[argh(option)]
+    backend: Option<Backend>,
+    /// restrict row policy to fixed512 or adaptive
+    #[argh(option)]
+    row_policy: Option<RowPolicy>,
+    /// restrict batch crossover comparison to previous or current
+    #[argh(option)]
+    crossover: Option<Crossover>,
     /// measured calls after one warmup
     #[argh(option, default = "7")]
     repeats: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Backend {
     Portable,
     #[cfg(target_os = "macos")]
     Accelerate,
+}
+
+impl FromStr for Backend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "faer" => Ok(Self::Portable),
+            #[cfg(target_os = "macos")]
+            "accelerate" => Ok(Self::Accelerate),
+            _ => Err("expected faer or accelerate (macOS only)".into()),
+        }
+    }
 }
 
 impl Backend {
@@ -107,10 +130,22 @@ fn portable_matmul(
     faer::linalg::matmul::matmul(dst, accum, lhs, rhs, alpha, parallelism);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum RowPolicy {
     Fixed512,
     Adaptive,
+}
+
+impl FromStr for RowPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fixed512" => Ok(Self::Fixed512),
+            "adaptive" => Ok(Self::Adaptive),
+            _ => Err("expected fixed512 or adaptive".into()),
+        }
+    }
 }
 
 impl RowPolicy {
@@ -131,10 +166,22 @@ impl RowPolicy {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Crossover {
     Previous,
     Current,
+}
+
+impl FromStr for Crossover {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "previous" => Ok(Self::Previous),
+            "current" => Ok(Self::Current),
+            _ => Err("expected previous or current".into()),
+        }
+    }
 }
 
 impl Crossover {
@@ -307,6 +354,14 @@ fn main() -> Result<()> {
     ensure!(args.threads > 0, "threads must be positive");
     ensure!(args.repeats > 0, "repeats must be positive");
     ensure!(args.batch_rows != Some(0), "batch rows must be positive");
+    ensure!(
+        args.crossover.is_none() || args.batch_rows.is_some(),
+        "--crossover requires --batch-rows"
+    );
+    ensure!(
+        args.row_policy.is_none() || args.batch_rows.is_none(),
+        "--row-policy is for backend comparison; batch mode uses adaptive rows"
+    );
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global()?;
@@ -331,7 +386,11 @@ fn main() -> Result<()> {
         let backend = Backend::Accelerate;
         #[cfg(not(target_os = "macos"))]
         let backend = Backend::Portable;
+        let backend = args.backend.unwrap_or(backend);
         for crossover in [Crossover::Previous, Crossover::Current] {
+            if args.crossover.is_some_and(|selected| selected != crossover) {
+                continue;
+            }
             compare(
                 &args,
                 &inputs,
@@ -348,7 +407,13 @@ fn main() -> Result<()> {
             Backend::Accelerate,
         ];
         for backend in backends {
+            if args.backend.is_some_and(|selected| selected != backend) {
+                continue;
+            }
             for rows in [RowPolicy::Fixed512, RowPolicy::Adaptive] {
+                if args.row_policy.is_some_and(|selected| selected != rows) {
+                    continue;
+                }
                 compare(&args, &inputs, &oracle, backend, rows, Crossover::Current)?;
             }
         }
