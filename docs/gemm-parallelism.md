@@ -40,10 +40,13 @@ full-data PCA128 checks, batch sensitivity and rejected GEMV experiment.
 
 Accelerate still computes `f32` products. The L2 norm identity can lose precision
 through cancellation, and dot-product rounding can reorder nearly tied scores.
-The existing uncertainty bounds, candidate refinement, direct near-tie fallback,
-non-finite handling and subnormal margin are retained. No safeguards were removed,
-and no public API changed. Tests exercise the selected backend and the portable
-backend against a direct `f64` product with an absolute-plus-relative reduction
+Assignment retains the uncertainty bounds, non-finite handling and subnormal margin.
+Both L2 and dot-product assignment refine candidates within the conservative score
+margin as tiles are scanned, then use those direct scores to resolve ambiguous rows.
+Non-finite bounds still trigger a full direct scan. See
+[candidate refinement](./assignment-refinement.md) for the algorithm, tie handling
+and measurements. No public API changed. Tests exercise the selected backend and
+the portable backend against a direct `f64` product with an absolute-plus-relative reduction
 bound, and assignment tests check direct-reference labels.
 
 ## Environment and inputs
@@ -139,9 +142,9 @@ The Rust port's `layout.rs` explicitly retains plain row-major centroids instead
 of the original C++ hybrid layout. Its Cohere benchmarks use different dimensions
 and cluster counts, so their claims do not establish performance on our inputs.
 
-Prior profiling identified GEMM/packing as the main bottleneck. Cohere also has
-expensive direct rescans on ambiguous rows. Conservative candidate refinement is
-a useful next target; replacing GEMM does not justify bypassing the accuracy guard.
+Prior profiling identified GEMM/packing as the main bottleneck. After adopting
+Accelerate, [streamed candidate refinement](./assignment-refinement.md) addresses
+Cohere's expensive direct rescans while retaining the numerical uncertainty guard.
 
 ## Reproduction and checks
 
@@ -165,7 +168,11 @@ reports seven-call medians as JSON lines. Input loading, normalization, referenc
 assignment, and workspace creation are outside these timers; centroid norm refresh
 and score scratch allocation remain included. Every warmup and measured call checks
 all labels against direct SIMD assignment. `--repeats N` changes the sample count;
-`median_ms` also handles even sample counts.
+`median_ms` also handles even sample counts. For focused profiling, select
+`--backend faer|accelerate` and `--row-policy fixed512|adaptive`. Batch mode also
+accepts `--backend` and `--crossover previous|current`; it always uses adaptive rows.
+`accelerate` is accepted only on macOS. These filters change which cases run, not
+the dataset or production dispatch settings.
 
 Repeat with 1 and 8 workers, and optionally set `VECLIB_MAXIMUM_THREADS=1` before
 process startup. Supply full native query sets and final original-space centroids
