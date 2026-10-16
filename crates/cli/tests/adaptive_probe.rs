@@ -1,0 +1,8 @@
+//! Validate the private PR65 experiment without exporting benchmark hooks.
+use gathers::{distance, kmeans, simd, utils};
+
+#[allow(dead_code, unused_imports)]
+#[path = "../../../src/kmeans/hierarchy.rs"]
+mod hierarchy;
+#[path = "../../../benches/adaptive_probe/policy.rs"]
+mod policy;
