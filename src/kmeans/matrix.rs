@@ -57,18 +57,22 @@ pub(crate) fn matmul_block_size(
     num_centroids: usize,
     num_threads: usize,
 ) -> Option<usize> {
+    // Reject a zero worker count explicitly; `div_ceil` below would divide by zero.
+    if num_threads == 0 {
+        return None;
+    }
     let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
     let scratch_denominator = centroid_block_size.checked_mul(num_threads)?;
     let max_block_size = MAX_MATRIX_SCRATCH_ELEMENTS.checked_div(scratch_denominator)?;
     if max_block_size < MIN_MATMUL_BLOCK_SIZE {
         return None;
     }
-    // Size tiles for parallel batches, rounding up to amortize matrix packing.
-    // Keep a 64-row minimum and retain 512-row tiles for bulk work.
-    let rows_per_worker = num_vectors.div_ceil(num_threads).max(MIN_MATMUL_BLOCK_SIZE);
-    let parallel_block_size = rows_per_worker
-        .min(PREFERRED_MATMUL_BLOCK_SIZE)
-        .next_power_of_two();
+    // Give every worker one exact-fit tile: ceil(rows / workers) clamped to 64-512 rows.
+    // Measured on Apple Silicon, exact-fit tiles beat power-of-two rounding: rounding up can
+    // leave workers idle on mid-size batches while saving little GEMM packing cost.
+    let parallel_block_size = num_vectors
+        .div_ceil(num_threads)
+        .clamp(MIN_MATMUL_BLOCK_SIZE, PREFERRED_MATMUL_BLOCK_SIZE);
     Some(
         PREFERRED_MATMUL_BLOCK_SIZE
             .min(1 << max_block_size.ilog2())
@@ -488,11 +492,14 @@ mod tests {
 
     #[test]
     fn test_matrix_blocks_adapt_to_batch_parallelism() {
-        // Native query batches have 1,000 rows. Eight/twelve workers need larger
-        // tiles than sixteen workers to avoid paying for excessive matrix packing.
-        for (threads, expected) in [(1, 512), (8, 128), (12, 128), (16, 64)] {
+        // Native query batches have 1,000 rows. Tiles give every worker one exact-fit
+        // chunk, clamped to the 64-512 row range, without power-of-two rounding.
+        for (threads, expected) in [(1, 512), (8, 125), (12, 84), (16, 64)] {
             assert_eq!(matmul_block_size(1000, 4096, threads), Some(expected));
         }
+        // Mid-size batches keep exact-fit tiles instead of rounding up to 512 rows.
+        assert_eq!(matmul_block_size(5000, 4096, 16), Some(313));
+        assert_eq!(matmul_block_size(6144, 4096, 16), Some(384));
         assert_eq!(matmul_block_size(65_536, 4096, 16), Some(512));
         assert_eq!(matmul_block_size(1000, 4096, 0), None);
     }
