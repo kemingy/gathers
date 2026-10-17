@@ -15,7 +15,6 @@ portable fallback may form both triangles, but the upper entries are not accumul
 finite-result checks, and overflow errors remain. This changes accumulation order and can change
 principal directions and cluster labels slightly; bitwise reproduction of the previous PCA is
 not promised. Original-space centroid reconstruction still uses the existing accumulation code.
-Its improvement below comes from the changed memory behavior, not a new centroid-update kernel.
 
 The CLI memory preflight accounts for bounded scratch and covariance/eigensolver storage. A
 selected fitting sample is retained only when PCA fits fewer than all supplied rows. Full-source
@@ -24,75 +23,60 @@ conservative estimate, not an enforced RSS cap.
 
 ## Full-data training
 
-Measured 2026-10-15/16 on an Apple M3 Max, 16 physical cores, 64 GiB, macOS 26.7.1,
-aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen unit; 16 Rayon workers,
-default Accelerate thread policy, no `target-cpu=native`, and no library `perf` feature.
+Re-measured 2026-10-17 on an Apple M5 Pro, 18 physical cores (12 Performance + 6 Super),
+64 GiB, macOS 26.6, aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen
+unit; 16 Rayon workers, default Accelerate thread policy, no `target-cpu=native`, and no
+library `perf` feature. Benchmark processes ran serially.
 
-Both datasets are the full local real inputs: GIST 1,000,000 × 960 and Cohere 10,000,000 × 768.
-PCA fits every row and projects to 128D. K=3,943 / 24,881, seed=42, ten rounds, tolerance=1e-12.
-The temporary benchmark overrides the large-input RaBitQ heuristic to force exact flat assignment
-during training, as requested; it does not change that heuristic in production. File loading,
-caller input preparation, centroid serialization and final quality evaluation are outside the
-training timer. GIST uses medians of three runs; Cohere is one full run before and after.
+Both datasets are the full local real inputs: SIFT 1,000,000 × 128 and GIST 1,000,000 × 960.
+K=3,943, seed=42, ten rounds, tolerance=0.01, repository CLI defaults: automatic reduction
+selects raw 128D training for SIFT and PCA128 for GIST, with the PCA fitting sample capped at
+96,000 rows (100 × input dimension). One run per configuration. "Previous" is the pre-PCA-change
+commit's CLI; "current" is this branch. Training totals sum the reported stage timers
+(K-means fit, PCA fit, PCA projection, reconstruction); file loading, sampling, centroid
+serialization and final quality evaluation are outside them.
 
-| Training including PCA and reconstruction | Previous | Improved | Speedup |
+| Training total | Previous | Current | Speedup |
 | --- | ---: | ---: | ---: |
-| Full GIST | 10.310 s | 7.260 s | 1.42× |
-| Full Cohere | 671.422 s | 364.303 s | 1.84× |
+| Full GIST (PCA128) | 6.768 s | 6.545 s | 1.03× |
+| Full SIFT (raw 128D) | 5.410 s | 5.343 s | 1.01× |
 
-| Cohere stage | Previous seconds | Improved seconds |
+| GIST stage | Previous seconds | Current seconds |
 | --- | ---: | ---: |
-| Fit PCA on all 10M rows | 103.224 | 10.414 |
-| Project all rows | 97.431 | 7.045 |
-| Exact flat K-means in 128D | 341.210 | 338.316 |
-| Reconstruct original 768D centroids | 126.597 | 4.616 |
+| Fit PCA on the 96,000-row sample | 0.519 | 0.437 |
+| Project all 1M training rows | 0.746 | 0.545 |
+| Exact flat K-means in 128D | 5.402 | 5.463 |
+| Reconstruct original 960D centroids | 0.101 | 0.100 |
 
-Final full-data assignment uses the same guarded original-space flat path for both models,
-streaming 65,536 rows per batch. It includes norm/workspace setup and excludes reading and SSE
-computation. Cohere assignment: 136.673 → 137.982 s.
-Training plus final assignment: 808.095 → 502.285 s (1.61×).
-The earlier SuperKMeans + Accelerate + pruning run trained in 558.103 s, so the
-improved PCA pipeline is 1.53× faster in training in this comparison.
+Under this default protocol the totals are dominated by exact flat assignment, so the bounded
+PCA pipeline changes them only slightly. The stage-level gains are larger: PCA fit 1.19× and
+full-row projection 1.37× on the sampled-fit workload, and 2.17× / 1.79× on full-source
+fit / fit+projection stage tests (see [Accelerate refinements](./accelerate-refinements.md)).
+SIFT trains raw at 128D and exercises no PCA code; its match within run variation shows the
+refactor did not regress the raw path. Final assignment uses the same guarded original-space
+flat path for both models; neither training had an empty cluster.
 
-| Original-space SSE after final reassignment (lower is better) | Previous PCA | Improved PCA |
-| --- | ---: | ---: |
-| GIST | 1039435.749 | 1039447.091 |
-| Cohere | 396155328.144 | 396157794.062 |
-
-SSE changes are +0.00109% on GIST and +0.00062% on Cohere, measured by summing
-selected-centroid squared distances in `f64`. All completed fits and final assignments have zero
-empty clusters.
-Preserved variance is approximately 86.3867% / 77.8317%. SuperKMeans pruning still has
-approximately 0.57% lower SSE on Cohere; the improvement here is in time and memory, not evidence
-of better clustering quality. Different initial centroids and one seed limit cross-library claims.
+The earlier revision of this document used a forced exact-flat, tolerance-1e-12 protocol with
+full-source PCA fits on a different machine; those training totals are not comparable to the
+CLI-default protocol above and have been replaced.
 
 ## Separate backend and memory contributions
 
-Fit plus projection only, using all rows, with loading outside the timer:
+Earlier measurements, not re-run in this revision; machine labels have been removed.
+Fit plus projection only, using all GIST rows, with loading outside the timer:
 
-| PCA backend / centered scratch | GIST seconds, median of 3 | Cohere seconds, single run |
-| --- | ---: | ---: |
-| faer / full centered corpus | 4.259 | 200.655 |
-| Accelerate / full centered corpus | 1.452 | 93.596 |
-| faer / 16 MiB blocks | 4.131 | 30.529 |
-| Accelerate / 16 MiB blocks | 1.618 | 17.459 |
+| PCA backend / centered scratch | GIST seconds, median of 3 |
+| --- | ---: |
+| faer / full centered corpus | 4.259 |
+| Accelerate / full centered corpus | 1.452 |
+| faer / 16 MiB blocks | 4.131 |
+| Accelerate / 16 MiB blocks | 1.618 |
 
-The Cohere faer/full baseline comes from the earlier training-stage timers; combined Accelerate/
-blocked comes from the new training-stage timers. Other ablations call `PCA::fit`/`transform`
-directly, omitting the outer `fit_sample` fitting-budget validation. They isolate the backend and
-buffer choices within normal run-to-run timing limits, rather than forming a hardware-isolated
-paired experiment. Ablation unblocked cases use the same implementation with scratch expanded
-to the full source; blocked covariance sum conversion adds only a final matrix copy in that case.
+At 960D and 1M rows, an unblocked transform would hold the ~3.84 GB input, a ~3.84 GB centered
+copy, and a ~0.51 GB output before other workspaces. The blocked transform needs the input and
+output plus at most 16 MiB of centered scratch; the saving grows linearly with corpus size.
 
-At 768D, the old transform held ~30.72 GB input + ~30.72 GB centered copy + ~5.12 GB output,
-before other workspaces. The new transform needs the input and output plus at most 16 MiB
-centered scratch. System memory compression and swapping were observed during full-buffer runs.
-The recorded swap/compression activity is system-wide, so it is not treated as a precise
-per-process measurement. `time -l` could not query `kern.clockrate` in this environment; no
-measured peak-RSS number is claimed. Library stage timers and the completed result record are
-independent of that resource-query failure.
-
-Scratch sensitivity on full GIST (fit + projection, medians of three):
+Scratch sensitivity on full GIST (fit + projection, medians of three), same earlier measurement:
 
 | Centered scratch | Seconds |
 | --- | ---: |
@@ -103,34 +87,38 @@ Scratch sensitivity on full GIST (fit + projection, medians of three):
 16 MiB avoids the 4 MiB scheduling overhead while using one quarter of the scratch of 64 MiB.
 The latter saves about 0.16 s in this stage test; 16 MiB is the current bounded-memory tradeoff,
 not a claim of a universal optimal block size. All these configurations fit every source row.
+This revision's full-source GIST stage re-measurement of the current implementation
+(SYRK / 16 MiB blocks) is 1.683 s, consistent with the table above.
 
 The subsequent [Accelerate refinements](./accelerate-refinements.md) isolate SYRK and
-lower-triangle accumulation and report measurements against this blocked SGEMM implementation.
-The historical training figures above predate that refinement.
+lower-triangle accumulation and report measurements against the blocked SGEMM implementation.
+
+## Clustering quality
+
+Earlier measurement from the previous protocol, not re-run in this revision; the machine label
+has been removed.
+
+| Original-space SSE after final reassignment (lower is better) | Previous PCA | Improved PCA |
+| --- | ---: | ---: |
+| GIST | 1039435.749 | 1039447.091 |
+
+The SSE change is +0.00109% on GIST, measured by summing selected-centroid squared distances
+in `f64`. All completed fits and final assignments had zero empty clusters. Preserved variance
+on full-source GIST PCA128 is 0.8638668 (previous) versus 0.8638666 (current) in this revision's
+runs. The improvement is in time and memory, not evidence of better clustering quality.
+Different initial centroids and one seed limit cross-library claims.
 
 ## Validation and reproduction
 
-- `make format lint lint-ast test-ast test-rust`; 80 library tests plus workspace tests/doctests.
-- `PIP_NO_BUILD_ISOLATION=0 PIP_NO_INDEX=1 make test-python`, with the installed local build
-  dependencies: 73 Python tests. The ordinary isolated build tried an unavailable package index.
+- `make format lint lint-ast test-ast test-rust`; library tests plus workspace tests/doctests.
+- `make test-python` for the Python behavior tests.
 - Linux `cargo check --offline --lib --target x86_64-unknown-linux-gnu`; Intel macOS
   `cargo check --offline --lib --tests --target x86_64-apple-darwin`. Cross-target tests were not
   executed. A Linux test-only C dependency requires an unavailable cross compiler, so Linux
   compilation evidence is for the library, not its test binary.
-- Focused new tests cover NN/NT/TN/TT matrix layouts, padded output strides, accumulation,
+- Focused tests cover NN/NT/TN/TT matrix layouts, padded output strides, accumulation,
   the portable fallback, and covariance/projection tails at the actual scratch boundary.
   Existing large-offset, overflow, numerical assignment guard and scalar-reference tests pass.
-- The existing isolated assignment benchmark preparation script still builds. New PCA timing
-  instrumentation is kept outside the production API; no permanent benchmark target was added.
-
-Raw JSON records, source archive, per-case commands and logs are in the accompanying local
-`gathers-gemm-parallelism/pca-improved` report directory. The external optimized harness uses:
-
-```console
-CARGO_TARGET_DIR=/private/tmp/superkmeans-gist-target cargo build --offline --release --features accelerate --bins --manifest-path /private/tmp/superkmeans-gist-bench/Cargo.toml
-/private/tmp/superkmeans-gist-target/release/cohere pca /Users/keming.yang/workdir/datasets/cohere-large-10m.fvecs /private/tmp/cohere-improved-centroids.fvecs 16
-/private/tmp/superkmeans-gist-target/release/pca_stages /private/tmp/pr65-real-data/gist.fvecs true 16 3 16
-```
-
-The external source archive includes exact-training and backend/scratch control hooks; none are
-exposed in the production library. No random or capped datasets are used for performance evidence.
+- The training rows above come from the repository CLI (`gathers --threads 16 kmeans -i INPUT
+  -o OUTPUT` with defaults) built from each compared commit. The full-source PCA stage
+  measurements use the public `PCA::fit`/`transform` API; no production hooks are required.
