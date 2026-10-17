@@ -1,16 +1,21 @@
-use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par};
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, squared_euclidean};
 use crate::kmeans::{base_assign, base_assign_parallel};
+use crate::linalg::matmul;
 
 // These crossover and block-size choices are tuned on Apple Silicon. Other targets use the
 // same safe defaults until platform-specific benchmarks justify changing them.
 const MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 19;
 // Matrix setup is proportionally more expensive at dimensions below 64.
 const SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 22;
+// Apple Silicon SGEMM amortizes setup earlier for medium batches at PCA128 and above.
+// Retain the previous cutoff for tiny queries and lower dimensions.
+const ACCELERATE_MATRIX_ASSIGNMENT_THRESHOLD: usize = 1 << 15;
+const MIN_ACCELERATE_BATCH_ROWS: usize = 16;
+const MIN_ACCELERATE_BATCH_VALUES: usize = 4096;
 // Bound explicit score tiles across Rayon workers to 128 MiB. Their size is
 // vector_block_rows * centroid_block_rows; input vectors and centroids are borrowed.
 const MAX_MATRIX_SCRATCH_ELEMENTS: usize = (128 << 20) / size_of::<f32>();
@@ -26,6 +31,20 @@ const L2_ERROR_BOUND_SAFETY_FACTOR: f32 = 8.0;
 const DOT_ERROR_BOUND_SAFETY_FACTOR: f32 = 1.0;
 const MIN_SUBNORMAL: f32 = f32::from_bits(1);
 
+fn matrix_assignment_threshold(num_vectors: usize, dim: usize) -> usize {
+    if dim < 64 {
+        SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        && dim >= 128
+        && num_vectors >= MIN_ACCELERATE_BATCH_ROWS
+        && num_vectors.saturating_mul(dim) >= MIN_ACCELERATE_BATCH_VALUES
+    {
+        ACCELERATE_MATRIX_ASSIGNMENT_THRESHOLD
+    } else {
+        MATRIX_ASSIGNMENT_THRESHOLD
+    }
+}
+
 fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     let mut values = Vec::new();
     values.try_reserve_exact(len).ok()?;
@@ -33,12 +52,32 @@ fn try_zeroed(len: usize) -> Option<Vec<f32>> {
     Some(values)
 }
 
-fn matmul_block_size(num_centroids: usize, num_threads: usize) -> Option<usize> {
+pub(crate) fn matmul_block_size(
+    num_vectors: usize,
+    num_centroids: usize,
+    num_threads: usize,
+) -> Option<usize> {
+    // Reject a zero worker count explicitly; `div_ceil` below would divide by zero.
+    if num_threads == 0 {
+        return None;
+    }
     let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
     let scratch_denominator = centroid_block_size.checked_mul(num_threads)?;
     let max_block_size = MAX_MATRIX_SCRATCH_ELEMENTS.checked_div(scratch_denominator)?;
-    (max_block_size >= MIN_MATMUL_BLOCK_SIZE)
-        .then(|| PREFERRED_MATMUL_BLOCK_SIZE.min(1 << max_block_size.ilog2()))
+    if max_block_size < MIN_MATMUL_BLOCK_SIZE {
+        return None;
+    }
+    // Give every worker one exact-fit tile: ceil(rows / workers) clamped to 64-512 rows.
+    // Measured on Apple Silicon, exact-fit tiles beat power-of-two rounding: rounding up can
+    // leave workers idle on mid-size batches while saving little GEMM packing cost.
+    let parallel_block_size = num_vectors
+        .div_ceil(num_threads)
+        .clamp(MIN_MATMUL_BLOCK_SIZE, PREFERRED_MATMUL_BLOCK_SIZE);
+    Some(
+        PREFERRED_MATMUL_BLOCK_SIZE
+            .min(1 << max_block_size.ilog2())
+            .min(parallel_block_size),
+    )
 }
 
 fn stable_l2_norm(values: &[f32]) -> f32 {
@@ -103,41 +142,39 @@ impl BestTwo {
     }
 }
 
-impl Distance {
-    fn matrix_scale(self) -> f32 {
-        match self {
-            Self::SquaredEuclidean => -2.0,
-            Self::NegativeDotProduct | Self::Cosine => -1.0,
-        }
+fn matrix_scale(distance: Distance) -> f32 {
+    match distance {
+        Distance::SquaredEuclidean => -2.0,
+        Distance::NegativeDotProduct | Distance::Cosine => -1.0,
     }
+}
 
-    fn matrix_norm(self, values: &[f32]) -> f32 {
-        match self {
-            Self::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
-            Self::NegativeDotProduct | Self::Cosine => stable_l2_norm(values),
-        }
+fn matrix_norm(distance: Distance, values: &[f32]) -> f32 {
+    match distance {
+        Distance::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
+        Distance::NegativeDotProduct | Distance::Cosine => stable_l2_norm(values),
     }
+}
 
-    fn matrix_uncertainty(
-        self,
-        gamma: f32,
-        vector_norm: f32,
-        max_centroid_norm: f32,
-        underflow_error: f32,
-    ) -> f32 {
-        match self {
-            // The norm identity can suffer cancellation. The safety factor is an
-            // engineering margin, not part of Higham's gamma_n bound.
-            Self::SquaredEuclidean => {
-                L2_ERROR_BOUND_SAFETY_FACTOR
-                    * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error)
-            }
-            // Cauchy-Schwarz bounds the magnitude of the exact dot product by
-            // ||x||₂ ||c||₂.
-            Self::NegativeDotProduct | Self::Cosine => {
-                DOT_ERROR_BOUND_SAFETY_FACTOR
-                    * (gamma * vector_norm * max_centroid_norm + underflow_error)
-            }
+fn matrix_uncertainty(
+    distance: Distance,
+    gamma: f32,
+    vector_norm: f32,
+    max_centroid_norm: f32,
+    underflow_error: f32,
+) -> f32 {
+    match distance {
+        // The norm identity can suffer cancellation. The safety factor is an
+        // engineering margin, not part of Higham's gamma_n bound.
+        Distance::SquaredEuclidean => {
+            L2_ERROR_BOUND_SAFETY_FACTOR
+                * (gamma * (vector_norm.abs() + max_centroid_norm.abs()) + underflow_error)
+        }
+        // Cauchy-Schwarz bounds the magnitude of the exact dot product by
+        // ||x||₂ ||c||₂.
+        Distance::NegativeDotProduct | Distance::Cosine => {
+            DOT_ERROR_BOUND_SAFETY_FACTOR
+                * (gamma * vector_norm * max_centroid_norm + underflow_error)
         }
     }
 }
@@ -155,31 +192,43 @@ impl MatrixAssignmentWorkspace {
         dim: usize,
         distance: Distance,
     ) -> Option<Self> {
+        Self::try_new_with_threshold(
+            vecs,
+            num_centroids,
+            dim,
+            distance,
+            matrix_assignment_threshold(vecs.len().checked_div(dim)?, dim),
+        )
+    }
+
+    // Explicit inputs let the real-data benchmark compare policies without global overrides.
+    pub(crate) fn try_new_with_threshold(
+        vecs: &[f32],
+        num_centroids: usize,
+        dim: usize,
+        distance: Distance,
+        assignment_threshold: usize,
+    ) -> Option<Self> {
         // Cosine fitting normalizes rows and uses the dot-product workspace instead.
         if distance == Distance::Cosine {
             return None;
         }
         let num_vectors = vecs.len() / dim;
         let comparison_count = num_vectors.checked_mul(num_centroids)?;
-        let assignment_threshold = if dim < 64 {
-            SMALL_DIM_MATRIX_ASSIGNMENT_THRESHOLD
-        } else {
-            MATRIX_ASSIGNMENT_THRESHOLD
-        };
         if !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
             || num_centroids < 2
             || comparison_count < assignment_threshold
         {
             return None;
         }
-        matmul_block_size(num_centroids, rayon::current_num_threads())?;
+        matmul_block_size(num_vectors, num_centroids, rayon::current_num_threads())?;
 
         let mut vector_norms = try_zeroed(num_vectors)?;
         vector_norms
             .par_iter_mut()
             .zip(vecs.par_chunks_exact(dim))
             .for_each(|(norm, vector)| {
-                *norm = distance.matrix_norm(vector);
+                *norm = matrix_norm(distance, vector);
             });
         Some(Self {
             distance,
@@ -195,6 +244,23 @@ impl MatrixAssignmentWorkspace {
         dim: usize,
         labels: &mut [u32],
     ) {
+        let block_size = matmul_block_size(
+            labels.len(),
+            centroids.len() / dim,
+            rayon::current_num_threads(),
+        );
+        self.assign_with_kernel(vecs, centroids, dim, labels, block_size, matmul);
+    }
+
+    pub(crate) fn assign_with_kernel(
+        &mut self,
+        vecs: &[f32],
+        centroids: &[f32],
+        dim: usize,
+        labels: &mut [u32],
+        block_size: Option<usize>,
+        multiply: impl Fn(MatMut<'_, f32>, Accum, MatRef<'_, f32>, MatRef<'_, f32>, f32, Par) + Sync,
+    ) {
         let num_centroids = centroids.len() / dim;
         debug_assert_eq!(self.vector_norms.len(), vecs.len() / dim);
         debug_assert_eq!(self.centroid_norms.len(), num_centroids);
@@ -203,7 +269,7 @@ impl MatrixAssignmentWorkspace {
             .par_iter_mut()
             .zip(centroids.par_chunks_exact(dim))
             .for_each(|(norm, centroid)| {
-                *norm = self.distance.matrix_norm(centroid);
+                *norm = matrix_norm(self.distance, centroid);
             });
         let centroid_norms_are_finite = self.centroid_norms.iter().all(|norm| norm.is_finite());
         let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
@@ -217,8 +283,7 @@ impl MatrixAssignmentWorkspace {
         // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
         let underflow_error = dim as f32 * MIN_SUBNORMAL;
 
-        let Some(block_size) = matmul_block_size(num_centroids, rayon::current_num_threads())
-        else {
+        let Some(block_size) = block_size else {
             base_assign_parallel(vecs, centroids, dim, self.distance, labels);
             return;
         };
@@ -232,7 +297,7 @@ impl MatrixAssignmentWorkspace {
         };
         let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
         let scratch_len = block_size * centroid_block_size;
-        let scale = self.distance.matrix_scale();
+        let scale = matrix_scale(self.distance);
         labels
             .par_chunks_mut(block_size)
             .zip(self.vector_norms.par_chunks(block_size))
@@ -261,7 +326,7 @@ impl MatrixAssignmentWorkspace {
                         let tile_start = tile_index * centroid_block_size;
                         let tile_rows = centroid_norm_tile.len();
                         let scores = &mut scores[..block_rows * tile_rows];
-                        matmul(
+                        multiply(
                             MatMut::from_row_major_slice_mut(scores, block_rows, tile_rows),
                             Accum::Replace,
                             MatRef::from_row_major_slice(vectors, block_rows, dim),
@@ -331,7 +396,8 @@ struct ScoreContext<'a> {
 impl ScoreContext<'_> {
     fn ambiguity(&self, vector_norm: f32) -> f32 {
         // Two estimates can each err in opposite directions by this uncertainty.
-        2.0 * self.distance.matrix_uncertainty(
+        2.0 * matrix_uncertainty(
+            self.distance,
             self.gamma,
             vector_norm,
             self.max_centroid_norm,
@@ -381,13 +447,61 @@ mod tests {
     use crate::utils::normalize;
 
     #[test]
+    fn medium_batch_crossover_preserves_tiny_queries_and_reference_labels() {
+        let accelerate = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        // Boundaries for the minimum query count, query values, and comparison count.
+        for (dim, rows, count, eligible) in [
+            (768, 15, 2048, false),
+            (768, 16, 2048, accelerate),
+            (128, 31, 1024, false),
+            (128, 32, 1023, false),
+            (128, 32, 1024, accelerate),
+            (128, 33, 1024, accelerate),
+            (129, 32, 1024, accelerate),
+            (64, 64, 1024, false),
+        ] {
+            let vectors: Vec<f32> = (0..rows * dim)
+                .map(|i| ((i % 29) as f32 - 14.0) * 0.125)
+                .collect();
+            let centroids: Vec<f32> = (0..count * dim)
+                .map(|i| ((i % 31) as f32 - 15.0) * 0.125)
+                .collect();
+            for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+                let workspace = MatrixAssignmentWorkspace::try_new(&vectors, count, dim, distance);
+                assert_eq!(workspace.is_some(), eligible, "{rows}x{count}x{dim}");
+                if let Some(mut workspace) = workspace {
+                    let mut actual = vec![0; rows];
+                    let mut expected = vec![0; rows];
+                    workspace.assign(&vectors, &centroids, dim, &mut actual);
+                    base_assign(&vectors, &centroids, dim, distance, &mut expected);
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_matrix_assignment_adapts_block_size_to_worker_scratch_budget() {
-        assert_eq!(matmul_block_size(4096, 16), Some(512));
-        assert_eq!(matmul_block_size(131_073, 16), Some(512));
-        assert_eq!(matmul_block_size(4096, 128), Some(256));
-        assert_eq!(matmul_block_size(4096, 256), Some(128));
-        assert_eq!(matmul_block_size(4096, 512), Some(64));
-        assert_eq!(matmul_block_size(4096, 513), None);
+        assert_eq!(matmul_block_size(1_000_000, 4096, 16), Some(512));
+        assert_eq!(matmul_block_size(1_000_000, 131_073, 16), Some(512));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 128), Some(256));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 256), Some(128));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 512), Some(64));
+        assert_eq!(matmul_block_size(1_000_000, 4096, 513), None);
+    }
+
+    #[test]
+    fn test_matrix_blocks_adapt_to_batch_parallelism() {
+        // Native query batches have 1,000 rows. Tiles give every worker one exact-fit
+        // chunk, clamped to the 64-512 row range, without power-of-two rounding.
+        for (threads, expected) in [(1, 512), (8, 125), (12, 84), (16, 64)] {
+            assert_eq!(matmul_block_size(1000, 4096, threads), Some(expected));
+        }
+        // Mid-size batches keep exact-fit tiles instead of rounding up to 512 rows.
+        assert_eq!(matmul_block_size(5000, 4096, 16), Some(313));
+        assert_eq!(matmul_block_size(6144, 4096, 16), Some(384));
+        assert_eq!(matmul_block_size(65_536, 4096, 16), Some(512));
+        assert_eq!(matmul_block_size(1000, 4096, 0), None);
     }
 
     #[test]
@@ -426,7 +540,7 @@ mod tests {
     #[test]
     fn test_matrix_assignment_matches_direct_across_centroid_tiles() {
         let mut rng = seeded_rng();
-        let dim = 64;
+        let dim = 65;
         let num_vectors = 513;
         let num_centroids = PREFERRED_CENTROID_BLOCK_SIZE + 1;
         let vecs = (0..num_vectors * dim)
@@ -436,7 +550,6 @@ mod tests {
             .map(|_| rng.random::<f32>())
             .collect::<Vec<_>>();
         let mut expected = vec![0; num_vectors];
-        let mut actual = vec![0; num_vectors];
 
         base_assign(
             &vecs,
@@ -445,22 +558,31 @@ mod tests {
             Distance::SquaredEuclidean,
             &mut expected,
         );
-        let mut workspace = MatrixAssignmentWorkspace::try_new(
-            &vecs,
-            num_centroids,
-            dim,
-            Distance::SquaredEuclidean,
-        )
-        .unwrap();
-        workspace.assign(&vecs, &centroids, dim, &mut actual);
+        for threads in [1, 4, 8, 16] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let mut actual = vec![0; num_vectors];
+                    let mut workspace = MatrixAssignmentWorkspace::try_new(
+                        &vecs,
+                        num_centroids,
+                        dim,
+                        Distance::SquaredEuclidean,
+                    )
+                    .unwrap();
+                    workspace.assign(&vecs, &centroids, dim, &mut actual);
 
-        assert_eq!(actual, expected);
+                    assert_eq!(actual, expected);
+                });
+        }
     }
 
     #[test]
     fn test_matrix_dot_product_matches_direct_across_centroid_tiles() {
         let mut rng = seeded_rng();
-        let dim = 64;
+        let dim = 65;
         let num_vectors = 513;
         let num_centroids = PREFERRED_CENTROID_BLOCK_SIZE + 1;
         let vecs = (0..num_vectors * dim)
@@ -470,7 +592,6 @@ mod tests {
             .map(|_| rng.random::<f32>())
             .collect::<Vec<_>>();
         let mut expected = vec![0; num_vectors];
-        let mut actual = vec![0; num_vectors];
 
         base_assign(
             &vecs,
@@ -479,16 +600,25 @@ mod tests {
             Distance::NegativeDotProduct,
             &mut expected,
         );
-        let mut workspace = MatrixAssignmentWorkspace::try_new(
-            &vecs,
-            num_centroids,
-            dim,
-            Distance::NegativeDotProduct,
-        )
-        .unwrap();
-        workspace.assign(&vecs, &centroids, dim, &mut actual);
+        for threads in [1, 4, 8, 16] {
+            ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let mut actual = vec![0; num_vectors];
+                    let mut workspace = MatrixAssignmentWorkspace::try_new(
+                        &vecs,
+                        num_centroids,
+                        dim,
+                        Distance::NegativeDotProduct,
+                    )
+                    .unwrap();
+                    workspace.assign(&vecs, &centroids, dim, &mut actual);
 
-        assert_eq!(actual, expected);
+                    assert_eq!(actual, expected);
+                });
+        }
     }
 
     #[test]

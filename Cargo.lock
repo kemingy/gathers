@@ -576,10 +576,12 @@ dependencies = [
  "anyhow",
  "argh",
  "bytemuck",
+ "faer",
  "gathers",
  "logforth",
  "rand",
  "rayon",
+ "seed-rand",
  "serde_json",
  "tempfile",
 ]

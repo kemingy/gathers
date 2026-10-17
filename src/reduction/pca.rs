@@ -1,13 +1,13 @@
 //! Principal component analysis for dense vectors.
 
 use aligned_vec::{AVec, avec};
-use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par, Side};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
+use crate::linalg::{matmul, symmetric_rank_k_lower};
 use crate::reduction::{
     Reduction, ReductionError, check_finite_result, checked_buffer_len, validate_output_dimension,
     validate_shape,
@@ -31,6 +31,13 @@ pub struct PCA {
     // Principal directions in descending variance order, row-major output_dim x input_dim.
     components: Vec<f32>,
     preserved_variance: f64,
+}
+
+// Bound centered scratch independently of corpus size. One full row is the minimum.
+const CENTERED_SCRATCH_BYTES: usize = 16 << 20;
+
+fn block_rows(dim: usize) -> usize {
+    (CENTERED_SCRATCH_BYTES / size_of::<f32>() / dim).max(1)
 }
 
 fn center_rows(
@@ -103,6 +110,9 @@ impl PCA {
             return Err(ReductionError::TooFewRows { rows });
         }
         let covariance_len = checked_buffer_len(input_dim, input_dim)?;
+        if covariance_len > isize::MAX as usize / size_of::<f64>() {
+            return Err(ReductionError::SizeOverflow);
+        }
 
         let mut mean = vec![0.0_f64; input_dim];
         for row in vectors.chunks_exact(input_dim) {
@@ -114,20 +124,40 @@ impl PCA {
             *value /= rows as f64;
         }
 
-        let mut centered: AVec<f32> = AVec::new(64);
-        centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &mean, input_dim, &mut centered)?;
-
+        let block_rows = block_rows(input_dim).min(rows);
+        let mut centered = avec!(0.0_f32; checked_buffer_len(block_rows, input_dim)?);
         let mut covariance = vec![0.0_f32; covariance_len];
-        let centered = MatRef::from_row_major_slice(&centered, rows, input_dim);
-        matmul(
-            MatMut::from_row_major_slice_mut(&mut covariance, input_dim, input_dim),
-            Accum::Replace,
-            centered.transpose(),
-            centered,
-            1.0 / (rows - 1) as f32,
-            Par::rayon(0),
-        );
+        // Sum block covariances in f64: f32 accumulation across thousands of blocks
+        // would otherwise introduce an additional error proportional to corpus size.
+        let mut sums = vec![0.0_f64; covariance_len];
+        let scale = 1.0 / (rows - 1) as f32;
+        for block in vectors.chunks(centered.len()) {
+            let centered = &mut centered[..block.len()];
+            center_rows(block, &mean, input_dim, centered)?;
+            let matrix = MatRef::from_row_major_slice(centered, block.len() / input_dim, input_dim);
+            symmetric_rank_k_lower(
+                MatMut::from_row_major_slice_mut(&mut covariance, input_dim, input_dim),
+                matrix,
+                scale,
+                Par::rayon(0),
+            );
+            // The eigensolver reads Side::Lower. Avoid mirroring, validating, or accumulating
+            // the unused upper triangle on every block; retain f64 sums for computed entries.
+            for (row, (sums, values)) in sums
+                .chunks_mut(input_dim)
+                .zip(covariance.chunks(input_dim))
+                .enumerate()
+            {
+                let values = &values[..=row];
+                check_finite_result(values)?;
+                for (sum, &value) in sums[..=row].iter_mut().zip(values) {
+                    *sum += f64::from(value);
+                }
+            }
+        }
+        for (value, sum) in covariance.iter_mut().zip(sums) {
+            *value = sum as f32;
+        }
         check_finite_result(&covariance)?;
         let eigen = MatRef::from_row_major_slice(&covariance, input_dim, input_dim)
             .self_adjoint_eigen(Side::Lower)
@@ -190,19 +220,26 @@ impl Reduction for PCA {
     /// Centering or discarding components can map a nonzero input row to zero.
     fn transform(&self, vectors: &[f32]) -> Result<AVec<f32>, ReductionError> {
         let rows = validate_shape(vectors, self.input_dim)?;
-        let mut centered: AVec<f32> = AVec::new(64);
-        centered.resize(vectors.len(), 0.0_f32);
-        center_rows(vectors, &self.mean, self.input_dim, &mut centered)?;
-        let mut output = avec!(0.0_f32; rows * self.output_dim);
-        matmul(
-            MatMut::from_row_major_slice_mut(&mut output, rows, self.output_dim),
-            Accum::Replace,
-            MatRef::from_row_major_slice(&centered, rows, self.input_dim),
-            MatRef::from_row_major_slice(&self.components, self.output_dim, self.input_dim)
-                .transpose(),
-            1.0,
-            Par::rayon(0),
-        );
+        let block_rows = block_rows(self.input_dim).min(rows);
+        let mut centered = avec!(0.0_f32; checked_buffer_len(block_rows, self.input_dim)?);
+        let mut output = avec!(0.0_f32; checked_buffer_len(rows, self.output_dim)?);
+        for (input, output) in vectors
+            .chunks(centered.len())
+            .zip(output.chunks_mut(block_rows * self.output_dim))
+        {
+            let rows = input.len() / self.input_dim;
+            let centered = &mut centered[..input.len()];
+            center_rows(input, &self.mean, self.input_dim, centered)?;
+            matmul(
+                MatMut::from_row_major_slice_mut(output, rows, self.output_dim),
+                Accum::Replace,
+                MatRef::from_row_major_slice(centered, rows, self.input_dim),
+                MatRef::from_row_major_slice(&self.components, self.output_dim, self.input_dim)
+                    .transpose(),
+                1.0,
+                Par::rayon(0),
+            );
+        }
         check_finite_result(&output)?;
         Ok(output)
     }
@@ -233,6 +270,35 @@ impl Reduction for PCA {
 mod tests {
     use super::PCA;
     use crate::reduction::{Reduction, ReductionError};
+
+    #[test]
+    fn pca_block_tails_preserve_covariance_and_projection() {
+        use super::block_rows;
+        // One more than the actual scratch capacity exercises the fitting and transform tails.
+        let dim = 3;
+        let rows = block_rows(dim) + 1;
+        let mut vectors = Vec::with_capacity(rows * dim);
+        for row in 0..rows - 1 {
+            vectors.extend_from_slice(&[if row % 2 == 0 { 1.0 } else { -1.0 }, 0.0, 0.0]);
+        }
+        vectors.extend_from_slice(&[0.0, 0.0, 10_000.0]);
+        let pca = PCA::fit(&vectors, dim, 1).unwrap();
+        // The last row, in a separate block, supplies nearly all of the leading variance.
+        let z_variance = 1e8 / rows as f64;
+        let x_variance = 1.0 - 1.0 / (rows as f64 * (rows - 1) as f64);
+        let expected = z_variance / (z_variance + x_variance);
+        assert!((pca.preserved_variance() - expected).abs() < 1e-5);
+        let projected = pca.transform(&vectors).unwrap();
+        let tail = pca.transform(&vectors[(rows - 1) * dim..]).unwrap();
+        assert!((projected[rows - 1] - tail[0]).abs() < 1e-3);
+        assert!((tail[0].abs() - 10_000.0 * (1.0 - 1.0 / rows as f32)).abs() < 0.01);
+        vectors[(rows - 1) * dim + 2] = 1e25;
+        assert_eq!(pca.transform(&vectors).unwrap().len(), rows);
+        assert!(matches!(
+            PCA::fit(&vectors, dim, 1),
+            Err(ReductionError::NumericalOverflow)
+        ));
+    }
 
     #[test]
     fn pca_rejects_centering_and_covariance_overflow() {
