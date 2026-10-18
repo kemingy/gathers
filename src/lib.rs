@@ -25,6 +25,7 @@
 
 pub mod distance;
 pub mod kmeans;
+mod linalg;
 /// Dimensionality-reduction transforms for clustering workloads.
 pub mod reduction;
 /// RaBitQ-based approximate top-1 vector retrieval.

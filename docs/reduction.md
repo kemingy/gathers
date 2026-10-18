@@ -112,7 +112,12 @@ gathers --threads 16 --seed 42 kmeans -i vectors.fvecs -o centroids.fvecs \
 `--projection-training-samples` applies only to PCA. Its default is the smaller of the K-means
 training sample and `100 × input_dimension` rows. PCA uses covariance eigenvectors in descending
 variance order; it does not whiten or standardize features. It computes the mean in `f64`, forms an
-`f32` covariance matrix, and transforms rows with `faer` matrix multiplication. SRHT applies seeded
+`f32` covariance matrix, and transforms rows with dense matrix multiplication. On macOS these
+products use Apple Accelerate; other platforms use `faer`, which also supplies the eigensolver.
+Fitting and projection center reusable blocks with at most 16 MiB of scratch (or one row for
+exceptionally wide inputs), rather than copying the full dataset. Block covariance contributions
+are accumulated in `f64` before conversion to `f32`; accumulation order and backend differences
+can slightly change principal directions and clustering results. SRHT applies seeded
 random signs, zero-pads to the next power of two, runs a fast Walsh-Hadamard transform, and samples
 output coordinates.
 
@@ -136,8 +141,9 @@ validation does not guarantee enough physical memory for otherwise addressable a
 
 The CLI samples row indices from the fvecs source before loading vectors, so it does not load the
 whole corpus. It keeps the selected sample in RAM for K-means. A projected run temporarily holds
-both original and reduced samples for centroid reconstruction; PCA transformation also creates a
-centered copy. `--memory-limit-gb` estimates these buffers but is not an enforced RSS limit. See
+both original and reduced samples for centroid reconstruction. PCA fitting and transformation use
+bounded centered scratch; fitting fewer than all supplied rows also retains the selected fitting
+sample. `--memory-limit-gb` estimates these buffers but is not an enforced RSS limit. See
 the [profiling guide](./profiling.md) for sampling and memory details.
 
 K-means returns its final reduced-space labels. The library averages the corresponding **original**

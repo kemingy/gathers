@@ -54,8 +54,8 @@ and leave room for other processes. For 10M rows at dimension 768, the default K
 the default training sample has 6,369,536 rows (19.57 GB of coordinates). A factor of 128 selects
 3,184,768 rows (9.78 GB of coordinates). Pass `--memory-limit-gb` to reject workloads before
 loading. Projected training temporarily retains both original and
-reduced samples to reconstruct full-dimensional centroids. PCA transformation also holds a
-centered copy; the estimate includes these buffers.
+reduced samples to reconstruct full-dimensional centroids. PCA fitting and transformation use
+bounded centered scratch; the estimate includes these buffers.
 Sampling alone does not make arbitrary K fit: at 10B source rows the default K is 6.25M, and
 even the minimum 39 rows per cluster would require about 749 GB at dimension 768. Use
 `--memory-limit-gb` to bound training before it starts; otherwise reduce K or dimension

@@ -85,19 +85,20 @@ fn check_memory(
     let projection_bytes = reduced_dim.map_or(0, |reduced_dim| {
         let projected_sample = samples as u128 * reduced_dim as u128 * 4;
         let projected_centroids = clusters as u128 * (dim as u128 + reduced_dim as u128) * 4;
-        // Only PCA fits a projection: SRHT has no training copy or dim × dim covariance.
+        // PCA keeps a sampled fitting copy only when fitting fewer than all supplied rows.
+        // Centering is blocked; allow 64 MiB for its 16 MiB scratch and BLAS packing,
+        // plus a row for exceptionally wide inputs and covariance/eigen workspaces.
         let pca_workspace = if projection_training_samples > 0 {
-            projection_training_samples as u128 * dim as u128 * 4 + dim as u128 * dim as u128 * 4
+            let fitting_copy = if projection_training_samples < samples {
+                projection_training_samples as u128 * dim as u128 * 4
+            } else {
+                0
+            };
+            fitting_copy + (64_u128 << 20) + dim as u128 * 4 + dim as u128 * dim as u128 * 32
         } else {
             0
         };
-        // PCA::transform holds a centered copy of the full sample alongside its input and output.
-        let centered_sample = if projection_training_samples > 0 {
-            sample_bytes
-        } else {
-            0
-        };
-        projected_sample + projected_centroids + pca_workspace + centered_sample
+        projected_sample + projected_centroids + pca_workspace
     });
     // Sampling finishes before vector allocation. Allow for rand's temporary u32 source
     // array (in-place sampler), or hash table and output (rejection sampler), in addition
@@ -296,13 +297,25 @@ mod tests {
         assert!(
             check_memory(samples, 768, clusters, 4096, None, 0, Some(48)).unwrap() < 30_000_000_000
         );
-        assert!(check_memory(samples, 768, clusters, 4096, Some(128), 76_800, Some(48)).is_err());
-        // An SRHT run (no PCA training rows) is not charged for the covariance or the
-        // centered training copy; only the PCA run pays for those buffers.
+        assert!(check_memory(samples, 768, clusters, 4096, Some(128), 76_800, Some(48)).is_ok());
+        // Fitting PCA on the full 10M rows must not reserve another full centered corpus.
+        assert!(
+            check_memory(
+                10_000_000,
+                768,
+                clusters,
+                4096,
+                Some(128),
+                10_000_000,
+                Some(48)
+            )
+            .is_ok()
+        );
+        // SRHT pays no covariance or fitting-copy cost. PCA extra memory stays bounded
+        // by the fitting sample, matrix dimension and scratch, not the whole corpus.
         let srht = check_memory(samples, 4096, clusters, 4096, Some(128), 0, None).unwrap();
         let pca = check_memory(samples, 4096, clusters, 4096, Some(128), 76_800, None).unwrap();
-        let pca_only_bytes = (76_800 * 4096 + 4096 * 4096 + samples * 4096) as u64 * 4;
-        assert_eq!(pca - srht, pca_only_bytes);
+        assert!(pca > srht && pca - srht < 2_000_000_000);
         assert!(check_memory(samples, 4096, clusters, 4096, None, 0, Some(48)).is_err());
         // No limit accepts the same workload that Some(48) rejects.
         assert!(check_memory(samples, 4096, clusters, 4096, None, 0, None).is_ok());
