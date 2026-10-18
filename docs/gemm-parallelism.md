@@ -71,14 +71,16 @@ iterations, tolerance 0.01, automatic reduction: raw 128D for SIFT, PCA128 for
 GIST); 3,943 clusters, no empty clusters. The benchmark below reuses these models;
 it does not retrain per configuration.
 
-## Backend and row-policy ablation
+## Native-query backend and row-policy ablation
 
-Every native query participates. Each configuration warms once and times seven
-assignments, including centroid norm refresh and score allocation. Input loading
-and workspace creation are outside these query timers. At sixteen workers, values
-are medians of three run medians in milliseconds:
+This ablation uses every row of the complete native query files
+(`gist_query.fvecs` and `sift_query.fvecs`), not the 1,000,000-row source files;
+the next section measures those complete source files. Each configuration warms
+once and times seven assignments, including centroid norm refresh and score
+allocation. Input loading and workspace creation are outside these query timers.
+At sixteen workers, values are medians of three run medians in milliseconds:
 
-| Dataset | faer 512 | faer adaptive | Accelerate 512 | Accelerate adaptive |
+| Query dataset | faer 512 | faer adaptive | Accelerate 512 | Accelerate adaptive |
 | --- | ---: | ---: | ---: | ---: |
 | GIST 1,000 × 960 | 37.181 | 6.889 | 7.227 | 4.109 |
 | SIFT 10,000 × 128 | 13.335 | 12.918 | 7.279 | 7.238 |
@@ -181,8 +183,10 @@ Required checks: `make format lint lint-ast test-ast test`. Existing assignment
 coverage includes worker/score budgets, row/centroid/vector tails, workspace reuse,
 near ties, common-offset cancellation, overflow and subnormal scores. Shared backend tests
 cover input transposes, padded output, replacement/accumulation, empty products, zero reduction
-dimensions, symmetric products, and direct-reference tolerance for both backends. Linux and
-Intel macOS compile checks are recorded separately.
+dimensions, symmetric products, and direct-reference tolerance for both backends. At this
+revision, the Linux x86_64 library and Intel macOS library/test compile checks pass;
+cross-target tests were not executed. The commands are listed in
+[PCA performance](./pca-performance.md#validation-and-reproduction).
 
 To compare the previous and current crossover on the complete native query file,
 use `--batch-rows`. This mode includes workspace setup and direct SIMD fallback:
