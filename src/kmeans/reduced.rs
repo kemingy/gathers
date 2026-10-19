@@ -10,7 +10,7 @@ use crate::kmeans::{KMeans, ReductionConfig, cluster_means};
 use crate::reduction::{PCA, Reduction, ReductionError, SRHT, checked_buffer_len, validate_shape};
 use crate::utils::{NormalizeRowsError, try_normalize_rows};
 
-/// Error returned by K-means configuration resolution or training.
+/// Error returned by K-means configuration, training or batch assignment.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KMeansError {
     /// Invalid training settings or insufficient rows.
@@ -19,6 +19,9 @@ pub enum KMeansError {
     /// An unknown reduction name was supplied.
     #[error("unknown reduction '{0}'; expected auto, raw, pca, or srht")]
     UnknownReduction(String),
+    /// An unknown training assignment policy was supplied.
+    #[error("unknown assignment '{0}'; expected auto or exact")]
+    UnknownAssignment(String),
     /// Projection construction, input validation, or transformation failed.
     #[error(transparent)]
     Reduction(#[from] ReductionError),

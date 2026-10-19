@@ -3,7 +3,8 @@
 //! ## Examples
 //!
 //! ```
-//! use gathers::kmeans::{KMeans, rabitq_assign};
+//! use gathers::kmeans::{AssignmentPolicy, KMeans, batch_assign};
+//! use gathers::distance::Distance;
 //! use gathers::utils::as_continuous_vec;
 //! # use rand::RngExt;
 //! # let mut rng = rand::rng();
@@ -18,7 +19,8 @@
 //! let centroids = kmeans.fit(as_continuous_vec(&vecs), dim).unwrap();
 //! // predict
 //! let mut labels = vec![0; num];
-//! rabitq_assign(&as_continuous_vec(&vecs), &centroids, dim, &mut labels);
+//! batch_assign(&as_continuous_vec(&vecs), &centroids, dim, Distance::SquaredEuclidean,
+//!     AssignmentPolicy::Auto, Some(42), &mut labels).unwrap();
 //! ```
 
 #![deny(missing_docs)]

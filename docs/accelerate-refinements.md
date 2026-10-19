@@ -6,7 +6,7 @@ On Apple Silicon macOS, matrix assignment lowers its comparison-count crossover 
 
 ## Environment and complete inputs
 
-Apple M5 Pro, 18 physical cores (12 Performance + 6 Super), 64 GiB, macOS 26.6, aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen unit, sixteen Rayon workers and default Accelerate threading, without target-cpu=native or the separate library perf feature. Benchmark processes run serially without concurrent compilation or tests. This revision re-measured the covariance, crossover and validation tables on this machine; the GEMV and BLAS-interface sections are earlier measurements that were not re-run, and their machine labels have been removed.
+Apple M5 Pro, 18 physical cores (12 Performance + 6 Super), 64 GiB, macOS 26.6, aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen unit, sixteen Rayon workers and default Accelerate threading, without target-cpu=native or the separate library perf feature. Benchmark processes run serially without concurrent compilation or tests. The covariance, crossover and validation tables below were measured on this machine. Historical results from other hardware are kept outside the repository; the rejected-alternative sections retain their methods and qualitative observations.
 
 PCA fits and projects every row of local GIST (1,000,000 x 960) with output dimension 128; SIFT (1,000,000 x 128) contributes a synthetic PCA128 rotation workload at its native dimension. No source rows are sampled or capped in these stage tests. Native-query tests process the complete query files (GIST 1,000 x 960, SIFT 10,000 x 128), with K=3,943 fixed centroids trained on all source rows (repository CLI, seed 42, ten iterations, tolerance 0.01). The PCA128 query/centroid inputs use projections learned from the full GIST fit; the centroids are projected fixed models, not separately retrained 128D models. Both datasets use squared L2. Loading is outside assignment timers.
 
@@ -45,50 +45,38 @@ Each entry processes all queries using calls of the listed size, including the l
 
 The guards behave as designed on both datasets. Sixteen 128D rows carry only 2,048 values, below the 4,096-value requirement, so SIFT 16-row calls stay on direct SIMD under the current policy and tie the previous one. GIST PCA128 needs 32 rows to reach 4,096 values: 31-row calls tie while 32-row calls gain 2.22x. Cases with identical backend selection vary by a few percent, so those differences are not claimed as improvements. Larger available batches still provide the best total throughput.
 
-These are measurements of the private assignment path. Standalone Python `batch_assign` routing is unchanged, and the large-input L2 training heuristic is unchanged. Query timing does not establish a full-training speedup.
+These are measurements of the private assignment path. At measurement time, standalone Python `batch_assign` used a separate path. Current batch assignment shares the [automatic/exact policy](./adaptive-training-probes.md#public-batch-assignment). These measurements predate the [adaptive training policy](./adaptive-training-probes.md); select exact training explicitly when reproducing the flat baseline. Query timing does not establish a full-training speedup.
 
 ## Rejected GEMV substitution
 
-Earlier measurement, not re-run in this revision; the machine label has been removed.
+The trial replaced single-row SGEMM score tiles with Accelerate SGEMV while retaining workspace
+setup, centroid norms, score scanning and numerical safeguards. It processed the complete native
+GIST query set one query at a time in original dimensions and PCA128, with one warmup and three
+timed passes per variant. This measures the existing tiled assignment pipeline, not a new cached
+centroid-index API.
 
-The trial replaced single-row SGEMM score tiles with Accelerate SGEMV while retaining workspace setup, centroid norms, score scanning and numerical safeguards. This measures the existing tiled assignment pipeline, not a new cached centroid-index API. All 1,000 native GIST queries are processed one at a time; entries are medians of three passes after one warmup.
-
-| Input | Direct SIMD ms | SGEMM ms | SGEMV ms |
-| --- | ---: | ---: | ---: |
-| gist original | 341.404 | 555.933 | 600.625 |
-| gist PCA128 | 31.908 | 242.067 | 254.074 |
-
-GEMV does not improve this path and is not included in production. Its results do not rule out a future cached fixed-centroid implementation. No LAPACK/vDSP replacement, public API or dependency is added.
+The trial did not improve that pipeline, so GEMV is not included in production. This observation
+does not rule out a future cached fixed-centroid implementation. No LAPACK/vDSP replacement, public
+API or dependency is added. Machine-specific run results are maintained outside the repository.
 
 ## BLAS interface ablation
 
-Earlier measurement, not re-run in this revision; the machine label has been removed.
+The investigation compared legacy LP64, new LP64 (`$NEWLAPACK`) and new ILP64 (`$NEWLAPACK$ILP64`)
+in one compiled release binary. Enum arguments remain 32-bit; matrix dimensions/strides widen only
+for ILP64. The newer interface requires macOS 13.3+. The eigensolver remains faer: this is a BLAS
+interface comparison, not a LAPACK solver comparison.
 
-Switching only the BLAS symbols to the newer macOS 13.3+ interface provided no consistent
-performance gain. These measurements used the same full datasets, fixed models,
-algorithms, numerical guards and sixteen-worker configuration described above. The benchmark
-selected legacy LP64, new LP64 (`$NEWLAPACK`) and new ILP64 (`$NEWLAPACK$ILP64`) in one compiled
-release binary. Enum arguments remain 32-bit; matrix dimensions/strides widen only for ILP64.
-The eigensolver remains faer: this is a BLAS interface comparison, not a LAPACK solver comparison.
+Keep source rows, fixed models, algorithms, numerical guards and worker counts identical across
+interfaces. Time complete PCA fits/projections after a full-source warmup, rotating API order, and
+alternate interfaces for complete original-space final assignments. Include assignment workspace
+construction and norms; exclude loading. Check native queries in original dimensions and PCA128 at
+several call sizes, including small batches and the complete query set.
 
-| Full dataset / stage | Legacy LP64 s | New LP64 s | New ILP64 s |
-| --- | ---: | ---: | ---: |
-| GIST fit + projection | 1.492 | 1.508 | 1.493 |
-| GIST final assignment | 2.917 | 2.894 | — |
-
-PCA entries are medians of three complete fits/projections after one full-source warmup per
-interface, with rotated API order. Final assignment includes workspace construction and norms,
-uses all original-space rows, and alternates the two LP64 interfaces over three passes each.
-Loading is excluded. Full GIST legacy assignments took
-2.917 / 2.894 s over the measured passes; paired differences
-changed direction and ranges overlapped. These are stage measurements, not complete training times.
-
-ILP64 was also tested on every native query at original dimensions and PCA128, with 16/64/1,000
-rows per call, one warmup and seven timed passes per interface. It showed no consistent gain.
-Every source projection had the same all-value bit hash across interfaces, projected queries and
-centroids compared bit-for-bit equal, and all query/full-source labels matched legacy LP64.
-The existing kernel layout/padding/tail/empty/fallback tests also passed through all three APIs
-in an isolated release test. No new production API, OS minimum or dependency is introduced.
+The observed differences did not establish a consistent gain. Compare all-value projection hashes,
+projected queries/centroids and every assignment label across interfaces, alongside kernel
+layout/padding/tail/empty/fallback tests. The historical checks agreed across interfaces; their run
+data remain outside the repository. No production API, OS minimum or dependency change was
+justified.
 
 ## Reproduction
 

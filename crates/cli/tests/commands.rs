@@ -549,6 +549,10 @@ fn kmeans_flag_errors_precede_file_opening() {
     for (extra, message) in [
         (vec!["--max-iter", "0"], "max-iter must be positive"),
         (
+            vec!["--assignment", "other"],
+            "unknown assignment 'other'; expected auto or exact",
+        ),
+        (
             vec!["--reduction", "svd"],
             "unknown reduction 'svd'; expected auto, raw, pca, or srht",
         ),

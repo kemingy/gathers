@@ -9,6 +9,21 @@ The two-level IVF-style scheme (one coarse layer over the fine centroids) is
 the depth-2 special case; the k-means-tree literature is the source of the
 traversal and training rules.
 
+## Implementation status
+
+The library can use this hierarchy for pilot-calibrated Lloyd assignment under
+`AssignmentPolicy::Auto`. Eligibility and calibration heuristics may change between
+versions. `AssignmentPolicy::Exact` selects full scans. Routing-layer training remains
+exact; the hierarchy is rebuilt from current centroids each round. See [adaptive training](./adaptive-training-probes.md) for the
+current calibration policy, numerical fallbacks, convergence confirmation and Python/CLI
+options. The hierarchy itself remains private.
+
+The implementation uses score-ordered best-first traversal with a leaf-cell budget,
+rather than the radii-based exact stop discussed below. Layer proposals target 196
+children per parent on average; actual cells can be uneven or empty. Regrouping a
+routing level moves its complete descendant ranges, and empty fine subtrees consume
+no probes. The rest of this note discusses design alternatives.
+
 ## Goal
 
 Flat assignment compares every vector against all `k` fine centroids. Instead,

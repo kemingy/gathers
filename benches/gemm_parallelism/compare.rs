@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use argh::FromArgs;
 use faer::{Accum, MatMut, MatRef, Par};
 use gathers::distance::Distance;
-use gathers::kmeans::base_assign_parallel;
+use gathers::kmeans::{AssignmentPolicy, CentroidAssigner, base_assign_parallel};
 use gathers::utils::try_normalize_rows;
 // The private modules use these same library modules in production.
 use gathers::{distance, kmeans, utils};
@@ -55,6 +55,9 @@ struct Args {
     /// restrict batch crossover comparison to previous or current
     #[argh(option)]
     crossover: Option<Crossover>,
+    /// compare the public exact and automatic APIs, including validation and normalization
+    #[argh(switch)]
+    public_api: bool,
     /// measured calls after one warmup
     #[argh(option, default = "7")]
     repeats: usize,
@@ -261,6 +264,16 @@ fn measure(
     Ok((times, matrix_batches))
 }
 
+fn median_ms(times: &[f64]) -> f64 {
+    let mut sorted = times.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    if sorted.len().is_multiple_of(2) {
+        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+    } else {
+        sorted[sorted.len() / 2]
+    }
+}
+
 fn compare(
     args: &Args,
     inputs: &Inputs,
@@ -305,13 +318,7 @@ fn compare(
             }
         })?
     };
-    let mut sorted = times.clone();
-    sorted.sort_by(f64::total_cmp);
-    let median = if sorted.len().is_multiple_of(2) {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
-    } else {
-        sorted[sorted.len() / 2]
-    };
+    let median = median_ms(&times);
     println!(
         "{}",
         serde_json::json!({
@@ -331,6 +338,62 @@ fn compare(
             "same_labels": true,
         })
     );
+    Ok(())
+}
+
+fn compare_public(args: &Args, inputs: &Inputs) -> Result<()> {
+    let mut oracle = vec![0; inputs.queries.len()];
+    let mut labels = oracle.clone();
+    for policy in [AssignmentPolicy::Exact, AssignmentPolicy::Auto] {
+        let start = Instant::now();
+        let mut assigner = CentroidAssigner::new(
+            &inputs.centroids.data,
+            inputs.centroids.dim,
+            inputs.distance,
+            policy,
+            Some(42),
+        )?;
+        let build_ms = start.elapsed().as_secs_f64() * 1000.0;
+        assigner.assign(&inputs.queries.data, &mut labels)?;
+        if policy == AssignmentPolicy::Exact {
+            oracle.copy_from_slice(&labels);
+        }
+        let mut times_ms = Vec::with_capacity(args.repeats);
+        let mut agreement = Vec::with_capacity(args.repeats);
+        for _ in 0..args.repeats {
+            let start = Instant::now();
+            assigner.assign(&inputs.queries.data, &mut labels)?;
+            times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            let matching = labels.iter().zip(&oracle).filter(|(a, b)| a == b).count();
+            if policy == AssignmentPolicy::Exact {
+                ensure!(
+                    matching == labels.len(),
+                    "exact labels changed between calls"
+                );
+            }
+            agreement.push(matching as f64 / labels.len() as f64);
+        }
+        let median = median_ms(&times_ms);
+        println!(
+            "{}",
+            serde_json::json!({
+                "api": "CentroidAssigner",
+                "policy": format!("{policy:?}"),
+                "queries": inputs.queries.len(),
+                "centroids": inputs.centroids.len(),
+                "dim": inputs.queries.dim,
+                "metric": format!("{:?}", inputs.distance),
+                "threads": args.threads,
+                "seed": 42,
+                "build_ms": build_ms,
+                "times_ms": times_ms,
+                "median_ms": median,
+                "exact_agreement": agreement,
+                "validation_and_normalization_included": true,
+                "assigner_reused": true,
+            })
+        );
+    }
     Ok(())
 }
 
@@ -374,6 +437,17 @@ fn main() -> Result<()> {
         inputs.queries.dim == inputs.centroids.dim,
         "dimension mismatch"
     );
+    if args.public_api {
+        ensure!(
+            args.backend.is_none()
+                && args.row_policy.is_none()
+                && args.crossover.is_none()
+                && args.batch_rows.is_none(),
+            "--public-api cannot be combined with private backend, row, crossover or batch \
+             overrides"
+        );
+        return compare_public(&args, &inputs);
+    }
     if inputs.distance == Distance::Cosine {
         try_normalize_rows(&mut inputs.queries.data, inputs.queries.dim, false)?;
         try_normalize_rows(&mut inputs.centroids.data, inputs.centroids.dim, false)?;
