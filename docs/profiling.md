@@ -211,3 +211,27 @@ stacks when inspecting compute hotspots. Inclusive counts overlap: do not add th
 them as wall-clock stage times. Inlining can merge scan and refinement into a caller; use inline
 source/assembly attribution rather than assuming the caller's name identifies the bottleneck.
 Correlate hotspots with refinement rates before selecting the next optimization.
+
+## Assignment norms and stable centroid updates
+
+Grouped hierarchical assignment computes guarded matrix centroid norms once per assignment call
+and query norms once per batch, then gathers those norms alongside each cell's query rows. Use the matrix
+kernel's reductions: routing norms use a different reduction and cannot replace them in its error
+bounds. Rebuild query norms on each assignment call and centroid norms when training rebuilds the
+hierarchy. Compare labels with the uncached guarded path, including ties, non-finite scores and tails.
+When query batches occupy all workers, leaf GEMM and direct SIMD scans run sequentially within
+each batch. Smaller batch counts retain parallel leaf scans to avoid leaving workers idle.
+
+Large centroid updates build a stable counting index of source rows, then aggregate independent
+centroids in parallel. Rows within a centroid retain input order, preserving the serial floating-point
+sums and existing overflow retry. Index storage is one `usize` per source row plus centroid offsets;
+allocation failure and small workloads retain serial aggregation. This also covers original-space
+reconstruction after projected training. Compare counts, means and final centroids, using skewed
+labels and empty clusters as well as ordinary inputs.
+
+For performance comparisons, include norm computation, row gathering, index construction and final
+assignment. Measure native and projected training separately on the full source datasets. Isolate
+norm reuse from scratch retention and nested scheduling, and compare stable indexing with serial
+aggregation and centroid-range ownership. The observed gains are workload dependent; scratch
+retention alone did not consistently help in local Apple Silicon ablations. Record CPU, worker count,
+backend threading, dataset shapes and commands with each measurement.

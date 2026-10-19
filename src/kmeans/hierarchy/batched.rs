@@ -5,11 +5,13 @@ use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, neg_dot_product, squared_euclidean};
-use crate::kmeans::base_assign_parallel;
 use crate::kmeans::hierarchy::{
     Hierarchy, ProbeOptions, RAYON_BLOCK_SIZE, ScoreEntry, score_range,
 };
-use crate::kmeans::matrix::MatrixAssignmentWorkspace;
+use crate::kmeans::matrix::{
+    MatrixAssignment, MatrixAssignmentWorkspace, assignment_block_size, matrix_norm, matrix_norms,
+};
+use crate::kmeans::{base_assign, base_assign_parallel};
 
 #[derive(Default)]
 struct BatchScratch {
@@ -19,6 +21,8 @@ struct BatchScratch {
     gathered: Vec<f32>,
     local_labels: Vec<u32>,
     best_scores: Vec<f32>,
+    norms: Vec<f32>,
+    gathered_norms: Vec<f32>,
 }
 
 fn score(query: &[f32], centroid: &[f32], distance: Distance) -> f32 {
@@ -164,11 +168,31 @@ impl Hierarchy {
             self.probe_parallel(vectors, labels, &mut [], options);
             return;
         }
+        // Keep leaf parallelism for a small number of query batches. Large batches of batches
+        // already occupy the workers and should not repeatedly schedule nested leaf tasks.
+        let parallel_leaves = labels.len().div_ceil(batch_rows) < rayon::current_num_threads();
         let routing = &self.levels[1];
         // Each cell is already sorted by original ID at construction, so local
         // argmin ties preserve the hierarchy's original-ID rule without a copy.
         let leaf_order = &self.leaf_order;
         let centers = &self.levels[0].centroids;
+        // Cache only for this immutable centroid set and this distance. Hierarchies rebuilt
+        // during training get fresh norms; separate assignment calls never retain query data.
+        let centroid_norms = routing
+            .child_offsets
+            .windows(2)
+            .any(|cell| {
+                assignment_block_size(
+                    batch_rows.min(labels.len()),
+                    (cell[1] - cell[0]) as usize,
+                    self.dim,
+                    options.distance,
+                    assignment_threshold,
+                )
+                .is_some()
+            })
+            .then(|| matrix_norms(centers, self.dim, options.distance))
+            .flatten();
         labels
             .par_chunks_mut(batch_rows)
             .zip(vectors.par_chunks(batch_rows * self.dim))
@@ -188,6 +212,26 @@ impl Hierarchy {
                     options,
                     scratch,
                 });
+                scratch.norms.clear();
+                let has_matrix_group = centroid_norms.is_some()
+                    && scratch.groups.iter().enumerate().any(|(cell, group)| {
+                        assignment_block_size(
+                            group.len(),
+                            (routing.child_offsets[cell + 1] - routing.child_offsets[cell])
+                                as usize,
+                            self.dim,
+                            options.distance,
+                            assignment_threshold,
+                        )
+                        .is_some()
+                    });
+                if has_matrix_group && scratch.norms.try_reserve(labels.len()).is_ok() {
+                    scratch.norms.extend(
+                        vectors
+                            .chunks_exact(self.dim)
+                            .map(|v| matrix_norm(options.distance, v)),
+                    );
+                }
                 for (cell, group) in scratch.groups.iter().enumerate() {
                     if group.is_empty() {
                         continue;
@@ -202,21 +246,41 @@ impl Hierarchy {
                     let end = routing.child_offsets[cell + 1] as usize;
                     let cell_centers = &centers[start * self.dim..end * self.dim];
                     scratch.local_labels.resize(group.len(), 0);
-                    if let Some(mut workspace) = matrix_workspace(
-                        &scratch.gathered,
-                        end - start,
-                        self.dim,
-                        options.distance,
-                        assignment_threshold,
-                    ) {
-                        workspace.assign(
-                            &scratch.gathered,
-                            cell_centers,
-                            self.dim,
-                            &mut scratch.local_labels,
-                        );
+                    scratch.gathered_norms.clear();
+                    let assigned = if let Some(norms) = centroid_norms
+                        .as_deref()
+                        .filter(|_| scratch.norms.len() == labels.len())
+                    {
+                        if scratch.gathered_norms.try_reserve(group.len()).is_ok() {
+                            scratch
+                                .gathered_norms
+                                .extend(group.iter().map(|&row| scratch.norms[row]));
+                            MatrixAssignment::new(
+                                cell_centers,
+                                &norms[start..end],
+                                self.dim,
+                                options.distance,
+                            )
+                            .try_assign(
+                                &scratch.gathered,
+                                &scratch.gathered_norms,
+                                &mut scratch.local_labels,
+                                assignment_threshold,
+                                parallel_leaves,
+                            )
+                        } else {
+                            false
+                        }
                     } else {
-                        base_assign_parallel(
+                        false
+                    };
+                    if !assigned {
+                        let assign = if parallel_leaves {
+                            base_assign_parallel
+                        } else {
+                            base_assign
+                        };
+                        assign(
                             &scratch.gathered,
                             cell_centers,
                             self.dim,
@@ -472,6 +536,20 @@ mod tests {
                     h.calibrate_batched(&exceptional, &mut labels, &mut required, distance);
                     assert_eq!(labels, reference);
                     assert_eq!(required, expected);
+                    // Repeated calls change query contents and metric; cached norms must be
+                    // rebuilt and exceptional rows must retain the reference sentinel.
+                    h.probe_batched_with_threshold(
+                        &exceptional,
+                        &mut labels,
+                        ProbeOptions {
+                            distance,
+                            budget: usize::MAX,
+                            incumbent_centroids: None,
+                        },
+                        512,
+                        Some(0),
+                    );
+                    assert_eq!(labels, reference);
                 }
                 for budget in [1, 2, usize::MAX] {
                     for incumbent in [false, true] {
