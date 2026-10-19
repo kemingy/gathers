@@ -4,6 +4,7 @@ mod assignment;
 mod config;
 mod hierarchy;
 mod matrix;
+mod means;
 mod reduced;
 mod training;
 
@@ -15,6 +16,7 @@ use aligned_vec::AVec;
 pub use assignment::{CentroidAssigner, batch_assign};
 pub use config::{AssignmentPolicy, KMeansConfig, ReductionConfig};
 use log::debug;
+use means::cluster_means;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
@@ -248,7 +250,8 @@ fn rabitq_assign_parallel_inner<R: Rng + ?Sized>(
 
 /// Update centroids to the mean of assigned vectors, returning their squared shift in `f64`.
 ///
-/// Finite inputs are required. Overflowing sums are retried in `f64` before averaging.
+/// Finite inputs are required. Large updates aggregate independent centroids in parallel,
+/// preserving source-row accumulation order. Overflowing sums are retried in `f64` before averaging.
 /// Returns an error if empty-cluster perturbation overflows; centroids are unchanged on error.
 /// Returns an error for incomplete or non-finite vectors/centroids. Panics for invalid label
 /// counts, out-of-range labels, or more centroids than vectors.
@@ -262,50 +265,6 @@ pub fn update_centroids(
     validate_shape(centroids, dim)?;
     let mut rng = rand::rng();
     update_centroids_inner(vecs, centroids, dim, labels, false, &mut rng)
-}
-
-// Inputs and label bounds are validated by the caller. Keep ordinary f32 accumulation unchanged,
-// but divide overflowing sums in f64 before casting: a mean of finite inputs is representable.
-fn cluster_means(vecs: &[f32], labels: &[u32], dim: usize, means: &mut [f32]) -> Vec<usize> {
-    means.fill(0.0);
-    let mut counts = vec![0usize; means.len() / dim];
-    for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
-        let label = label as usize;
-        counts[label] += 1;
-        for (sum, &value) in means[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
-            *sum += value;
-        }
-    }
-    if means.iter().all(|value| value.is_finite()) {
-        for (mean, &count) in means.chunks_exact_mut(dim).zip(&counts) {
-            if count != 0 {
-                let inverse = (count as f32).recip();
-                mean.iter_mut().for_each(|value| *value *= inverse);
-            }
-        }
-    } else {
-        let mut sums = vec![0.0_f64; means.len()];
-        for (vector, &label) in vecs.chunks_exact(dim).zip(labels) {
-            let label = label as usize;
-            for (sum, &value) in sums[label * dim..(label + 1) * dim].iter_mut().zip(vector) {
-                *sum += f64::from(value);
-            }
-        }
-        for ((mean, sum), &count) in means
-            .chunks_exact_mut(dim)
-            .zip(sums.chunks_exact(dim))
-            .zip(&counts)
-        {
-            if count != 0 {
-                for (mean, &sum) in mean.iter_mut().zip(sum) {
-                    *mean = (sum / count as f64) as f32;
-                }
-            } else {
-                mean.fill(0.0);
-            }
-        }
-    }
-    counts
 }
 
 fn update_centroids_inner<R: Rng + ?Sized>(

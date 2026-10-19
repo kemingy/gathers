@@ -149,7 +149,20 @@ fn matrix_scale(distance: Distance) -> f32 {
     }
 }
 
-fn matrix_norm(distance: Distance, values: &[f32]) -> f32 {
+/// These reductions intentionally match the guarded GEMM kernel. Routing norms use a different
+/// reduction and must not be substituted into its cancellation/error-bound calculations.
+pub(crate) fn matrix_norms(values: &[f32], dim: usize, distance: Distance) -> Option<Vec<f32>> {
+    let mut norms = try_zeroed(values.len() / dim)?;
+    norms
+        .par_iter_mut()
+        .zip(values.par_chunks_exact(dim))
+        .for_each(|(norm, row)| {
+            *norm = matrix_norm(distance, row);
+        });
+    Some(norms)
+}
+
+pub(crate) fn matrix_norm(distance: Distance, values: &[f32]) -> f32 {
     match distance {
         Distance::SquaredEuclidean => values.iter().map(|value| value * value).sum(),
         Distance::NegativeDotProduct | Distance::Cosine => stable_l2_norm(values),
@@ -209,27 +222,15 @@ impl MatrixAssignmentWorkspace {
         distance: Distance,
         assignment_threshold: usize,
     ) -> Option<Self> {
-        // Cosine fitting normalizes rows and uses the dot-product workspace instead.
-        if distance == Distance::Cosine {
-            return None;
-        }
-        let num_vectors = vecs.len() / dim;
-        let comparison_count = num_vectors.checked_mul(num_centroids)?;
-        if !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
-            || num_centroids < 2
-            || comparison_count < assignment_threshold
-        {
-            return None;
-        }
-        matmul_block_size(num_vectors, num_centroids, rayon::current_num_threads())?;
+        assignment_block_size(
+            vecs.len() / dim,
+            num_centroids,
+            dim,
+            distance,
+            Some(assignment_threshold),
+        )?;
 
-        let mut vector_norms = try_zeroed(num_vectors)?;
-        vector_norms
-            .par_iter_mut()
-            .zip(vecs.par_chunks_exact(dim))
-            .for_each(|(norm, vector)| {
-                *norm = matrix_norm(distance, vector);
-            });
+        let vector_norms = matrix_norms(vecs, dim, distance)?;
         Some(Self {
             distance,
             vector_norms,
@@ -271,120 +272,225 @@ impl MatrixAssignmentWorkspace {
             .for_each(|(norm, centroid)| {
                 *norm = matrix_norm(self.distance, centroid);
             });
-        let centroid_norms_are_finite = self.centroid_norms.iter().all(|norm| norm.is_finite());
-        let max_centroid_norm = self.centroid_norms.iter().copied().fold(0.0_f32, f32::max);
-        // Higham, Accuracy and Stability of Numerical Algorithms, Chapters 2-3,
-        // bounds an n-term floating-point reduction with gamma_n = n*u/(1-n*u):
-        // https://doi.org/10.1137/1.9780898718027. `f32::EPSILON` is about 2*u,
-        // so using it here is already conservative.
-        let dimension_error = dim as f32 * f32::EPSILON;
-        let gamma = dimension_error / (1.0 - dimension_error);
-        // The relative gamma_n model excludes underflow. Allow one minimum-subnormal rounding
-        // unit per reduction term so tiny, finite inputs still trigger the ambiguity fallback.
-        let underflow_error = dim as f32 * MIN_SUBNORMAL;
-
         let Some(block_size) = block_size else {
             base_assign_parallel(vecs, centroids, dim, self.distance, labels);
             return;
         };
-        let context = ScoreContext {
-            distance: self.distance,
-            centroids,
-            centroid_norms_are_finite,
-            max_centroid_norm,
-            gamma,
-            underflow_error,
-        };
-        let centroid_block_size = num_centroids.min(PREFERRED_CENTROID_BLOCK_SIZE);
-        let scratch_len = block_size * centroid_block_size;
-        let scale = matrix_scale(self.distance);
+        let assignment = MatrixAssignment::new(centroids, &self.centroid_norms, dim, self.distance);
+        assignment.assign_parallel(vecs, &self.vector_norms, labels, block_size, &multiply);
+    }
+}
+
+/// Shared crossover for owning flat workspaces and borrowed grouped scans.
+pub(crate) fn assignment_block_size(
+    rows: usize,
+    count: usize,
+    dim: usize,
+    distance: Distance,
+    threshold: Option<usize>,
+) -> Option<usize> {
+    // Cosine callers normalize rows and request dot-product assignment instead.
+    if distance == Distance::Cosine
+        || !(32..MAX_ERROR_BOUND_DIMENSION).contains(&dim)
+        || count < 2
+        || rows.checked_mul(count)?
+            < threshold.unwrap_or_else(|| matrix_assignment_threshold(rows, dim))
+    {
+        return None;
+    }
+    matmul_block_size(rows, count, rayon::current_num_threads())
+}
+
+/// Borrow a fixed centroid set and its kernel-compatible norms. This view cannot outlive either
+/// slice, and callers rebuild query norms for each batch rather than caching by pointer identity.
+pub(crate) struct MatrixAssignment<'a> {
+    context: ScoreContext<'a>,
+    centroid_norms: &'a [f32],
+    dim: usize,
+}
+
+impl<'a> MatrixAssignment<'a> {
+    pub(crate) fn new(
+        centroids: &'a [f32],
+        centroid_norms: &'a [f32],
+        dim: usize,
+        distance: Distance,
+    ) -> Self {
+        debug_assert_eq!(centroids.len(), centroid_norms.len() * dim);
+        // Higham, Accuracy and Stability of Numerical Algorithms, Chapters 2-3,
+        // gamma_n = n*u/(1-n*u). f32::EPSILON is already twice the unit roundoff.
+        // https://doi.org/10.1137/1.9780898718027
+        let dimension_error = dim as f32 * f32::EPSILON;
+        Self {
+            context: ScoreContext {
+                distance,
+                centroids,
+                centroid_norms_are_finite: centroid_norms.iter().all(|norm| norm.is_finite()),
+                max_centroid_norm: centroid_norms.iter().copied().fold(0.0_f32, f32::max),
+                gamma: dimension_error / (1.0 - dimension_error),
+                // The relative error model excludes underflow. Retain one minimum-subnormal
+                // rounding unit per term so tiny finite scores still use direct rescoring.
+                underflow_error: dim as f32 * MIN_SUBNORMAL,
+            },
+            centroid_norms,
+            dim,
+        }
+    }
+
+    fn try_scratch(&self, block_size: usize) -> Option<(Vec<f32>, Vec<BestTwo>)> {
+        let centroid_block_size = self.centroid_norms.len().min(PREFERRED_CENTROID_BLOCK_SIZE);
+        let scores = try_zeroed(block_size.checked_mul(centroid_block_size)?)?;
+        let mut best = Vec::new();
+        best.try_reserve_exact(block_size).ok()?;
+        best.resize(block_size, BestTwo::new());
+        Some((scores, best))
+    }
+
+    fn assign_parallel(
+        &self,
+        vecs: &[f32],
+        vector_norms: &[f32],
+        labels: &mut [u32],
+        block_size: usize,
+        multiply: &(impl Fn(MatMut<'_, f32>, Accum, MatRef<'_, f32>, MatRef<'_, f32>, f32, Par) + Sync),
+    ) {
+        let dim = self.dim;
         labels
             .par_chunks_mut(block_size)
-            .zip(self.vector_norms.par_chunks(block_size))
+            .zip(vector_norms.par_chunks(block_size))
             .zip(vecs.par_chunks(block_size * dim))
             .for_each_init(
-                || {
-                    let scores = try_zeroed(scratch_len)?;
-                    let mut best = Vec::new();
-                    best.try_reserve_exact(block_size).ok()?;
-                    best.resize(block_size, BestTwo::new());
-                    Some((scores, best))
-                },
+                || self.try_scratch(block_size),
                 |scratch, ((labels, vector_norms), vectors)| {
-                    let Some((scores, best)) = scratch else {
-                        base_assign(vectors, centroids, dim, self.distance, labels);
-                        return;
-                    };
-                    let block_rows = labels.len();
-                    let best = &mut best[..block_rows];
-                    best.fill(BestTwo::new());
-                    for (tile_index, (centroid_tile, centroid_norm_tile)) in centroids
-                        .chunks(centroid_block_size * dim)
-                        .zip(self.centroid_norms.chunks(centroid_block_size))
-                        .enumerate()
-                    {
-                        let tile_start = tile_index * centroid_block_size;
-                        let tile_rows = centroid_norm_tile.len();
-                        let scores = &mut scores[..block_rows * tile_rows];
-                        multiply(
-                            MatMut::from_row_major_slice_mut(scores, block_rows, tile_rows),
-                            Accum::Replace,
-                            MatRef::from_row_major_slice(vectors, block_rows, dim),
-                            MatRef::from_row_major_slice(centroid_tile, tile_rows, dim).transpose(),
-                            scale,
-                            Par::Seq,
+                    if let Some((scores, best)) = scratch {
+                        self.assign_block(vectors, vector_norms, labels, scores, best, &multiply);
+                    } else {
+                        base_assign(
+                            vectors,
+                            self.context.centroids,
+                            dim,
+                            self.context.distance,
+                            labels,
                         );
-                        best.iter_mut()
-                            .zip(vector_norms)
-                            .zip(vectors.chunks_exact(dim))
-                            .zip(scores.chunks_exact(tile_rows))
-                            .for_each(|(((best, &vector_norm), vector), scores)| {
-                                let ambiguity = context.ambiguity(vector_norm);
-                                scores
-                                    .iter()
-                                    .zip(centroid_norm_tile)
-                                    .zip(centroid_tile.chunks_exact(dim))
-                                    .enumerate()
-                                    .for_each(|(index, ((&score, &centroid_norm), centroid))| {
-                                        let score = match self.distance {
-                                            Distance::NegativeDotProduct | Distance::Cosine => {
-                                                score
-                                            }
-                                            Distance::SquaredEuclidean => {
-                                                score + vector_norm + centroid_norm
-                                            }
-                                        };
-                                        let index = tile_start + index;
-                                        best.update(score, index);
-                                        // The approximate best can only decrease as more tiles are
-                                        // visited, so this cutoff contains the final cutoff. Refine
-                                        // candidates now instead of retaining earlier score tiles.
-                                        if ambiguity.is_finite()
-                                            && score <= best.best_score + ambiguity
-                                        {
-                                            let distance = match self.distance {
-                                                Distance::SquaredEuclidean => {
-                                                    squared_euclidean(vector, centroid)
-                                                }
-                                                Distance::NegativeDotProduct | Distance::Cosine => {
-                                                    neg_dot_product(vector, centroid)
-                                                }
-                                            };
-                                            best.update_exact(distance, index);
-                                        }
-                                    });
-                            });
                     }
-                    labels
-                        .iter_mut()
-                        .zip(vector_norms)
-                        .zip(vectors.chunks_exact(dim))
-                        .zip(best)
-                        .for_each(|(((label, &vector_norm), vector), best)| {
-                            *label = context.assign(vector, vector_norm, *best);
-                        });
                 },
             );
+    }
+
+    /// Return false when GEMM is ineligible or serial scratch cannot be allocated. Grouped
+    /// callers choose parallel leaves only when query batches cannot occupy all workers.
+    pub(crate) fn try_assign(
+        &self,
+        vectors: &[f32],
+        vector_norms: &[f32],
+        labels: &mut [u32],
+        threshold: Option<usize>,
+        parallel: bool,
+    ) -> bool {
+        debug_assert_eq!(vectors.len(), labels.len() * self.dim);
+        debug_assert_eq!(vector_norms.len(), labels.len());
+        let Some(block_size) = assignment_block_size(
+            labels.len(),
+            self.centroid_norms.len(),
+            self.dim,
+            self.context.distance,
+            threshold,
+        ) else {
+            return false;
+        };
+        if parallel {
+            self.assign_parallel(vectors, vector_norms, labels, block_size, &matmul);
+            return true;
+        }
+        let Some((mut scores, mut best)) = self.try_scratch(block_size) else {
+            return false;
+        };
+        for ((labels, norms), vectors) in labels
+            .chunks_mut(block_size)
+            .zip(vector_norms.chunks(block_size))
+            .zip(vectors.chunks(block_size * self.dim))
+        {
+            self.assign_block(vectors, norms, labels, &mut scores, &mut best, &matmul);
+        }
+        true
+    }
+
+    fn assign_block(
+        &self,
+        vectors: &[f32],
+        vector_norms: &[f32],
+        labels: &mut [u32],
+        scores: &mut [f32],
+        best: &mut [BestTwo],
+        multiply: &impl Fn(MatMut<'_, f32>, Accum, MatRef<'_, f32>, MatRef<'_, f32>, f32, Par),
+    ) {
+        let dim = self.dim;
+        let centroid_block_size = self.centroid_norms.len().min(PREFERRED_CENTROID_BLOCK_SIZE);
+        let scale = matrix_scale(self.context.distance);
+        let block_rows = labels.len();
+        let best = &mut best[..block_rows];
+        best.fill(BestTwo::new());
+        for (tile_index, (centroid_tile, centroid_norm_tile)) in self
+            .context
+            .centroids
+            .chunks(centroid_block_size * dim)
+            .zip(self.centroid_norms.chunks(centroid_block_size))
+            .enumerate()
+        {
+            let tile_start = tile_index * centroid_block_size;
+            let tile_rows = centroid_norm_tile.len();
+            let scores = &mut scores[..block_rows * tile_rows];
+            multiply(
+                MatMut::from_row_major_slice_mut(scores, block_rows, tile_rows),
+                Accum::Replace,
+                MatRef::from_row_major_slice(vectors, block_rows, dim),
+                MatRef::from_row_major_slice(centroid_tile, tile_rows, dim).transpose(),
+                scale,
+                Par::Seq,
+            );
+            best.iter_mut()
+                .zip(vector_norms)
+                .zip(vectors.chunks_exact(dim))
+                .zip(scores.chunks_exact(tile_rows))
+                .for_each(|(((best, &vector_norm), vector), scores)| {
+                    let ambiguity = self.context.ambiguity(vector_norm);
+                    scores
+                        .iter()
+                        .zip(centroid_norm_tile)
+                        .zip(centroid_tile.chunks_exact(dim))
+                        .enumerate()
+                        .for_each(|(index, ((&score, &centroid_norm), centroid))| {
+                            let score = match self.context.distance {
+                                Distance::NegativeDotProduct | Distance::Cosine => score,
+                                Distance::SquaredEuclidean => score + vector_norm + centroid_norm,
+                            };
+                            let index = tile_start + index;
+                            best.update(score, index);
+                            // The approximate best can only decrease as more tiles are
+                            // visited, so this cutoff contains the final cutoff. Refine
+                            // candidates now instead of retaining earlier score tiles.
+                            if ambiguity.is_finite() && score <= best.best_score + ambiguity {
+                                let distance = match self.context.distance {
+                                    Distance::SquaredEuclidean => {
+                                        squared_euclidean(vector, centroid)
+                                    }
+                                    Distance::NegativeDotProduct | Distance::Cosine => {
+                                        neg_dot_product(vector, centroid)
+                                    }
+                                };
+                                best.update_exact(distance, index);
+                            }
+                        });
+                });
+        }
+        labels
+            .iter_mut()
+            .zip(vector_norms)
+            .zip(vectors.chunks_exact(dim))
+            .zip(best)
+            .for_each(|(((label, &vector_norm), vector), best)| {
+                *label = self.context.assign(vector, vector_norm, *best);
+            });
     }
 }
 
@@ -452,6 +558,47 @@ mod tests {
     use crate::distance::Distance;
     use crate::kmeans::base_assign;
     use crate::utils::normalize;
+
+    #[test]
+    fn borrowed_norms_preserve_guarded_assignment_across_tiles_and_extremes() {
+        for (dim, count) in [(33, 1031), (128, 19), (129, 19)] {
+            for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+                for magnitude in [1.0, 1e-30, 1e30] {
+                    let vectors: Vec<_> = (0..65 * dim)
+                        .map(|i| ((i * 11 % 29) as f32 - 14.0) * magnitude)
+                        .collect();
+                    let mut centers: Vec<_> = (0..count * dim)
+                        .map(|i| ((i * 7 % 31) as f32 - 15.0) * magnitude)
+                        .collect();
+                    centers[dim..2 * dim].copy_from_slice(&vectors[..dim]);
+                    let queries = super::matrix_norms(&vectors, dim, distance).unwrap();
+                    let norms = super::matrix_norms(&centers, dim, distance).unwrap();
+                    let mut expected = vec![0; 65];
+                    let mut workspace = super::MatrixAssignmentWorkspace::try_new_with_threshold(
+                        &vectors, count, dim, distance, 0,
+                    )
+                    .unwrap();
+                    workspace.assign(&vectors, &centers, dim, &mut expected);
+                    let mut actual = vec![u32::MAX; 65];
+                    let assignment = super::MatrixAssignment::new(&centers, &norms, dim, distance);
+                    for parallel in [false, true] {
+                        assert!(assignment.try_assign(
+                            &vectors,
+                            &queries,
+                            &mut actual,
+                            Some(0),
+                            parallel
+                        ));
+                        assert_eq!(
+                            actual, expected,
+                            "dim={dim}, distance={distance:?}, magnitude={magnitude}, \
+                             parallel={parallel}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn medium_batch_crossover_preserves_tiny_queries_and_reference_labels() {
