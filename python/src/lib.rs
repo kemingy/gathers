@@ -1,7 +1,7 @@
 use gathers::distance::Distance;
 use gathers::kmeans::{
-    KMeans, KMeansConfig, ReductionConfig, base_assign, base_assign_parallel,
-    rabitq_assign_parallel,
+    AssignmentPolicy, KMeans, KMeansConfig, ReductionConfig, base_assign,
+    batch_assign as assign_batch,
 };
 use gathers::utils::{as_continuous_vec, as_matrix};
 use numpy::{PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -57,16 +57,21 @@ fn assign<'py>(
     Ok(labels[0])
 }
 
-/// assign batch of vectors to the nearest centroid.
+/// Assign vectors with the shared automatic/exact policy.
 #[pyfunction]
-#[pyo3(signature = (vecs, centroids, distance = "l2"))]
+#[pyo3(signature = (vecs, centroids, distance = "l2", *, assignment = "auto", seed = None))]
 fn batch_assign<'py>(
     vecs: PyReadonlyArray2<'py, f32>,
     centroids: PyReadonlyArray2<'py, f32>,
     distance: &str,
+    assignment: &str,
+    seed: Option<u64>,
 ) -> PyResult<Vec<u32>> {
     let distance = distance
         .parse::<Distance>()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let assignment = assignment
+        .parse::<AssignmentPolicy>()
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let vectors = vecs.as_array();
     let matrix = centroids.as_array();
@@ -82,20 +87,23 @@ fn batch_assign<'py>(
     let centroids = matrix
         .as_slice()
         .ok_or_else(|| PyValueError::new_err("centroids must be C-contiguous"))?;
-    validate_rows(data, dim, distance)?;
-    validate_rows(centroids, dim, distance)?;
     let mut labels = vec![0; vectors.nrows()];
-    if distance == Distance::SquaredEuclidean {
-        rabitq_assign_parallel(data, centroids, dim, &mut labels);
-    } else {
-        base_assign_parallel(data, centroids, dim, distance, &mut labels);
-    }
+    assign_batch(
+        data,
+        centroids,
+        dim,
+        distance,
+        assignment,
+        seed,
+        &mut labels,
+    )
+    .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(labels)
 }
 
 /// Train a K-means and return the centroids.
 #[pyfunction]
-#[pyo3(signature = (source, n_cluster = None, max_iter = 10, *, distance = "l2", reduction = "auto", reduced_dim = None, samples_per_cluster = 256, training_samples = None, projection_training_samples = None, seed = None))]
+#[pyo3(signature = (source, n_cluster = None, max_iter = 10, *, distance = "l2", assignment = "auto", reduction = "auto", reduced_dim = None, samples_per_cluster = 256, training_samples = None, projection_training_samples = None, seed = None))]
 #[allow(
     clippy::too_many_arguments,
     reason = "Translate the flat Python keyword interface directly"
@@ -105,6 +113,7 @@ fn kmeans_fit<'py>(
     n_cluster: Option<u32>,
     max_iter: u32,
     distance: &str,
+    assignment: &str,
     reduction: &str,
     reduced_dim: Option<usize>,
     samples_per_cluster: usize,
@@ -116,6 +125,9 @@ fn kmeans_fit<'py>(
     let dim = vecs.ncols();
     let distance = distance
         .parse::<Distance>()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let assignment = assignment
+        .parse::<AssignmentPolicy>()
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let reduction = reduction
         .parse::<ReductionConfig>()
@@ -148,6 +160,7 @@ fn kmeans_fit<'py>(
         n_clusters: n_cluster,
         max_iter,
         distance,
+        assignment,
         samples_per_cluster,
         training_samples,
         reduction,

@@ -11,13 +11,18 @@ traversal and training rules.
 
 ## Implementation status
 
-This document describes design alternatives. The private
-[adaptive training experiment](./adaptive-training-probes.md) compiles the hierarchy
-without exporting it or changing production training. Its implementation uses a
-score-ordered best-first traversal with a leaf-cell budget, rather than the
-radii-based exact stop discussed below. Layer proposals target 196 children per
-parent on average; actual cells can be uneven or empty. Regrouping a routing level
-moves its complete descendant ranges, and empty fine subtrees consume no probes.
+The library uses this hierarchy for pilot-calibrated Lloyd assignment at 3,136 or
+more clusters under `AssignmentPolicy::Auto`. `AssignmentPolicy::Exact` disables
+it. Routing-layer training remains exact; the hierarchy is rebuilt from current
+centroids each round. See [adaptive training](./adaptive-training-probes.md) for the
+512-pilot p99 policy, numerical fallbacks, convergence confirmation and Python/CLI
+options. The hierarchy itself remains private.
+
+The implementation uses score-ordered best-first traversal with a leaf-cell budget,
+rather than the radii-based exact stop discussed below. Layer proposals target 196
+children per parent on average; actual cells can be uneven or empty. Regrouping a
+routing level moves its complete descendant ranges, and empty fine subtrees consume
+no probes. The rest of this note discusses design alternatives.
 
 ## Goal
 

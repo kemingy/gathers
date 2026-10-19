@@ -160,9 +160,12 @@ centering or projection are preserved and contribute a tied dot score to every c
 The library normalizes original cosine rows once during preparation, for both raw and projected
 training; CLI and Python do not repeat that normalization. `dot`
 preserves input magnitudes.
-Both use negative-dot-product assignment and unit nonzero centroids. For large samples, `l2`
-may use approximate RaBitQ assignment; `cos` and `dot` use exact assignment. Do not compare their
-timings as if only the metric changed.
+Both use negative-dot-product assignment and unit nonzero centroids. All three metrics
+use the same training assignment policy: automatic adaptive hierarchy probing at 3,136+
+clusters, exact flat assignment below that threshold, or explicit `assignment="exact"` /
+`AssignmentPolicy::Exact`. This replaces the former large-L2 RaBitQ training heuristic.
+The hierarchy is rebuilt and its probe budget recalibrated each round; see
+[adaptive training](./adaptive-training-probes.md) for accuracy and convergence semantics.
 
 Direct `base_assign` and `base_assign_parallel` calls with cosine normalize centroids once and
 normalize query chunks in reusable scratch, without copying the full query batch. Inputs remain

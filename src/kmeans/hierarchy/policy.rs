@@ -1,4 +1,4 @@
-//! Pilot budget policy shared by the experiment and its focused tests.
+//! Pilot budget policy shared by production training and benchmark ablations.
 
 pub(crate) const DEFAULT_PILOTS: usize = 512;
 pub(crate) const DEFAULT_PERCENTILE: usize = 99;

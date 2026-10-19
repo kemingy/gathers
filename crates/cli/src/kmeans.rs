@@ -4,7 +4,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use argh::FromArgs;
 use gathers::distance::Distance;
-use gathers::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+use gathers::kmeans::{AssignmentPolicy, KMeans, KMeansConfig, ReductionConfig};
 use gathers::sampling::sample_indices;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -36,6 +36,9 @@ pub(crate) struct Args {
     /// training distance: l2, cos, or dot
     #[argh(option, default = "String::from(\"l2\")")]
     distance: String,
+    /// training assignment: auto (adaptive hierarchy for 3,136+ clusters) or exact
+    #[argh(option, default = "String::from(\"auto\")")]
+    assignment: String,
     /// dimensionality reduction: auto (default), raw, pca, or srht
     #[argh(option, default = "String::from(\"auto\")")]
     reduction: String,
@@ -121,6 +124,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     // Fail fast on flag errors before touching the input file.
     ensure!(args.max_iter > 0, "max-iter must be positive");
     let distance = args.distance.parse::<Distance>()?;
+    let assignment = args.assignment.parse::<AssignmentPolicy>()?;
     let reduction = match args.reduction.parse::<ReductionConfig>()? {
         ReductionConfig::PCA { output_dim, .. } => ReductionConfig::PCA {
             output_dim: args.reduced_dim.unwrap_or(output_dim),
@@ -151,6 +155,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         max_iter: args.max_iter,
         tolerance: 0.01,
         distance,
+        assignment,
         samples_per_cluster: args.samples_per_cluster,
         training_samples: args.training_samples,
         reduction,
@@ -228,6 +233,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         "training_rows": training_rows,
         "samples_per_cluster": args.samples_per_cluster,
         "distance": args.distance,
+        "assignment": args.assignment,
         "normalization_ms": normalization_ms,
         "reduction": reduction_name,
         "requested_reduction": args.reduction,

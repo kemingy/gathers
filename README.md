@@ -11,6 +11,7 @@ For Python users, check the [Python README](./python/README.md).
 - [x] K-means
 - [x] PyO3 binding
 - [x] RaBitQ assignment
+- [x] Pilot-calibrated hierarchy assignment during K-means training
 - [x] Parallel with Rayon
 - [x] SIMD acceleration on `x86_64` and `aarch64` via [`pulp`](https://github.com/sarah-quinones/pulp)
 - [ ] mini batch K-means
@@ -53,6 +54,17 @@ default to 128 dimensions, or use `--reduced-dim` to override:
 gathers kmeans -i vectors.fvecs -o centroids.fvecs -n 4096 \
   --reduction pca --reduced-dim 128
 ```
+
+Training uses adaptive hierarchy probing for 3,136+ clusters and exact flat assignment
+below that threshold. Use CLI `--assignment exact`, Python `assignment="exact"`, or
+Rust `AssignmentPolicy::Exact` to keep every Lloyd round exact. The automatic path
+rebuilds and recalibrates each round with 512 pilots; its budget is an approximation,
+not a recall guarantee. See [adaptive training](./docs/adaptive-training-probes.md).
+
+Public Python `batch_assign(..., assignment="auto"|"exact", seed=...)` shares this
+policy for L2, cosine and dot product. Rust exposes `kmeans::batch_assign` and a reusable
+`CentroidAssigner` for fixed centroids. These APIs use guarded GEMM when eligible and
+direct SIMD for small groups. Public assignment applies no dimensionality reduction.
 
 See the [reduction guide](./docs/reduction.md) for method trade-offs and implementation details.
 

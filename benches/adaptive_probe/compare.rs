@@ -9,7 +9,7 @@ use gathers::kmeans::{KMeansConfig, base_assign_parallel, update_centroids};
 use gathers::reduction::{PCA, Reduction};
 use gathers::sampling::sample_indices;
 use gathers::utils::try_normalize_rows;
-use gathers::{distance, kmeans, simd, utils};
+use gathers::{distance, sampling, simd, utils};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -20,24 +20,18 @@ use serde_json::json;
 #[path = "../../crates/cli/src/fvecs.rs"]
 mod fvecs;
 #[allow(dead_code, unused_imports)]
-#[path = "../../src/kmeans/hierarchy.rs"]
-mod hierarchy;
+mod kmeans;
 #[allow(dead_code, unused_imports)]
 #[path = "../../src/linalg.rs"]
 mod linalg;
-#[allow(dead_code, unused_imports)]
-#[path = "../../src/kmeans/matrix.rs"]
-mod matrix;
 
 #[allow(dead_code, unused_imports)]
 mod cache;
 mod calibration;
-#[allow(unused_imports)]
-mod policy;
-
 use calibration::{Calibration, calibrate};
-use hierarchy::{Hierarchy, ProbeOptions};
-use matrix::MatrixAssignmentWorkspace;
+
+use crate::kmeans::hierarchy::{Hierarchy, ProbeOptions, policy};
+use crate::kmeans::matrix::MatrixAssignmentWorkspace;
 
 const TRAINING_DIM: usize = 128;
 

@@ -127,8 +127,8 @@ For comparisons, keep inputs (including centroid order), seed, workers, build fl
 the same. Record `git rev-parse HEAD`, `rustc -Vv`, and any local diff beside the report.
 For `assign`, `--seed` fixes the rotation within the same build/target, not across dependency
 versions or architectures. For `kmeans`, the seed initializes separate RNGs for source sampling
-and library training (initialization, RaBitQ rotations and empty-cluster repair). The sample is
-retained in source order; changing the read batch size does not change training results. This
+and library training (initialization, hierarchy/pilot sampling and empty-cluster repair).
+The sample is retained in source order; changing the read batch size does not change training results. This
 sampling/RNG boundary differs from the former load-all CLI, so its seeded results can change.
 The existing library `fit` retains its reservoir order and RNG consumption.
 Repeated training with identical input order, configuration,
@@ -149,6 +149,12 @@ lscpu
 
 Capabilities do not prove which kernel an index selected: small centroid sets use the row path,
 for example. Inspect sampled stacks and inline frames when investigating actual kernel selection.
+
+Training defaults to adaptive hierarchy probing for 3,136+ resolved clusters. Use
+`kmeans --assignment exact` for the flat baseline; compare full datasets with matching
+sampling, projection, initialization and iteration settings. Pilot selection, calibration,
+hierarchy rebuilding, grouped workspace setup and convergence confirmation are part of
+`fit_ms`. This policy is shared with Python; standalone Python assignment is a separate path.
 
 ## Complete clustering workflow
 

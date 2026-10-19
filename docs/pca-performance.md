@@ -23,6 +23,10 @@ conservative estimate, not an enforced RSS cap.
 
 ## Full-data training
 
+This historical comparison predates automatic adaptive hierarchy training. Use
+`--assignment exact` with the current CLI to reproduce its flat-assignment protocol;
+see [adaptive training](./adaptive-training-probes.md) for the current defaults.
+
 Re-measured 2026-10-17 on an Apple M5 Pro, 18 physical cores (12 Performance + 6 Super),
 64 GiB, macOS 26.6, aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen
 unit; 16 Rayon workers, default Accelerate thread policy, no `target-cpu=native`, and no

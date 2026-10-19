@@ -1,13 +1,15 @@
-//! Experimental grouped leaf scans using the existing guarded matrix assignment path.
-//! Compiled privately by the adaptive-probe benchmark and its integration tests.
+//! Grouped leaf scans using the existing guarded matrix assignment path.
+//! Shared by production training and private benchmark ablations.
 
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
 use crate::distance::{Distance, neg_dot_product, squared_euclidean};
-use crate::hierarchy::{Hierarchy, ProbeOptions, RAYON_BLOCK_SIZE, ScoreEntry, score_range};
 use crate::kmeans::base_assign_parallel;
-use crate::matrix::MatrixAssignmentWorkspace;
+use crate::kmeans::hierarchy::{
+    Hierarchy, ProbeOptions, RAYON_BLOCK_SIZE, ScoreEntry, score_range,
+};
+use crate::kmeans::matrix::MatrixAssignmentWorkspace;
 
 #[derive(Default)]
 struct BatchScratch {

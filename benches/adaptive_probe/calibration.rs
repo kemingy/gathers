@@ -7,8 +7,8 @@ use gathers::distance::Distance;
 use serde_json::json;
 
 use crate::TRAINING_DIM;
-use crate::hierarchy::{Hierarchy, ProbeOptions};
-use crate::policy::budget;
+use crate::kmeans::hierarchy::policy::budget;
+use crate::kmeans::hierarchy::{Hierarchy, ProbeOptions};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Calibration {

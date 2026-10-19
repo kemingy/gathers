@@ -50,6 +50,30 @@ impl FromStr for ReductionConfig {
     }
 }
 
+/// Assignment policy shared by Lloyd training and public batch assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssignmentPolicy {
+    /// Use a pilot-calibrated centroid hierarchy for at least 3,136 centroids;
+    /// otherwise use exact flat assignment. Probing is approximate. Training rebuilds
+    /// the hierarchy each round; fixed-centroid assigners retain it between calls.
+    #[default]
+    Auto,
+    /// Search all current centroids with guarded matrix assignment or direct SIMD.
+    Exact,
+}
+
+impl FromStr for AssignmentPolicy {
+    type Err = KMeansError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "exact" => Ok(Self::Exact),
+            _ => Err(KMeansError::UnknownAssignment(value.to_owned())),
+        }
+    }
+}
+
 /// K-means settings, with automatic workload planning and explicit overrides.
 ///
 /// Distance is application-specific and defaults to L2; it is never inferred from shape.
@@ -64,6 +88,8 @@ pub struct KMeansConfig {
     pub tolerance: f32,
     /// Training metric, default squared Euclidean.
     pub distance: Distance,
+    /// Lloyd assignment policy, default [`AssignmentPolicy::Auto`].
+    pub assignment: AssignmentPolicy,
     /// Center L2 training rows to improve numerical accuracy; default false.
     pub use_residual: bool,
     /// Training rows per cluster, default 256. With no explicit total, `fit` retains
@@ -75,7 +101,7 @@ pub struct KMeansConfig {
     pub training_samples: Option<usize>,
     /// Projection policy, default [`ReductionConfig::Auto`].
     pub reduction: ReductionConfig,
-    /// Seed for source sampling, initialization, projections, and empty-cluster repair.
+    /// Seed for source sampling, initialization, projections, routing/pilots, and cluster repair.
     /// `None` uses fresh randomness. Reproducibility requires the same build and worker count.
     pub seed: Option<u64>,
 }
@@ -87,6 +113,7 @@ impl Default for KMeansConfig {
             max_iter: 10,
             tolerance: 1e-4,
             distance: Distance::default(),
+            assignment: AssignmentPolicy::Auto,
             use_residual: false,
             samples_per_cluster: DEFAULT_SAMPLES_PER_CLUSTER,
             training_samples: None,
@@ -196,7 +223,24 @@ impl KMeansConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{KMeansConfig, ReductionConfig};
+    use super::{AssignmentPolicy, KMeansConfig, ReductionConfig};
+
+    #[test]
+    fn training_assignment_policy_and_parse_errors() {
+        assert_eq!(KMeansConfig::default().assignment, AssignmentPolicy::Auto);
+        assert_eq!(
+            "auto".parse::<AssignmentPolicy>().unwrap(),
+            AssignmentPolicy::Auto
+        );
+        assert_eq!(
+            "exact".parse::<AssignmentPolicy>().unwrap(),
+            AssignmentPolicy::Exact
+        );
+        assert_eq!(
+            "other".parse::<AssignmentPolicy>().unwrap_err().to_string(),
+            "unknown assignment 'other'; expected auto or exact"
+        );
+    }
 
     #[test]
     fn reduction_parse_error_names_the_offending_value() {

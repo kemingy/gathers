@@ -6,8 +6,7 @@
 //! The 196 figure only sizes the proposal; actual cells may be uneven and are not
 //! rebalanced.
 //!
-//! After K-means training, assignment either descends greedily or traverses best-first:
-//! a heap over cells ordered by
+//! Training assignment traverses best-first using a heap over cells ordered by
 //! center score, scanning a bounded budget of leaf cells per query. The classic
 //! radii-based exact early stop was measured to prune nothing in high dimensions (even at
 //! the 95th-percentile radius, lower bounds stay vacuous), so it is omitted; the budget
@@ -24,11 +23,16 @@ use rand::{RngExt, SeedableRng};
 use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use rayon::slice::{ParallelSlice, ParallelSliceMut};
 
+#[path = "hierarchy/adaptive.rs"]
+mod adaptive;
 #[path = "hierarchy/batched.rs"]
 mod batched;
+pub(crate) use adaptive::{GROUPED_ROWS, ProbeWorkspace};
+#[path = "hierarchy/policy.rs"]
+pub(crate) mod policy;
 
 use crate::distance::Distance;
-use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+use crate::kmeans::{AssignmentPolicy, KMeans, KMeansConfig, ReductionConfig};
 
 /// Expected children per routing centroid, used to size layer proposals; not a minimum.
 const EXPECTED_CHILDREN: usize = 196;
@@ -38,6 +42,7 @@ const MIN_ROUTING_CENTROIDS: usize = 16;
 /// 10. No established rule exists for the probe count (Faiss/FLANN tune it empirically);
 /// this follows the `nlist ≈ sqrt(n)` precedent applied to the routing layer. The budget
 /// trades recall for predictable cost but provides no recall guarantee.
+#[cfg(test)]
 fn scan_budget(cells: usize) -> usize {
     ((cells as f64).sqrt().ceil() as usize).clamp(1, 10)
 }
@@ -224,6 +229,10 @@ struct SearchScratch {
 }
 
 impl Hierarchy {
+    pub(crate) fn supports(centroids: usize) -> bool {
+        proposed_parents(centroids).is_some()
+    }
+
     /// Build a hierarchy over flat row-major `centroids`, or return `None` when the layer
     /// rules do not permit one (fewer than `16 * 196 = 3,136` fine centroids, or the
     /// square-root rule stops earlier at deeper levels), or routing-layer training produces
@@ -267,6 +276,7 @@ impl Hierarchy {
             let config = KMeansConfig {
                 n_clusters: Some(parents as u32),
                 max_iter: 25,
+                assignment: AssignmentPolicy::Exact,
                 distance: Distance::SquaredEuclidean,
                 reduction: ReductionConfig::None,
                 seed: Some(rng.random()),
@@ -333,12 +343,8 @@ impl Hierarchy {
         })
     }
 
-    /// Centroid dimension.
-    pub fn dim(&self) -> usize {
-        self.dim
-    }
-
     /// Number of levels, including the fine level; at least 2.
+    #[cfg(test)]
     pub fn levels(&self) -> usize {
         self.levels.len()
     }
@@ -356,6 +362,7 @@ impl Hierarchy {
     /// Approximately assign vectors to original centroid indices with greedy descent.
     ///
     /// Scans the top layer, then one child list per level: approximate, minimal work.
+    #[cfg(test)]
     pub fn assign_greedy(&self, vecs: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
         self.validate(vecs, dim, labels);
         let arch = pulp::Arch::new();
@@ -375,6 +382,7 @@ impl Hierarchy {
     }
 
     /// Greedy descent in parallel, with per-task reusable scratch.
+    #[cfg(test)]
     pub fn assign_greedy_parallel(
         &self,
         vecs: &[f32],
@@ -404,6 +412,7 @@ impl Hierarchy {
     /// predictable; results are approximate. Cosine ranking needs no query normalization:
     /// the query norm is constant per query, so `-dot / ||centroid||` ranks identically.
     /// Callers needing an exact scan can use [`crate::kmeans::base_assign`].
+    #[cfg(test)]
     pub fn assign(&self, vecs: &[f32], dim: usize, distance: Distance, labels: &mut [u32]) {
         self.validate(vecs, dim, labels);
         let arch = pulp::Arch::new();
@@ -423,6 +432,7 @@ impl Hierarchy {
     }
 
     /// Best-first backtracking in parallel, with per-task reusable scratch.
+    #[cfg(test)]
     pub fn assign_parallel(
         &self,
         vecs: &[f32],
@@ -445,6 +455,7 @@ impl Hierarchy {
             });
     }
 
+    #[cfg(test)]
     fn greedy_one<S: pulp::Simd>(
         &self,
         simd: S,
@@ -476,6 +487,7 @@ impl Hierarchy {
 
     /// Score nodes `start..end` of `level` and return the offset of the best live one.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn scan_children<S: pulp::Simd>(
         &self,
         simd: S,
@@ -511,6 +523,7 @@ impl Hierarchy {
             .expect("at least one live routing node")
     }
 
+    #[cfg(test)]
     fn best_first_one<S: pulp::Simd>(
         &self,
         simd: S,
@@ -717,6 +730,7 @@ impl pulp::WithSimd for ProbeBlock<'_> {
     }
 }
 
+#[cfg(test)]
 struct GreedyBlock<'a> {
     hierarchy: &'a Hierarchy,
     vecs: &'a [f32],
@@ -725,6 +739,7 @@ struct GreedyBlock<'a> {
     scratch: &'a mut SearchScratch,
 }
 
+#[cfg(test)]
 impl pulp::WithSimd for GreedyBlock<'_> {
     type Output = ();
 
@@ -742,6 +757,7 @@ impl pulp::WithSimd for GreedyBlock<'_> {
     }
 }
 
+#[cfg(test)]
 struct BestFirstBlock<'a> {
     hierarchy: &'a Hierarchy,
     vecs: &'a [f32],
@@ -750,6 +766,7 @@ struct BestFirstBlock<'a> {
     scratch: &'a mut SearchScratch,
 }
 
+#[cfg(test)]
 impl pulp::WithSimd for BestFirstBlock<'_> {
     type Output = ();
 

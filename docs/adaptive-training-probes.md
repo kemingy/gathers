@@ -1,11 +1,87 @@
 # Pilot-calibrated probing during Lloyd training
 
-This is an isolated experiment, not a change to default K-means training. The
-`adaptive_probe` Cargo benchmark compiles the hierarchy and exact matrix workspace
-privately. No benchmark hooks or new public library APIs are exported. Its exact
-baseline explicitly selects guarded flat assignment; the production library still
-retains its existing RaBitQ heuristic for large L2 training inputs. The experiment
-does not change that dispatch policy.
+The library now uses adaptive hierarchy assignment during Lloyd training when the
+resolved cluster count is at least 3,136. `KMeansConfig::assignment` defaults to
+`AssignmentPolicy::Auto`; select `AssignmentPolicy::Exact` for guarded flat
+assignment in every round. Smaller cluster counts and numerical hierarchy failures
+use exact flat assignment. The old input-size-based L2 RaBitQ training switch is
+removed. Explicit Rust RaBitQ retrieval remains available. Python `batch_assign`
+now uses the shared policy for all metrics instead of selecting RaBitQ for L2.
+
+Python `Gathers.fit(..., assignment="auto"|"exact")` and CLI `kmeans --assignment
+auto|exact` forward this policy to the same Rust training implementation. Raw, PCA
+and SRHT training all use that dispatcher. No hierarchy or backend-selection API is
+exported to Python. Public `batch_assign(..., assignment="auto"|"exact", seed=...)`
+assigns against supplied centroids in their original space; it never projects queries.
+`exact` is available even when those centroids were trained approximately.
+
+Production rebuilds the hierarchy each approximate round, selects 512 fresh source
+rows without replacement and computes `min(p100, ceil(1.10 * p99))`. Routing-layer
+K-means is always exact. Pilot winners and grouped leaf assignments use the guarded
+matrix path when eligible; sparse groups, deeper trees and exceptional values retain
+SIMD. The grouped batch bound is 32,768 rows. Previous labels provide incumbents only
+after reevaluating their centroids at the current coordinates. Normal centroid updates
+and empty-cluster repair remain shared with exact training.
+
+A small shift from an approximate update requests an exact confirmation round before
+convergence is accepted, within `max_iter`. There are no unconditional exact cleanup
+rounds. Returned training labels still precede the final centroid update and any
+original-space reconstruction; final memberships require a separate assignment pass.
+Probing changes training trajectories and provides no population recall guarantee.
+The single-thread profiling `perf` feature continues to use serial exact assignment.
+
+## Public batch assignment
+
+Rust exposes `kmeans::batch_assign` for one-shot calls and `CentroidAssigner` for
+fixed-centroid reuse. Both take `AssignmentPolicy::{Auto, Exact}`. A reusable assigner
+builds its hierarchy once, validates each incoming batch and recalibrates pilots over
+that complete batch. Training uses the same calibration, grouped leaf scans and guarded
+exact kernels, while rebuilding from moving centroids every round.
+
+Cosine centroids are normalized once per assigner; query normalization uses reusable
+32,768-row chunks. Adaptive cosine chunks run in parallel with task-local reusable
+scratch, bounded to one chunk per Rayon worker. Exact cosine uses one reusable
+normalization buffer. Pilot rows are drawn from the full batch before chunking, so
+chunking does not restrict calibration to a prefix. Empty query batches return empty labels;
+finite coordinates and nonzero cosine rows are validated before writing labels.
+Small or numerically failed hierarchy workloads use the exact matrix/SIMD fallback.
+Public query batches do not carry previous Lloyd assignments as incumbents, so their
+agreement must be evaluated separately from training. Fresh calibration can change the
+budget and labels across calls even for fixed centroids. Matrix norms are recomputed
+for new query batches. A seed reproduces the same sequence
+of hierarchy construction and pilot samples for the same calls, build and worker count.
+
+This changes Python batch defaults: L2 no longer automatically uses RaBitQ, and eligible
+cosine/dot batches can now be approximate. Use `assignment="exact"` to search every
+centroid. The single-vector API remains direct SIMD.
+
+The existing `gemm_parallelism` driver accepts `--public-api` to compare public exact
+and automatic fixed-centroid assignment on complete source files. It records index
+build time separately, warms each assigner once and reuses it for timed calls. Validation,
+pilot calibration, normalization and query workspace setup are timed. Exact labels at
+those same centroids provide the full-source agreement reference; no sampling is used
+for the query workload or agreement measurement. Public mode accepts no private backend
+or crossover overrides. For example:
+
+```sh
+cargo bench -p gathers-cli --bench gemm_parallelism -- \
+  /path/to/sift_base.fvecs /path/to/sift_centroids.fvecs l2 \
+  --public-api --threads 16 --repeats 3
+```
+
+Full-source SIFT, GIST and Cohere runs favored adaptive over exact flat assignment
+on the measured machine. Cohere initially lost to exact when cosine chunks were
+processed serially; bounded parallel chunks removed that bottleneck. These observations
+do not establish a universal crossover or a recall guarantee. Timings and agreement
+reports remain private outside this repository.
+
+## Controlled benchmark and historical measurements
+
+The `adaptive_probe` benchmark retains explicit backend, pilot and cleanup ablations.
+It compiles the production hierarchy privately in the same module namespace and shares
+the production budget policy. Its historical measurement tables below describe the
+listed experimental driver and commit, not the new library defaults: initialization,
+RNG streams, convergence and repair differ. New M3 Max production run data stay private.
 
 For each approximate Lloyd round, the benchmark:
 
@@ -29,7 +105,7 @@ Every method uses the same source rows, projection, seed, initial centroids, ite
 count and distance kernels. Initial centroids use the existing uniform index sampler;
 they are shared across experiment arms. The exact baseline uses exact assignment for
 all ten rounds. The main adaptive comparison uses ten probing rounds without exact
-cleanup. A separate run exercises the actual CLI default of eight probing rounds plus
+cleanup. A separate run exercises the benchmark default of eight probing rounds plus
 two exact cleanup rounds.
 
 A fresh exact final assignment over every source row measures the returned centers'
@@ -114,7 +190,7 @@ The ten no-cleanup budgets are `7, 6, 6, 6, 5, 6, 5, 7, 6, 7` for SIFT and
 `7, 6, 6, 7, 7, 6, 7, 6, 6, 5` for GIST. All assignment and pilot backends produce
 the same budgets and final adaptive objective for each dataset.
 
-## Actual CLI-default cleanup policy
+## Historical benchmark cleanup policy
 
 The benchmark defaults to two exact cleanup rounds and SIMD assignment/calibration.
 These single runs omit all pilot, percentile and cleanup overrides:
@@ -217,7 +293,7 @@ For SIFT, substitute `/Users/keming/GitHub/ann_datasets/sift/sift_base.fvecs` fo
 the source and `--prepared` paths; this avoids an unnecessary 128→128 PCA fit. Use
 `--assignment-backend simd --calibration-backend simd` for point-wise adaptive arms,
 `--calibration-backend gemm` for the pilot ablation, and omit `--exact-final-rounds 0`
-to exercise the actual two-cleanup-round default. Raw JSONL results and preparation
+to exercise the benchmark two-cleanup-round default. Raw JSONL results and preparation
 reports are under the local `/tmp/gathers-m5-stack/` measurement directory.
 
 ## Result storage
@@ -241,7 +317,17 @@ without provenance metadata. `git diff --check` passes for the documentation upd
 for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`. These are compile checks;
 runtime timing and dataset evidence above are from Apple Silicon.
 
-The cache validation now also covers same-size source and prepared-file replacements
-using deterministic modification times, bringing the adaptive integration suite to 38
-tests. Full-source SIFT completed ten grouped-assignment rounds with GEMM pilots and
-final audits after this fix; its M3 Max run output is kept in the private archive.
+Cache regressions cover same-size source and prepared-file replacements using
+explicit modification times. Hierarchy, pilot-policy and training dispatch regressions
+now run as library unit tests; only prepared-cache tests remain in the CLI integration
+target. The Python suite exercises eligible default training, the exact option, seeded
+reproducibility, validation and input preservation.
+
+Production integration was also exercised through the optimized CLI on every source
+row of local SIFT, GIST and Cohere, with no training row caps. SIFT used native
+128D L2; GIST used L2 and Cohere cosine, both with PCA128 fitted on all source rows.
+The runs validated source/projection counts, finite original-dimensional centroids
+and cosine normalization. SIFT and GIST also ran the exact-training control. These
+single trials validate integration; their M3 Max timings and reports remain private.
+The updated checks pass 110 library unit tests and 79 Python tests, plus workspace,
+AST and cross-target compile checks.

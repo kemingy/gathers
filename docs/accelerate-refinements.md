@@ -45,7 +45,7 @@ Each entry processes all queries using calls of the listed size, including the l
 
 The guards behave as designed on both datasets. Sixteen 128D rows carry only 2,048 values, below the 4,096-value requirement, so SIFT 16-row calls stay on direct SIMD under the current policy and tie the previous one. GIST PCA128 needs 32 rows to reach 4,096 values: 31-row calls tie while 32-row calls gain 2.22x. Cases with identical backend selection vary by a few percent, so those differences are not claimed as improvements. Larger available batches still provide the best total throughput.
 
-These are measurements of the private assignment path. Standalone Python `batch_assign` routing is unchanged, and the large-input L2 training heuristic is unchanged. Query timing does not establish a full-training speedup.
+These are measurements of the private assignment path. At measurement time, standalone Python `batch_assign` used a separate path. Current batch assignment shares the [automatic/exact policy](./adaptive-training-probes.md#public-batch-assignment). These measurements predate the [adaptive training policy](./adaptive-training-probes.md); select exact training explicitly when reproducing the flat baseline. Query timing does not establish a full-training speedup.
 
 ## Rejected GEMV substitution
 
