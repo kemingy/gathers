@@ -72,8 +72,8 @@ Apple M5 Pro, 18 physical cores, 64 GiB, macOS 27.0.1, aarch64/NEON, rustc 1.99.
 The bench profile uses thin LTO and one codegen unit, with 16 Rayon workers, default
 Accelerate threading, no `target-cpu=native` and no library `perf` feature. Timed
 trials ran serially without concurrent compilation or tests. The measured code was
-`9b571f3`; the benchmark binary SHA-256 was
-`4080daba750325b1204178ca75bd7f387d1c1cefb6a8095021075f8a27d3ee74`.
+`02958e9`; the benchmark binary SHA-256 was
+`af2c70353efed23d697db586cbc7f0b381d6108dd6dbbdaabba121075b90f1fa`.
 
 Training time includes hierarchy rebuilding, pilot selection/gathering, calibration,
 complete-source assignment, cluster counts and centroid updates. Loading, PCA
@@ -90,22 +90,22 @@ exact cleanup. Grouped rows use 32,768-row source batches.
 | --- | ---: | ---: | ---: |
 | SIFT, exact flat | 5.664 ± 0.016 | 44846.94449 | — |
 | SIFT, adaptive SIMD | 8.647 | 44848.34650 | +0.00313% |
-| SIFT, grouped GEMM, SIMD pilots | 3.653 ± 0.098 | 44848.34650 | +0.00313% |
-| SIFT, grouped GEMM, GEMM pilots | 3.570 ± 0.033 | 44848.34650 | +0.00313% |
+| SIFT, grouped GEMM, SIMD pilots | 3.549 ± 0.024 | 44848.34650 | +0.00313% |
+| SIFT, grouped GEMM, GEMM pilots | 3.692 ± 0.098 | 44848.34650 | +0.00313% |
 | GIST, exact flat | 6.006 ± 0.130 | 0.7701903810 | — |
 | GIST, adaptive SIMD | 12.004 | 0.7702500352 | +0.00775% |
-| GIST, grouped GEMM, SIMD pilots | 4.139 ± 0.029 | 0.7702500352 | +0.00775% |
-| GIST, grouped GEMM, GEMM pilots | 4.138 ± 0.050 | 0.7702500352 | +0.00775% |
+| GIST, grouped GEMM, SIMD pilots | 4.096 ± 0.018 | 0.7702500352 | +0.00775% |
+| GIST, grouped GEMM, GEMM pilots | 4.122 ± 0.046 | 0.7702500352 | +0.00775% |
 
 Exact flat training is faster than point-wise adaptive SIMD on both datasets. Grouping
-the leaf scans reverses that result: exact/grouped-SIMD-pilot speedups are **1.55x for
-SIFT** and **1.45x for GIST**. The approximate objectives are higher in these two
+the leaf scans reverses that result: exact/grouped-SIMD-pilot speedups are **1.60x for
+SIFT** and **1.47x for GIST**. The approximate objectives are higher in these two
 single-initialization trajectories; this is not evidence that approximation improves
 or preserves clustering quality in general.
 
-GEMM pilots change complete training time by about 2% on SIFT and almost nothing on
-GIST. Two clean runs cannot establish small effects reliably, so the useful speedup
-claim is for grouped assignment, not pilot calibration.
+GEMM pilots are about 4% slower on SIFT and nearly unchanged on GIST. Two clean runs
+cannot establish small effects reliably, so the useful speedup claim is for grouped
+assignment, not pilot calibration.
 
 The ten no-cleanup budgets are `7, 6, 6, 6, 5, 6, 5, 7, 6, 7` for SIFT and
 `7, 6, 6, 7, 7, 6, 7, 6, 6, 5` for GIST. All assignment and pilot backends produce
@@ -132,9 +132,9 @@ cleanup. The 32,768-row configuration is repeated in the primary table above.
 
 | Maximum source batch rows | SIFT training (s) | GIST training (s) |
 | ---: | ---: | ---: |
-| 8,192 | 3.629 | 4.115 |
-| 32,768 | 3.582 | 4.120 |
-| 131,072 | 4.065 | 4.642 |
+| 8,192 | 3.496 | 3.934 |
+| 32,768 | 3.546 | 4.088 |
+| 131,072 | 3.927 | 4.464 |
 
 The current 32,768 default is close to the best measured batch for both datasets;
 131,072 rows is slower. One run per non-default batch is sensitivity evidence, not an
@@ -148,17 +148,17 @@ not complete training timings.
 
 | Dataset | SIMD pilots (ms / ten rounds) | GEMM pilots (ms / ten rounds) | Speedup |
 | --- | ---: | ---: | ---: |
-| SIFT | 28.180 | 19.171 | 1.47x |
-| GIST | 28.606 | 20.393 | 1.40x |
+| SIFT | 24.572 | 14.929 | 1.65x |
+| GIST | 24.569 | 16.900 | 1.45x |
 
-The isolated savings are 9.009 ms for SIFT and 8.213 ms for GIST, approximately 0.25%
-and 0.20% of their grouped training means. This explains why the isolated calibration
+The isolated savings are 9.643 ms for SIFT and 7.669 ms for GIST, approximately 0.27%
+and 0.19% of their grouped training means. This explains why the isolated calibration
 speedup does not imply a material end-to-end improvement.
 
 ## Correctness and final audits
 
-One diagnostic run per dataset used grouped GEMM assignment, GEMM pilots, seven paired
-calibration repeats and full-source backend comparisons:
+One diagnostic run per dataset used grouped GEMM assignment and SIMD pilots, with seven
+paired calibration repeats and full-source backend comparisons:
 
 - Grouped and SIMD assignment had **zero mismatches across all 10,000,000 assignments
   per dataset** (one million rows over ten rounds).
@@ -175,8 +175,11 @@ population recall guarantees or measure original-space reconstructed-centroid qu
 ## Reproduction
 
 Build and run through the maintained Cargo benchmark. Parent directories for prepared
-caches must exist. A missing GIST cache is fitted and written using all source rows;
-an existing cache is reused, so use a distinct path for each source/metric.
+caches must exist. A missing GIST cache is fitted and written using all source rows.
+Each generated cache has a `<prepared>.json` sidecar recording its source identity and
+preparation settings. Every reuse, including `--prepare-only`, validates that metadata;
+recreate older caches without it. The native shortcut of passing the same 128D L2
+source as `--prepared` does not require a sidecar.
 
 ```sh
 # One-time full-source GIST PCA128 preparation.
@@ -214,9 +217,11 @@ reports are under the local `/tmp/gathers-m5-stack/` measurement directory.
 
 ## Validation
 
-For the measured code, `make lint lint-ast test-ast test-rust` passed, including 33
+For the measured code, `make lint lint-ast test-ast test-rust` passed, including 37
 focused adaptive-probe integration tests, and the Python suite passed all 73 tests
-through a `uv` environment. `git diff --check` passes for the documentation update.
+through a `uv` environment. All three previously failing CI seeds pass full-probe
+correctness. The benchmark driver also accepts native SIFT and rejects an older cache
+without provenance metadata. `git diff --check` passes for the documentation update.
 
 `cargo check --offline -p gathers-cli --bench adaptive_probe --target TARGET` passed
 for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`. These are compile checks;
