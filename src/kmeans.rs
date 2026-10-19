@@ -1,16 +1,19 @@
 //! K-means clustering implementation.
 
+mod assignment;
 mod config;
-#[cfg(not(feature = "perf"))]
+mod hierarchy;
 mod matrix;
 mod reduced;
+mod training;
 
 use core::panic;
 use std::borrow::Cow;
 use std::time::Instant;
 
 use aligned_vec::AVec;
-pub use config::{KMeansConfig, ReductionConfig};
+pub use assignment::{CentroidAssigner, batch_assign};
+pub use config::{AssignmentPolicy, KMeansConfig, ReductionConfig};
 use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
@@ -27,7 +30,6 @@ use crate::utils::{centroid_residual, normalize_nonzero_row, try_normalize_rows}
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const DEFAULT_SAMPLES_PER_CLUSTER: usize = 256;
-const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
 
 fn normalize_assignment_rows(vecs: &[f32], dim: usize, distance: Distance) -> Cow<'_, [f32]> {
@@ -442,6 +444,10 @@ impl KMeans {
 
     /// Train every supplied row without further subsampling, returning centroids and labels.
     ///
+    /// Automatic assignment may use approximate, pilot-calibrated hierarchy probing;
+    /// set [`KMeansConfig::assignment`] to [`AssignmentPolicy::Exact`] for full scans.
+    /// Automatic eligibility and calibration heuristics may change between versions.
+    ///
     /// Automatic settings otherwise use the supplied sample's shape. For disk-loaded samples,
     /// first call [`KMeansConfig::resolve`] with original source metadata, then construct the
     /// trainer from that resolved config. At least 39 supplied rows per cluster are required.
@@ -525,37 +531,27 @@ impl KMeans {
 
         let training_num = vecs.len() / dim;
         let mut labels: Vec<u32> = vec![0; training_num];
-        let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
-            || vecs.len() <= LARGE_CLUSTER_THRESHOLD;
-        #[cfg(not(feature = "perf"))]
-        let mut matrix_workspace = if use_exact_assignment {
-            matrix::MatrixAssignmentWorkspace::try_new(
-                &vecs,
-                centroids.len() / dim,
-                dim,
-                assignment_distance,
-            )
-        } else {
-            None
-        };
+        let mut assignment = training::TrainingWorkspace::new(
+            &vecs,
+            &centroids,
+            dim,
+            assignment_distance,
+            self.config.assignment,
+            rng,
+        );
+        let mut confirm_convergence = false;
         debug!("start training");
         for i in 0..self.config.max_iter {
             let start_time = Instant::now();
-            if use_exact_assignment {
-                #[cfg(feature = "perf")]
-                base_assign(&vecs, &centroids, dim, assignment_distance, &mut labels);
-                #[cfg(not(feature = "perf"))]
-                if let Some(workspace) = &mut matrix_workspace {
-                    workspace.assign(&vecs, &centroids, dim, &mut labels);
-                } else {
-                    base_assign_parallel(&vecs, &centroids, dim, assignment_distance, &mut labels);
-                }
-            } else {
-                #[cfg(feature = "perf")]
-                rabitq_assign_inner(&vecs, &centroids, dim, &mut labels, rng);
-                #[cfg(not(feature = "perf"))]
-                rabitq_assign_parallel_inner(&vecs, &centroids, dim, &mut labels, rng);
-            }
+            let approximate = assignment.assign(
+                &vecs,
+                &centroids,
+                dim,
+                assignment_distance,
+                &mut labels,
+                i > 0,
+                confirm_convergence,
+            );
             let diff = update_centroids_inner(
                 &vecs,
                 &mut centroids,
@@ -565,10 +561,12 @@ impl KMeans {
                 rng,
             )?;
             debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
-            if diff < f64::from(self.config.tolerance) {
+            if diff < f64::from(self.config.tolerance) && !approximate {
                 debug!("converged at iter {i}");
                 break;
             }
+            // Confirm approximate stagnation with an exact round, within max_iter.
+            confirm_convergence = diff < f64::from(self.config.tolerance);
         }
 
         if let Some(mean) = residual_mean {
@@ -601,6 +599,40 @@ mod tests {
     use crate::distance::{Distance, argmin, squared_euclidean};
     use crate::rabitq::RaBitQ;
     use crate::utils::as_continuous_vec;
+
+    #[test]
+    #[cfg(not(feature = "perf"))]
+    fn adaptive_convergence_confirms_exactly_within_iteration_limit() {
+        let rows: Vec<_> = (0..3136 * 39).map(|row| [row as f32]).collect();
+        let vectors = as_continuous_vec(&rows);
+        let config = KMeansConfig {
+            n_clusters: Some(3136),
+            max_iter: 1,
+            tolerance: f32::MAX,
+            reduction: super::ReductionConfig::None,
+            ..Default::default()
+        };
+        let mut rng = StdRng::seed_from_u64(42);
+        let (mut expected, mut labels) = KMeans::new(config)
+            .fit_raw(vectors.clone(), 1, &mut rng)
+            .unwrap();
+        // Preserve the post-round repair RNG state, then perform one exact Lloyd step.
+        base_assign_parallel(
+            &vectors,
+            &expected,
+            1,
+            Distance::SquaredEuclidean,
+            &mut labels,
+        );
+        update_centroids_inner(&vectors, &mut expected, 1, &labels, false, &mut rng).unwrap();
+        for max_iter in [2, 3] {
+            let (actual, actual_labels) = KMeans::new(KMeansConfig { max_iter, ..config })
+                .fit_raw(vectors.clone(), 1, &mut StdRng::seed_from_u64(42))
+                .unwrap();
+            assert_eq!(actual_labels, labels);
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn finite_extreme_rows_have_representable_means() {

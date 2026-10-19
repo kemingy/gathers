@@ -142,7 +142,8 @@ uses 256-row tasks, larger centroid tiles, and retained score buffers.
 These are alternatives to measure, not constants to copy without evidence.
 Its [later training rounds](https://github.com/paradedb/superkmeans-rs/blob/66d2e86bce7d4c6e9b0123bbcec0ca476ba36338/src/superkmeans.rs)
 use previous assignments and partial-dimensional ADSampling pruning. Statistical
-pruning is a separate accuracy tradeoff from our agreed exact flat training path.
+pruning is a separate accuracy tradeoff from guarded flat assignment. Current training
+can also use [adaptive hierarchy probing](./adaptive-training-probes.md).
 The Rust port's `layout.rs` explicitly retains plain row-major centroids instead
 of the original C++ hybrid layout. Its benchmarks use different dimensions
 and cluster counts, so their claims do not establish performance on our inputs.
@@ -208,5 +209,6 @@ Batch mode compares the historical and current thresholds with adaptive scheduli
 and the platform backend. `matrix_batches` reports how many batches used the matrix
 workspace; a smaller final batch may use direct assignment. The default mode reports
 this count as zero or one. `batch_rows` controls processing granularity, never the
-dataset row count. Python's standalone `batch_assign` routing is unchanged; these
-results do not claim its runtime.
+dataset row count. These measurements predate the shared public `batch_assign` dispatcher
+and do not claim its runtime. Use `--public-api` for public exact/automatic comparison;
+see [public batch assignment](./adaptive-training-probes.md#public-batch-assignment).

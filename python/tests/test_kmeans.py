@@ -2,11 +2,11 @@ import numpy as np
 import pytest
 
 from gathers import Gathers
+from gathers.gatherspy import batch_assign, kmeans_fit
 
 NUM = 1000
 CLUSTER = 10
 DIM = 32
-RABITQ_MATCH_RATE = 0.99
 
 
 @pytest.mark.parametrize("reduction", ["raw", "pca"])
@@ -27,7 +27,7 @@ def test_centroid_perturbation_overflow_raises_value_error():
         Gathers().fit(data, 2, reduction="raw", seed=42)
 
 
-def test_rabitq():
+def test_training_and_small_batch_assignment():
     gathers = Gathers(verbose=True)
     rng = np.random.default_rng()
 
@@ -45,8 +45,7 @@ def test_rabitq():
         labels = gathers.batch_assign(arr, c)
         assert len(labels) == len(arr)
         expect = [np.argmin(np.linalg.norm(c - vec, axis=1)) for vec in arr]
-        match_rate = np.sum(np.array(expect) == np.array(labels)) / NUM
-        assert match_rate > RABITQ_MATCH_RATE, f"failed at {i} with rate {match_rate}"
+        assert labels == expect, f"failed at {i}"
 
 
 @pytest.mark.parametrize("reduction", ["raw", "pca", "srht"])
@@ -246,3 +245,65 @@ def test_wrapper_rejects_wrong_dtype_rank_and_dimension():
         gathers.assign(data, np.ones((2, 3), dtype=np.float32))
     with pytest.raises(ValueError, match="must match"):
         gathers.assign(np.ones(4, dtype=np.float32), np.ones((2, 3), dtype=np.float32))
+
+
+def test_training_assignment_policy_and_native_validation():
+    data = np.arange(80, dtype=np.float32).reshape(40, 2)
+    model = Gathers()
+    np.testing.assert_array_equal(
+        model.fit(data, 1, seed=42),
+        model.fit(data, 1, assignment="exact", seed=42),
+    )
+    for fit in [model.fit, kmeans_fit]:
+        with pytest.raises(ValueError, match="unknown assignment"):
+            fit(data, 1, assignment="other")
+
+
+def test_eligible_training_is_seeded_and_preserves_input():
+    # Cross the actual hierarchy threshold, with the required 39 rows per cluster.
+    clusters = 3136
+    data = np.arange(clusters * 39, dtype=np.float32)[:, None]
+    original = data.copy()
+    model = Gathers()
+    first = model.fit(data, clusters, 2, seed=42)
+    second = model.fit(data, clusters, 2, assignment="auto", seed=42)
+    assert first.shape == (clusters, 1)
+    assert np.isfinite(first).all()
+    np.testing.assert_array_equal(first, second)
+    np.testing.assert_array_equal(data, original)
+
+
+@pytest.mark.parametrize("distance", ["l2", "cos", "dot"])
+def test_batch_assignment_policy_exact_reference_and_seeded_hierarchy(distance):
+    rng = np.random.default_rng(42)
+    centers = rng.random((3136, 129), dtype=np.float32)
+    vectors = rng.random((33, 258), dtype=np.float32)[:, ::2]
+    original = vectors.copy()
+    original_centers = centers.copy()
+    model = Gathers()
+    expected = [model.assign(row, centers, distance=distance) for row in vectors]
+    assert model.batch_assign(vectors, centers, distance=distance, assignment="exact") == expected
+    automatic = model.batch_assign(vectors, centers, distance=distance, seed=42)
+    assert automatic == model.batch_assign(vectors, centers, distance=distance, assignment="auto", seed=42)
+    assert len(automatic) == len(vectors)
+    assert all(0 <= label < len(centers) for label in automatic)
+    assert model.batch_assign(vectors[:0], centers, distance=distance, seed=42) == []
+    np.testing.assert_array_equal(vectors, original)
+    np.testing.assert_array_equal(centers, original_centers)
+
+
+def test_batch_assignment_option_and_numeric_validation():
+    centers = np.ones((2, 2), dtype=np.float32)
+    vectors = centers.copy()
+    for assign in [Gathers().batch_assign, batch_assign]:
+        with pytest.raises(ValueError, match="unknown assignment"):
+            assign(vectors, centers, assignment="other")
+        for invalid in [np.nan, np.inf]:
+            bad = vectors.copy()
+            bad[0, 0] = invalid
+            with pytest.raises(ValueError, match="finite"):
+                assign(bad, centers, assignment="exact")
+        with pytest.raises(ValueError, match="finite nonzero L2 norm"):
+            assign(np.zeros_like(vectors), centers, distance="cos")
+    with pytest.raises(ValueError, match="non-negative"):
+        Gathers().batch_assign(vectors, centers, seed=-1)

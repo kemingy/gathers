@@ -11,6 +11,7 @@ For Python users, check the [Python README](./python/README.md).
 - [x] K-means
 - [x] PyO3 binding
 - [x] RaBitQ assignment
+- [x] Pilot-calibrated hierarchy assignment during K-means training
 - [x] Parallel with Rayon
 - [x] SIMD acceleration on `x86_64` and `aarch64` via [`pulp`](https://github.com/sarah-quinones/pulp)
 - [ ] mini batch K-means
@@ -40,8 +41,9 @@ cargo run --release -p gathers-cli -- --threads 16 --seed 42 assign \
 
 ### Dimensionality reduction
 
-Training automatically uses PCA to 128 dimensions for datasets with at least 1,000,000 rows and
-dimension above 196; smaller inputs train without reduction. Use `--reduction raw` to opt out.
+Training automatically selects dimensionality reduction from the source shape.
+These heuristics may change between versions. Use an explicit reduction and projected
+dimension to control the choice, or `--reduction raw` to train without reduction.
 To lower the training sample budget, use `--samples-per-cluster 128` (default 256), or set an
 exact total with `--training-samples`.
 
@@ -53,6 +55,17 @@ default to 128 dimensions, or use `--reduced-dim` to override:
 gathers kmeans -i vectors.fvecs -o centroids.fvecs -n 4096 \
   --reduction pca --reduced-dim 128
 ```
+
+Automatic assignment chooses between approximate hierarchy probing and exact flat
+assignment using internal heuristics that may change between versions. Use CLI
+`--assignment exact`, Python `assignment="exact"`, or Rust `AssignmentPolicy::Exact`
+to keep every Lloyd round exact. An eligible hierarchy is rebuilt and recalibrated
+each round; probing has no recall guarantee. See [adaptive training](./docs/adaptive-training-probes.md).
+
+Public Python `batch_assign(..., assignment="auto"|"exact", seed=...)` shares this
+policy for L2, cosine and dot product. Rust exposes `kmeans::batch_assign` and a reusable
+`CentroidAssigner` for fixed centroids. These APIs use guarded GEMM when eligible and
+direct SIMD for small groups. Public assignment applies no dimensionality reduction.
 
 See the [reduction guide](./docs/reduction.md) for method trade-offs and implementation details.
 

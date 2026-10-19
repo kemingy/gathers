@@ -23,6 +23,10 @@ conservative estimate, not an enforced RSS cap.
 
 ## Full-data training
 
+This historical comparison predates automatic adaptive hierarchy training. Use
+`--assignment exact` with the current CLI to reproduce its flat-assignment protocol;
+see [adaptive training](./adaptive-training-probes.md) for the current defaults.
+
 Re-measured 2026-10-17 on an Apple M5 Pro, 18 physical cores (12 Performance + 6 Super),
 64 GiB, macOS 26.6, aarch64/NEON, rustc 1.99.0. Release builds use thin LTO and one codegen
 unit; 16 Rayon workers, default Accelerate thread policy, no `target-cpu=native`, and no
@@ -62,51 +66,34 @@ CLI-default protocol above and have been replaced.
 
 ## Separate backend and memory contributions
 
-Earlier measurements, not re-run in this revision; machine labels have been removed.
-Fit plus projection only, using all GIST rows, with loading outside the timer:
+To isolate backend and memory effects, cross the portable faer and Accelerate backends with
+full-corpus centering and bounded centering. Fit and project every source row, exclude loading, warm
+each variant, and repeat complete passes. Keep the eigensolver, output dimensions and numerical
+checks fixed. This distinguishes faster matrix products from reduced allocation and memory traffic.
 
-| PCA backend / centered scratch | GIST seconds, median of 3 |
-| --- | ---: |
-| faer / full centered corpus | 4.259 |
-| Accelerate / full centered corpus | 1.452 |
-| faer / 16 MiB blocks | 4.131 |
-| Accelerate / 16 MiB blocks | 1.618 |
+At 960D and 1M rows, an unblocked transform would hold the ~3.84 GB input, a ~3.84 GB centered copy,
+and a ~0.51 GB output before other workspaces. The blocked transform needs the input and output plus
+at most 16 MiB of centered scratch; the saving grows linearly with corpus size.
 
-At 960D and 1M rows, an unblocked transform would hold the ~3.84 GB input, a ~3.84 GB centered
-copy, and a ~0.51 GB output before other workspaces. The blocked transform needs the input and
-output plus at most 16 MiB of centered scratch; the saving grows linearly with corpus size.
+Vary centered scratch across 4, 16 and 64 MiB while fitting every source row. The investigation
+found a tradeoff between small-block scheduling overhead and larger temporary storage. The current
+16 MiB bound balances those costs; it is not a universal optimum. Historical machine-specific
+timings are maintained outside the repository.
 
-Scratch sensitivity on full GIST (fit + projection, medians of three), same earlier measurement:
-
-| Centered scratch | Seconds |
-| --- | ---: |
-| 4 MiB | 2.615 |
-| 16 MiB | 1.618 |
-| 64 MiB | 1.453 |
-
-16 MiB avoids the 4 MiB scheduling overhead while using one quarter of the scratch of 64 MiB.
-The latter saves about 0.16 s in this stage test; 16 MiB is the current bounded-memory tradeoff,
-not a claim of a universal optimal block size. All these configurations fit every source row.
-This revision's full-source GIST stage re-measurement of the current implementation
-(SYRK / 16 MiB blocks) is 1.683 s, consistent with the table above.
-
-The subsequent [Accelerate refinements](./accelerate-refinements.md) isolate SYRK and
-lower-triangle accumulation and report measurements against the blocked SGEMM implementation.
+The [Accelerate refinements](./accelerate-refinements.md) isolate SYRK and lower-triangle
+accumulation and report current measurements against the blocked SGEMM implementation.
 
 ## Clustering quality
 
-Earlier measurement from the previous protocol, not re-run in this revision; the machine label
-has been removed.
+Reassign every original-space source row to the reconstructed final centroids and sum
+selected-centroid squared distances in `f64`. Compare that objective, empty-cluster count and PCA
+retained variance using the same initialization and training protocol. Small objective changes were
+observed after changing covariance accumulation order; faster PCA is not evidence of better
+clustering quality. One seed limits cross-library claims.
 
-| Original-space SSE after final reassignment (lower is better) | Previous PCA | Improved PCA |
-| --- | ---: | ---: |
-| GIST | 1039435.749 | 1039447.091 |
-
-The SSE change is +0.00109% on GIST, measured by summing selected-centroid squared distances
-in `f64`. All completed fits and final assignments had zero empty clusters. Preserved variance
-on full-source GIST PCA128 is 0.8638668 (previous) versus 0.8638666 (current) in this revision's
-runs. The improvement is in time and memory, not evidence of better clustering quality.
-Different initial centroids and one seed limit cross-library claims.
+In the M5 Pro full-source PCA stage measurements linked above, retained variance was 0.8638668 for
+the previous implementation and 0.8638666 for the current implementation. Historical objective
+tables from other hardware remain outside the repository.
 
 ## Validation and reproduction
 

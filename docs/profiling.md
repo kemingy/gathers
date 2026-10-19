@@ -127,8 +127,8 @@ For comparisons, keep inputs (including centroid order), seed, workers, build fl
 the same. Record `git rev-parse HEAD`, `rustc -Vv`, and any local diff beside the report.
 For `assign`, `--seed` fixes the rotation within the same build/target, not across dependency
 versions or architectures. For `kmeans`, the seed initializes separate RNGs for source sampling
-and library training (initialization, RaBitQ rotations and empty-cluster repair). The sample is
-retained in source order; changing the read batch size does not change training results. This
+and library training (initialization, hierarchy/pilot sampling and empty-cluster repair).
+The sample is retained in source order; changing the read batch size does not change training results. This
 sampling/RNG boundary differs from the former load-all CLI, so its seeded results can change.
 The existing library `fit` retains its reservoir order and RNG consumption.
 Repeated training with identical input order, configuration,
@@ -149,6 +149,26 @@ lscpu
 
 Capabilities do not prove which kernel an index selected: small centroid sets use the row path,
 for example. Inspect sampled stacks and inline frames when investigating actual kernel selection.
+
+Training defaults to adaptive hierarchy probing for 3,136+ resolved clusters. Use
+`kmeans --assignment exact` for the flat baseline; compare full datasets with matching
+sampling, projection, initialization and iteration settings. Pilot selection, calibration,
+hierarchy rebuilding, grouped workspace setup and convergence confirmation are part of
+`fit_ms`. This policy is shared with Python; standalone Python assignment is a separate path.
+
+## Complete clustering workflow
+
+The `kmeans` command stops after writing centroids. Its wall time does not include a final
+assignment of the source corpus. `KMeansFit::labels` describes the last training assignment,
+before the last centroid update, and projected labels also precede original-space reconstruction.
+For memberships against the returned model, perform a separate pass over every source row using
+the final original-dimensional centroids. Keep those centroids fixed during this pass.
+
+A complete performance comparison includes that pass, index construction when used,
+normalization and assignment workspace preparation, source reads, and membership output.
+Record training and final assignment separately; query-batch timings cannot establish
+full-corpus assignment throughput. The [adaptive training experiment](./adaptive-training-probes.md)
+also reports held-out diagnostics and final audits separately from training time.
 
 ## CPU sampling
 
