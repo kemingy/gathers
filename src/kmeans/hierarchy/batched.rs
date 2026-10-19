@@ -27,6 +27,25 @@ fn score(query: &[f32], centroid: &[f32], distance: Distance) -> f32 {
     }
 }
 
+fn matrix_workspace(
+    vectors: &[f32],
+    num_centroids: usize,
+    dim: usize,
+    distance: Distance,
+    assignment_threshold: Option<usize>,
+) -> Option<MatrixAssignmentWorkspace> {
+    match assignment_threshold {
+        Some(threshold) => MatrixAssignmentWorkspace::try_new_with_threshold(
+            vectors,
+            num_centroids,
+            dim,
+            distance,
+            threshold,
+        ),
+        None => MatrixAssignmentWorkspace::try_new(vectors, num_centroids, dim, distance),
+    }
+}
+
 impl Hierarchy {
     /// Calibrate full-probe pilots with guarded flat assignment, then rank each
     /// winner's live cell in the unchanged SIMD routing order. Deeper trees and
@@ -37,6 +56,17 @@ impl Hierarchy {
         labels: &mut [u32],
         required: &mut [usize],
         distance: Distance,
+    ) {
+        self.calibrate_batched_with_threshold(vectors, labels, required, distance, None);
+    }
+
+    fn calibrate_batched_with_threshold(
+        &self,
+        vectors: &[f32],
+        labels: &mut [u32],
+        required: &mut [usize],
+        distance: Distance,
+        assignment_threshold: Option<usize>,
     ) {
         self.validate(vectors, self.dim, labels);
         assert_eq!(labels.len(), required.len());
@@ -79,9 +109,13 @@ impl Hierarchy {
             fallback(labels, required);
             return;
         }
-        let Some(mut workspace) =
-            MatrixAssignmentWorkspace::try_new(vectors, centroid_cells.len(), self.dim, distance)
-        else {
+        let Some(mut workspace) = matrix_workspace(
+            vectors,
+            centroid_cells.len(),
+            self.dim,
+            distance,
+            assignment_threshold,
+        ) else {
             fallback(labels, required);
             return;
         };
@@ -113,6 +147,17 @@ impl Hierarchy {
         labels: &mut [u32],
         options: ProbeOptions<'_>,
         batch_rows: usize,
+    ) {
+        self.probe_batched_with_threshold(vectors, labels, options, batch_rows, None);
+    }
+
+    fn probe_batched_with_threshold(
+        &self,
+        vectors: &[f32],
+        labels: &mut [u32],
+        options: ProbeOptions<'_>,
+        batch_rows: usize,
+        assignment_threshold: Option<usize>,
     ) {
         self.validate(vectors, self.dim, labels);
         assert!(options.budget > 0 && batch_rows > 0);
@@ -170,11 +215,12 @@ impl Hierarchy {
                     let end = routing.child_offsets[cell + 1] as usize;
                     let cell_centers = &centers[start * self.dim..end * self.dim];
                     scratch.local_labels.resize(group.len(), 0);
-                    if let Some(mut workspace) = MatrixAssignmentWorkspace::try_new(
+                    if let Some(mut workspace) = matrix_workspace(
                         &scratch.gathered,
                         end - start,
                         self.dim,
                         options.distance,
+                        assignment_threshold,
                     ) {
                         workspace.assign(
                             &scratch.gathered,
@@ -193,14 +239,35 @@ impl Hierarchy {
                     }
                     for (&row, &local) in group.iter().zip(&scratch.local_labels) {
                         let candidate = start + local as usize;
-                        let original = leaf_order[candidate];
-                        let value = score(
+                        let mut original = leaf_order[candidate];
+                        let mut value = score(
                             &vectors[row * self.dim..(row + 1) * self.dim],
                             &centers[candidate * self.dim..(candidate + 1) * self.dim],
                             options.distance,
                         );
-                        if value < scratch.best_scores[row]
-                            || (value == scratch.best_scores[row] && original < labels[row])
+                        if !value.is_finite() {
+                            // Flat argmin handles NaN and infinite scores differently from the
+                            // hierarchy. Recover the reference winner and no-winner sentinel.
+                            original = u32::MAX;
+                            value = f32::INFINITY;
+                            for candidate in start..end {
+                                let candidate_original = leaf_order[candidate];
+                                let candidate_value = score(
+                                    &vectors[row * self.dim..(row + 1) * self.dim],
+                                    &centers[candidate * self.dim..(candidate + 1) * self.dim],
+                                    options.distance,
+                                );
+                                if candidate_value < value
+                                    || (candidate_value == value && candidate_original < original)
+                                {
+                                    value = candidate_value;
+                                    original = candidate_original;
+                                }
+                            }
+                        }
+                        if original != u32::MAX
+                            && (value < scratch.best_scores[row]
+                                || (value == scratch.best_scores[row] && original < labels[row]))
                         {
                             scratch.best_scores[row] = value;
                             labels[row] = original;
@@ -382,15 +449,23 @@ mod tests {
                 );
                 let mut labels = vec![0; 1025];
                 let mut required = vec![0; 1025];
-                h.calibrate_batched(&vectors, &mut labels, &mut required, distance);
-                assert_eq!(
-                    labels, reference,
-                    "pilot winners dim={dim}, distance={distance:?}"
-                );
-                assert_eq!(
-                    required, expected,
-                    "pilot ranks dim={dim}, distance={distance:?}"
-                );
+                for threshold in [None, Some(0)] {
+                    h.calibrate_batched_with_threshold(
+                        &vectors,
+                        &mut labels,
+                        &mut required,
+                        distance,
+                        threshold,
+                    );
+                    assert_eq!(
+                        labels, reference,
+                        "pilot winners dim={dim}, distance={distance:?}, threshold={threshold:?}"
+                    );
+                    assert_eq!(
+                        required, expected,
+                        "pilot ranks dim={dim}, distance={distance:?}, threshold={threshold:?}"
+                    );
+                }
                 h.calibrate_batched(&[], &mut [], &mut [], distance);
                 // One exceptional row must preserve the full-probe label and rank,
                 // including the no-winner sentinel for an all-NaN score row.
@@ -421,12 +496,21 @@ mod tests {
                         let mut reference = vec![127; 1025];
                         h.probe_parallel(&vectors, &mut reference, &mut [], options);
                         for batch in [1, 512, 2048] {
-                            let mut actual = vec![127; 1025];
-                            h.probe_batched(&vectors, &mut actual, options, batch);
-                            assert_eq!(
-                                actual, reference,
-                                "dim={dim}, budget={budget}, incumbent={incumbent}, batch={batch}"
-                            );
+                            for threshold in [None, Some(0)] {
+                                let mut actual = vec![127; 1025];
+                                h.probe_batched_with_threshold(
+                                    &vectors,
+                                    &mut actual,
+                                    options,
+                                    batch,
+                                    threshold,
+                                );
+                                assert_eq!(
+                                    actual, reference,
+                                    "dim={dim}, budget={budget}, incumbent={incumbent}, \
+                                     batch={batch}, threshold={threshold:?}"
+                                );
+                            }
                         }
                     }
                 }
@@ -442,5 +526,44 @@ mod tests {
                 32,
             );
         }
+    }
+
+    #[test]
+    fn grouped_scan_recovers_nonfinite_reference_winner() {
+        let dim = 2;
+        let mut fine = AVec::new(64);
+        fine.extend_from_slice(&[2.0, -2.0, -2.0, 0.0]);
+        let mut routing = AVec::new(64);
+        routing.extend_from_slice(&[0.0, 0.0]);
+        let h = Hierarchy {
+            dim,
+            levels: vec![
+                Level {
+                    norms: fine.chunks_exact(dim).map(l2_norm).collect(),
+                    centroids: fine,
+                    child_offsets: vec![],
+                    fine_offsets: (0..=2).collect(),
+                },
+                Level {
+                    norms: routing.chunks_exact(dim).map(l2_norm).collect(),
+                    centroids: routing,
+                    child_offsets: vec![0, 2],
+                    fine_offsets: vec![0, 2],
+                },
+            ],
+            leaf_order: vec![0, 1],
+        };
+        let options = ProbeOptions {
+            distance: Distance::NegativeDotProduct,
+            budget: 1,
+            incumbent_centroids: None,
+        };
+        let vectors = [f32::MAX, f32::MAX];
+        let mut expected = [u32::MAX];
+        h.probe_parallel(&vectors, &mut expected, &mut [], options);
+        assert_eq!(expected, [1]);
+        let mut actual = [u32::MAX];
+        h.probe_batched(&vectors, &mut actual, options, 1);
+        assert_eq!(actual, expected);
     }
 }

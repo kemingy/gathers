@@ -29,6 +29,8 @@ mod linalg;
 #[path = "../../src/kmeans/matrix.rs"]
 mod matrix;
 
+#[allow(dead_code, unused_imports)]
+mod cache;
 mod calibration;
 #[allow(unused_imports)]
 mod policy;
@@ -185,6 +187,8 @@ fn main() -> Result<()> {
         .resolve(rows, original_dim)?
         .n_clusters
         .unwrap() as usize;
+    let provenance =
+        cache::Provenance::new(&args.source, rows, original_dim, args.metric, TRAINING_DIM)?;
     if !args.prepared.exists() {
         let started = Instant::now();
         let mut raw = fvecs::read(&args.source, None)?;
@@ -198,6 +202,7 @@ fn main() -> Result<()> {
             try_normalize_rows(&mut projected, TRAINING_DIM, true)?;
         }
         fvecs::write(&args.prepared, &projected, TRAINING_DIM)?;
+        provenance.write(&args.prepared)?;
         println!(
             "{}",
             json!({
@@ -209,6 +214,15 @@ fn main() -> Result<()> {
                 "pca_fit_rows":rows,
             })
         );
+    }
+    if !cache::is_native_source(
+        &args.source,
+        &args.prepared,
+        args.metric,
+        original_dim,
+        TRAINING_DIM,
+    )? {
+        provenance.validate(&args.prepared)?;
     }
     if args.prepare_only {
         return Ok(());

@@ -35,11 +35,9 @@ const EXPECTED_CHILDREN: usize = 196;
 /// A routing layer is created only when its proposed size reaches this count.
 const MIN_ROUTING_CENTROIDS: usize = 16;
 /// Leaf cells scanned per query in best-first search: `sqrt(top-level cells)` capped at
-/// 10. No established rule exists for the
-/// probe count (Faiss/FLANN tune it empirically); this follows the `nlist ≈ sqrt(n)`
-/// precedent applied to the routing layer. Measured recall (500 queries, dim 8, uniform and
-/// directional data): ~0.93-0.98 at k=3,200 (16 cells, budget 4); >= 0.97 at k=16,384
-/// (83 cells, budget 9) and k=65,536 (256 cells, budget 10).
+/// 10. No established rule exists for the probe count (Faiss/FLANN tune it empirically);
+/// this follows the `nlist ≈ sqrt(n)` precedent applied to the routing layer. The budget
+/// trades recall for predictable cost but provides no recall guarantee.
 fn scan_budget(cells: usize) -> usize {
     ((cells as f64).sqrt().ceil() as usize).clamp(1, 10)
 }
@@ -228,7 +226,8 @@ struct SearchScratch {
 impl Hierarchy {
     /// Build a hierarchy over flat row-major `centroids`, or return `None` when the layer
     /// rules do not permit one (fewer than `16 * 196 = 3,136` fine centroids, or the
-    /// square-root rule stops earlier at deeper levels).
+    /// square-root rule stops earlier at deeper levels), or routing-layer training produces
+    /// unrepresentable values.
     ///
     /// The seed controls routing-layer training. Panics if `centroids` is empty, `dim` is
     /// zero, or rows are incomplete.
@@ -275,7 +274,7 @@ impl Hierarchy {
             };
             let fit = KMeans::new(config)
                 .fit_sample(level.centroids.clone(), dim)
-                .expect("routing layer training must succeed on finite centroids");
+                .ok()?;
             let count = level.len();
             debug_assert_eq!(fit.labels.len(), count);
 
@@ -1034,13 +1033,17 @@ mod tests {
     }
 
     #[test]
-    fn budgeted_assignment_holds_recall() {
+    fn build_returns_none_for_numerical_overflow() {
+        let centroids = vec![f32::MAX; 16 * 196];
+        assert!(Hierarchy::build(&centroids, 1, Some(42)).is_none());
+    }
+
+    #[test]
+    fn full_probe_assignment_matches_flat() {
         let dim = 8;
         let mut rng = seeded_rng();
         let queries: Vec<f32> = (0..500 * dim).map(|_| rng.random::<f32>() - 0.5).collect();
-        // The budget is sqrt(top cells) capped at 10, so small hierarchies probe a larger
-        // fraction of their cells and hold a higher recall floor.
-        for (k, floor) in [(3_200usize, 0.9), (16_384, 0.95)] {
+        for k in [3_200usize, 16_384] {
             let uniform: Vec<f32> = (0..k * dim).map(|_| rng.random::<f32>() - 0.5).collect();
             // 32 direction blobs with varying magnitudes.
             let mut directional = Vec::new();
@@ -1064,17 +1067,17 @@ mod tests {
                     let mut expected = vec![0; 500];
                     base_assign(&queries, centroids, dim, distance, &mut expected);
                     let mut actual = vec![0; 500];
-                    hierarchy.assign(&queries, dim, distance, &mut actual);
-                    let recall = expected
-                        .iter()
-                        .zip(&actual)
-                        .filter(|(left, right)| left == right)
-                        .count() as f32
-                        / 500.0;
-                    assert!(
-                        recall >= floor,
-                        "k={k} {name} {distance:?} recall {recall} < {floor}"
+                    hierarchy.probe_parallel(
+                        &queries,
+                        &mut actual,
+                        &mut [],
+                        ProbeOptions {
+                            distance,
+                            budget: usize::MAX,
+                            incumbent_centroids: None,
+                        },
                     );
+                    assert_eq!(actual, expected, "k={k} {name} {distance:?}");
                 }
             }
         }
