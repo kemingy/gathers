@@ -77,6 +77,15 @@ pub struct Hierarchy {
     levels: Vec<Level>,
     /// Fine-level position -> original centroid index.
     leaf_order: Vec<u32>,
+    /// Original-order centroids and original-ID -> cell mapping for flat pilot scans.
+    /// Grouped scans borrow the sorted fine level directly.
+    calibration: Option<CalibrationLayout>,
+}
+
+#[derive(Debug)]
+struct CalibrationLayout {
+    centroids: AVec<f32>,
+    centroid_cells: Vec<usize>,
 }
 
 /// Proposed routing-layer size over `m` centroids; `None` when a layer is not worthwhile.
@@ -229,6 +238,49 @@ struct SearchScratch {
 }
 
 impl Hierarchy {
+    /// Finalize immutable layouts once, after all descendant regrouping is complete.
+    fn from_levels(dim: usize, mut levels: Vec<Level>, mut leaf_order: Vec<u32>) -> Self {
+        let calibration = if levels.len() == 2 {
+            let mut positions: Vec<u32> = (0..leaf_order.len() as u32).collect();
+            for offsets in levels[1].child_offsets.windows(2) {
+                positions[offsets[0] as usize..offsets[1] as usize]
+                    .sort_unstable_by_key(|&position| leaf_order[position as usize]);
+            }
+            // Production builds already preserve original-ID order within each cell.
+            // Avoid copying that layout; fixtures also pass through this invariant.
+            if positions
+                .iter()
+                .enumerate()
+                .any(|(i, &position)| i != position as usize)
+            {
+                levels[0].centroids = gather(&levels[0].centroids, &positions, dim);
+                levels[0].norms = permute(&levels[0].norms, &positions);
+                leaf_order = permute(&leaf_order, &positions);
+            }
+            let mut original_positions = vec![0; leaf_order.len()];
+            let mut centroid_cells = vec![0; leaf_order.len()];
+            for (cell, offsets) in levels[1].child_offsets.windows(2).enumerate() {
+                for position in offsets[0]..offsets[1] {
+                    let original = leaf_order[position as usize] as usize;
+                    original_positions[original] = position;
+                    centroid_cells[original] = cell;
+                }
+            }
+            Some(CalibrationLayout {
+                centroids: gather(&levels[0].centroids, &original_positions, dim),
+                centroid_cells,
+            })
+        } else {
+            None
+        };
+        Self {
+            dim,
+            levels,
+            leaf_order,
+            calibration,
+        }
+    }
+
     pub(crate) fn supports(centroids: usize) -> bool {
         proposed_parents(centroids).is_some()
     }
@@ -336,11 +388,11 @@ impl Hierarchy {
         }
 
         levels.push(level);
-        Some(Self {
+        Some(Self::from_levels(
             dim,
             levels,
-            leaf_order: leaf_order.expect("a routing layer was created"),
-        })
+            leaf_order.expect("a routing layer was created"),
+        ))
     }
 
     /// Number of levels, including the fine level; at least 2.
@@ -830,15 +882,15 @@ mod tests {
     fn regrouping_moves_all_descendant_ranges_and_original_labels() {
         // Unequal runs expose offset-only permutations; include two routing levels.
         let fine = [0.0, 1.0, 100.0, 101.0, 102.0, 200.0];
-        let mut hierarchy = Hierarchy {
-            dim: 1,
-            levels: vec![
+        let mut hierarchy = Hierarchy::from_levels(
+            1,
+            vec![
                 fixture_level(&fine, &[], &[0, 1, 2, 3, 4, 5, 6]),
                 fixture_level(&[0.5, 101.0, 200.0], &[0, 2, 5, 6], &[0, 2, 5, 6]),
                 fixture_level(&[50.75, 200.0], &[0, 2, 3], &[0, 5, 6]),
             ],
-            leaf_order: (0..6).collect(),
-        };
+            (0..6).collect(),
+        );
         super::reorder_descendants(
             &mut hierarchy.levels,
             &mut hierarchy.leaf_order,
@@ -879,14 +931,14 @@ mod tests {
         offsets.extend([1, 2]);
         let mut centers = vec![100.0; 14];
         centers.extend([1.0, 2.0]);
-        let mut hierarchy = Hierarchy {
-            dim: 1,
-            levels: vec![
+        let mut hierarchy = Hierarchy::from_levels(
+            1,
+            vec![
                 fixture_level(&[1.0, 2.0], &[], &[0, 1, 2]),
                 fixture_level(&centers, &offsets, &offsets),
             ],
-            leaf_order: vec![0, 1],
-        };
+            vec![0, 1],
+        );
         for depth in 2..=3 {
             if depth == 3 {
                 // The first top node owns routing nodes, but no fine descendants.
@@ -952,6 +1004,17 @@ mod tests {
                     centroids[original as usize * dim + coordinate]
                 );
             }
+        }
+
+        let calibration = hierarchy.calibration.as_ref().unwrap();
+        assert_eq!(calibration.centroids.as_slice(), centroids.as_slice());
+        for (cell, offsets) in routing.child_offsets.windows(2).enumerate() {
+            let ids = &hierarchy.leaf_order[offsets[0] as usize..offsets[1] as usize];
+            assert!(ids.is_sorted());
+            assert!(
+                ids.iter()
+                    .all(|&id| calibration.centroid_cells[id as usize] == cell)
+            );
         }
 
         // Routing centroids are cell means, and norms match the centroids.
@@ -1163,11 +1226,7 @@ mod tests {
             lower_count = nodes;
             fan_out = 8;
         }
-        let hierarchy = Hierarchy {
-            dim,
-            levels,
-            leaf_order: (0..fine_count as u32).collect(),
-        };
+        let hierarchy = Hierarchy::from_levels(dim, levels, (0..fine_count as u32).collect());
         assert_eq!(hierarchy.levels(), 3);
         let queries = random_rows(100, dim);
         let mut expected = vec![0; 100];
@@ -1232,9 +1291,9 @@ mod tests {
             output.extend_from_slice(values);
             output
         };
-        Hierarchy {
-            dim: 1,
-            levels: vec![
+        Hierarchy::from_levels(
+            1,
+            vec![
                 Level {
                     centroids: aligned(fine),
                     norms: fine.iter().map(|v| v.abs()).collect(),
@@ -1248,8 +1307,8 @@ mod tests {
                     fine_offsets: vec![0, 1, 2],
                 },
             ],
-            leaf_order: vec![0, 1],
-        }
+            vec![0, 1],
+        )
     }
 
     #[test]

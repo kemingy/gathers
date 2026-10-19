@@ -41,7 +41,11 @@ The single-thread profiling `perf` feature continues to use serial exact assignm
 Rust exposes `kmeans::batch_assign` for one-shot calls and `CentroidAssigner` for
 fixed-centroid reuse. Both take `AssignmentPolicy::{Auto, Exact}`. A reusable assigner
 builds its hierarchy once, validates each incoming batch and recalibrates pilots over
-that complete batch. Training uses the same calibration, grouped leaf scans and guarded
+that complete batch. Construction prepares the cell-sorted fine-centroid layout and
+retains an original-order centroid matrix with its pilot cell mapping. Query calls
+borrow these immutable layouts. This retains an extra original-order centroid matrix
+per two-level hierarchy while eliminating per-calibration reconstruction and per-chunk
+centroid copies. Training uses the same calibration, grouped leaf scans and guarded
 exact kernels, while rebuilding from moving centroids every round.
 
 Cosine centroids are normalized once per assigner; query normalization uses bounded
@@ -80,6 +84,10 @@ on the measured machine. Cohere initially lost to exact when cosine chunks were
 processed serially; bounded parallel chunks removed that bottleneck. These observations
 do not establish a universal crossover or a recall guarantee. Timings and agreement
 reports remain private outside this repository.
+
+The adaptive benchmark accepts Cargo's injected harness arguments and prints help
+when invoked without dataset arguments. Use
+`cargo bench -p gathers-cli --bench adaptive_probe -- --help` to inspect its options.
 
 ## Controlled benchmark and historical measurements
 

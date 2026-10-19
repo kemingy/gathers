@@ -51,7 +51,7 @@ fn matrix_workspace(
 impl Hierarchy {
     /// Calibrate full-probe pilots with guarded flat assignment, then rank each
     /// winner's live cell in the unchanged SIMD routing order. Deeper trees and
-    /// cosine retain the reference traversal. Setup and mapping are per call.
+    /// cosine retain the reference traversal. Immutable layouts are prepared at build time.
     pub(crate) fn calibrate_batched(
         &self,
         vectors: &[f32],
@@ -88,26 +88,22 @@ impl Hierarchy {
             fallback(labels, required);
             return;
         }
-        // Original-ID ordering preserves full-probe ties across different cells.
-        let mut centers = vec![0.0; self.levels[0].centroids.len()];
-        let mut centroid_cells = vec![0; self.leaf_order.len()];
-        let routing = &self.levels[1];
-        for cell in 0..routing.len() {
-            for position in
-                routing.child_offsets[cell] as usize..routing.child_offsets[cell + 1] as usize
-            {
-                let original = self.leaf_order[position] as usize;
-                centers[original * self.dim..(original + 1) * self.dim].copy_from_slice(
-                    &self.levels[0].centroids[position * self.dim..(position + 1) * self.dim],
-                );
-                centroid_cells[original] = cell;
-            }
-        }
+        // This layout is prepared once, preserving full-probe ties by original ID.
+        let calibration = self
+            .calibration
+            .as_ref()
+            .expect("two-level calibration layout");
+        let centers = &calibration.centroids;
+        let centroid_cells = &calibration.centroid_cells;
         // The flat fallback uses a different argmin tie rule when overflow or
         // NaNs invalidate its error bounds. Keep the hierarchy reference for
         // exceptional inputs; this conservative limit also bounds L2 differences.
         let limit = (f32::MAX / (8.0 * self.dim as f32)).sqrt();
-        if !vectors.iter().chain(&centers).all(|v| v.abs() <= limit) {
+        if !vectors
+            .iter()
+            .chain(centers.iter())
+            .all(|v| v.abs() <= limit)
+        {
             fallback(labels, required);
             return;
         }
@@ -121,7 +117,7 @@ impl Hierarchy {
             fallback(labels, required);
             return;
         };
-        workspace.assign(vectors, &centers, self.dim, labels);
+        workspace.assign(vectors, centers, self.dim, labels);
         required
             .par_chunks_mut(RAYON_BLOCK_SIZE)
             .zip(labels.par_chunks(RAYON_BLOCK_SIZE))
@@ -132,7 +128,7 @@ impl Hierarchy {
                     vectors,
                     labels,
                     required,
-                    centroid_cells: &centroid_cells,
+                    centroid_cells,
                     distance,
                     scores,
                 });
@@ -169,21 +165,10 @@ impl Hierarchy {
             return;
         }
         let routing = &self.levels[1];
-        // Local argmin resolves ties by local index. Sorting each cell by original
-        // centroid ID makes that tie rule agree with the hierarchy's original-ID rule.
-        let mut positions: Vec<_> = (0..self.leaf_order.len()).collect();
-        for offsets in routing.child_offsets.windows(2) {
-            positions[offsets[0] as usize..offsets[1] as usize]
-                .sort_unstable_by_key(|&position| self.leaf_order[position]);
-        }
-        let mut leaf_order = Vec::with_capacity(positions.len());
-        let mut centers = Vec::with_capacity(self.levels[0].centroids.len());
-        for position in positions {
-            leaf_order.push(self.leaf_order[position]);
-            centers.extend_from_slice(
-                &self.levels[0].centroids[position * self.dim..(position + 1) * self.dim],
-            );
-        }
+        // Each cell is already sorted by original ID at construction, so local
+        // argmin ties preserve the hierarchy's original-ID rule without a copy.
+        let leaf_order = &self.leaf_order;
+        let centers = &self.levels[0].centroids;
         labels
             .par_chunks_mut(batch_rows)
             .zip(vectors.par_chunks(batch_rows * self.dim))
@@ -415,9 +400,9 @@ mod tests {
             for value in [-1.0, 0.0, 1.0] {
                 routing.extend_from_slice(&vec![value; dim]);
             }
-            let h = Hierarchy {
+            let h = Hierarchy::from_levels(
                 dim,
-                levels: vec![
+                vec![
                     Level {
                         norms: fine.chunks_exact(dim).map(l2_norm).collect(),
                         centroids: fine,
@@ -432,7 +417,7 @@ mod tests {
                     },
                 ],
                 leaf_order,
-            };
+            );
             let vectors: Vec<f32> = (0..1025 * dim)
                 .map(|i| ((i / dim % 35) as f32 - 17.0) * 0.0625)
                 .collect();
@@ -537,9 +522,9 @@ mod tests {
         fine.extend_from_slice(&[2.0, -2.0, -2.0, 0.0]);
         let mut routing = AVec::new(64);
         routing.extend_from_slice(&[0.0, 0.0]);
-        let h = Hierarchy {
+        let h = Hierarchy::from_levels(
             dim,
-            levels: vec![
+            vec![
                 Level {
                     norms: fine.chunks_exact(dim).map(l2_norm).collect(),
                     centroids: fine,
@@ -553,8 +538,8 @@ mod tests {
                     fine_offsets: vec![0, 2],
                 },
             ],
-            leaf_order: vec![0, 1],
-        };
+            vec![0, 1],
+        );
         let options = ProbeOptions {
             distance: Distance::NegativeDotProduct,
             budget: 1,

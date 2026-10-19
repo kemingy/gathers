@@ -141,7 +141,22 @@ fn empty_count(labels: &[u32], count: usize) -> usize {
 }
 
 fn main() -> Result<()> {
-    let args: Args = argh::from_env();
+    // Cargo injects --bench even for custom harnesses. With no dataset arguments,
+    // show help so all-target test runs can execute this target without local files.
+    let argv: Vec<_> = std::env::args().filter(|arg| arg != "--bench").collect();
+    let values: Vec<_> = argv.iter().skip(1).map(String::as_str).collect();
+    let values: &[&str] = if values.is_empty() {
+        &["--help"]
+    } else {
+        &values
+    };
+    let args: Args = match Args::from_args(&[&argv[0]], values) {
+        Ok(args) => args,
+        Err(exit) => {
+            print!("{}", exit.output);
+            std::process::exit(if exit.status.is_ok() { 0 } else { 2 });
+        }
+    };
     ensure!(
         matches!(args.metric, Distance::SquaredEuclidean | Distance::Cosine),
         "use l2 or cos"
