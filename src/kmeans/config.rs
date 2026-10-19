@@ -13,8 +13,9 @@ use crate::reduction::{ReductionError, checked_buffer_len};
     reason = "Match the public transform names"
 )]
 pub enum ReductionConfig {
-    /// PCA to 128 dimensions when source rows >= 1,000,000 and input dimension > 196;
-    /// otherwise no reduction. This is a workload heuristic, not a recall guarantee.
+    /// Choose whether and how far to reduce dimensions from the source shape.
+    /// Heuristics may change between versions and provide no recall guarantee.
+    /// Select an explicit reduction to control the method and output dimension.
     #[default]
     Auto,
     /// Train without dimensionality reduction.
@@ -23,7 +24,7 @@ pub enum ReductionConfig {
     PCA {
         /// Number of projected coordinates, positive and smaller than the input dimension.
         output_dim: usize,
-        /// Fitting rows; `None` uses min(training rows, 100 * input dimension).
+        /// Fitting rows; `None` chooses a budget from the training shape.
         training_samples: Option<usize>,
     },
     /// Apply a seeded subsampled randomized Hadamard transform.
@@ -53,9 +54,10 @@ impl FromStr for ReductionConfig {
 /// Assignment policy shared by Lloyd training and public batch assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AssignmentPolicy {
-    /// Use a pilot-calibrated centroid hierarchy for at least 3,136 centroids;
-    /// otherwise use exact flat assignment. Probing is approximate. Training rebuilds
-    /// the hierarchy each round; fixed-centroid assigners retain it between calls.
+    /// Choose between approximate hierarchy probing and exact flat assignment.
+    /// Selection thresholds and probe calibration are implementation details that may
+    /// change between versions. Training rebuilds an eligible hierarchy each round;
+    /// fixed-centroid assigners retain it between calls. Probing has no recall guarantee.
     #[default]
     Auto,
     /// Search all current centroids with guarded matrix assignment or direct SIMD.
@@ -80,7 +82,7 @@ impl FromStr for AssignmentPolicy {
 /// Use [`Self::resolve`] with original source metadata before loading an external sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KMeansConfig {
-    /// Cluster count; `None` derives floor(rows^0.8 / 16), bounded by 39 rows per cluster.
+    /// Cluster count; `None` chooses from the source row count using an internal heuristic.
     pub n_clusters: Option<u32>,
     /// Iteration limit, default 10.
     pub max_iter: u32,

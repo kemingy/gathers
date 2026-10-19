@@ -17,8 +17,9 @@ use crate::utils::try_normalize_rows;
 /// Reusable assignment to fixed, flat row-major centroids.
 ///
 /// Construction validates centroids and builds an eligible automatic hierarchy once.
-/// Each nonempty batch calibrates 512 uniformly sampled pilots (or all rows for smaller
-/// batches) with `min(p100, ceil(1.10 * p99))`. Approximate probing has no recall guarantee.
+/// Each nonempty batch calibrates its probe budget from uniformly sampled pilots.
+/// Eligibility and calibration heuristics may change between versions. Approximate
+/// probing has no recall guarantee.
 /// Exact assignment uses guarded GEMM or direct SIMD according to workload size.
 ///
 /// Centroids are borrowed for L2/dot and copied once for cosine normalization. Query

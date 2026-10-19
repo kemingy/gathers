@@ -21,7 +21,7 @@ pub(crate) struct Args {
     /// output centroid fvecs file
     #[argh(option, short = 'o')]
     output: PathBuf,
-    /// number of clusters; defaults to max(1, floor(rows^0.8 / 16))
+    /// number of clusters; automatically selected from source shape when omitted
     #[argh(option, short = 'n')]
     n_cluster: Option<u32>,
     /// maximum number of iterations
@@ -36,7 +36,7 @@ pub(crate) struct Args {
     /// training distance: l2, cos, or dot
     #[argh(option, default = "String::from(\"l2\")")]
     distance: String,
-    /// training assignment: auto (adaptive hierarchy for 3,136+ clusters) or exact
+    /// training assignment: auto (may use approximate hierarchy probing) or exact
     #[argh(option, default = "String::from(\"auto\")")]
     assignment: String,
     /// dimensionality reduction: auto (default), raw, pca, or srht
@@ -45,7 +45,7 @@ pub(crate) struct Args {
     /// projected dimension for explicit pca/srht; defaults to 128
     #[argh(option)]
     reduced_dim: Option<usize>,
-    /// rows used to fit PCA; defaults to min(training rows, 100 * input dimension)
+    /// rows used to fit PCA; automatically selected from training shape when omitted
     #[argh(option)]
     projection_training_samples: Option<usize>,
     /// rows per input batch

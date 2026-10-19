@@ -1,9 +1,10 @@
 # Pilot-calibrated probing during Lloyd training
 
-The library now uses adaptive hierarchy assignment during Lloyd training when the
-resolved cluster count is at least 3,136. `KMeansConfig::assignment` defaults to
+Automatic Lloyd assignment chooses between approximate hierarchy probing and exact
+flat assignment using internal eligibility and calibration heuristics that may change.
+`KMeansConfig::assignment` defaults to
 `AssignmentPolicy::Auto`; select `AssignmentPolicy::Exact` for guarded flat
-assignment in every round. Smaller cluster counts and numerical hierarchy failures
+assignment in every round. Ineligible workloads and numerical hierarchy failures
 use exact flat assignment. The old input-size-based L2 RaBitQ training switch is
 removed. Explicit Rust RaBitQ retrieval remains available. Python `batch_assign`
 now uses the shared policy for all metrics instead of selecting RaBitQ for L2.
@@ -15,8 +16,13 @@ exported to Python. Public `batch_assign(..., assignment="auto"|"exact", seed=..
 assigns against supplied centroids in their original space; it never projects queries.
 `exact` is available even when those centroids were trained approximately.
 
-Production rebuilds the hierarchy each approximate round, selects 512 fresh source
-rows without replacement and computes `min(p100, ceil(1.10 * p99))`. Routing-layer
+## Current implementation details
+
+The values in this section describe the current implementation, not public API
+commitments. They may change as workloads and measurements justify tuning.
+
+A hierarchy is eligible at 3,136 centroids. Production rebuilds it each approximate
+round, selects 512 fresh source rows without replacement and computes `min(p100, ceil(1.10 * p99))`. Routing-layer
 K-means is always exact. Pilot winners and grouped leaf assignments use the guarded
 matrix path when eligible; sparse groups, deeper trees and exceptional values retain
 SIMD. The grouped batch bound is 32,768 rows. Previous labels provide incumbents only
@@ -38,8 +44,8 @@ builds its hierarchy once, validates each incoming batch and recalibrates pilots
 that complete batch. Training uses the same calibration, grouped leaf scans and guarded
 exact kernels, while rebuilding from moving centroids every round.
 
-Cosine centroids are normalized once per assigner; query normalization uses reusable
-32,768-row chunks. Adaptive cosine chunks run in parallel with task-local reusable
+Cosine centroids are normalized once per assigner; query normalization uses bounded
+reusable chunks. Adaptive cosine chunks run in parallel with task-local reusable
 scratch, bounded to one chunk per Rayon worker. Exact cosine uses one reusable
 normalization buffer. Pilot rows are drawn from the full batch before chunking, so
 chunking does not restrict calibration to a prefix. Empty query batches return empty labels;

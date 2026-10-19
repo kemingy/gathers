@@ -11,11 +11,11 @@ traversal and training rules.
 
 ## Implementation status
 
-The library uses this hierarchy for pilot-calibrated Lloyd assignment at 3,136 or
-more clusters under `AssignmentPolicy::Auto`. `AssignmentPolicy::Exact` disables
-it. Routing-layer training remains exact; the hierarchy is rebuilt from current
-centroids each round. See [adaptive training](./adaptive-training-probes.md) for the
-512-pilot p99 policy, numerical fallbacks, convergence confirmation and Python/CLI
+The library can use this hierarchy for pilot-calibrated Lloyd assignment under
+`AssignmentPolicy::Auto`. Eligibility and calibration heuristics may change between
+versions. `AssignmentPolicy::Exact` selects full scans. Routing-layer training remains
+exact; the hierarchy is rebuilt from current centroids each round. See [adaptive training](./adaptive-training-probes.md) for the
+current calibration policy, numerical fallbacks, convergence confirmation and Python/CLI
 options. The hierarchy itself remains private.
 
 The implementation uses score-ordered best-first traversal with a leaf-cell budget,

@@ -444,8 +444,9 @@ impl KMeans {
 
     /// Train every supplied row without further subsampling, returning centroids and labels.
     ///
-    /// Automatic assignment uses pilot-calibrated hierarchy probing at 3,136+ clusters;
-    /// set [`KMeansConfig::assignment`] to [`AssignmentPolicy::Exact`] to disable it.
+    /// Automatic assignment may use approximate, pilot-calibrated hierarchy probing;
+    /// set [`KMeansConfig::assignment`] to [`AssignmentPolicy::Exact`] for full scans.
+    /// Automatic eligibility and calibration heuristics may change between versions.
     ///
     /// Automatic settings otherwise use the supplied sample's shape. For disk-loaded samples,
     /// first call [`KMeansConfig::resolve`] with original source metadata, then construct the

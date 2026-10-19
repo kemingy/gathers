@@ -16,16 +16,17 @@ The library owns configuration resolution, sampling, normalization, reduction, f
 original-space centroid reconstruction. Construct `KMeans::new(KMeansConfig { ... })`, then call
 `fit` or `fit_sample`. Both return `Result`; there are no reduction-specific fitting methods.
 
-Defaults derive cluster count as max(1, floor(rows^0.8 / 16)), bounded by at least 39 rows per
-cluster, and retain min(source rows, samples_per_cluster * clusters) training rows. The factor
+Automatic cluster counts are chosen from the source row count using an internal
+heuristic. Training retains min(source rows, samples_per_cluster * clusters) rows. The factor
 defaults to 256; use `KMeansConfig::samples_per_cluster`, `--samples-per-cluster`, or Python's
 `samples_per_cluster` to choose another value such as 128 (minimum 39). An exact `training_samples`
-count overrides the factor; the unused factor is ignored and is not validated. **Auto reduction selects PCA
-to 128 dimensions when original source rows >= 1,000,000 and input dimension > 196; otherwise
-it selects raw training.** This is a workload heuristic motivated by the GIST/Cohere comparison,
-not a guarantee of retained recall. Use `ReductionConfig::None` or `--reduction raw` to opt out.
-Explicit PCA/SRHT choices override the automatic threshold. PCA fitting defaults to
-min(selected training rows, 100 * input dimension). The metric is not inferred; it defaults to L2.
+count overrides the factor; the unused factor is ignored and is not validated.
+
+Auto reduction chooses whether and how far to reduce dimensions from the original
+source shape. Automatic heuristics may change between versions and provide no recall
+guarantee. Use `ReductionConfig::None` or `--reduction raw` to opt out.
+Explicit PCA/SRHT choices override automatic selection. PCA fitting uses an automatically
+selected sample budget unless explicitly configured. The metric is not inferred; it defaults to L2.
 
 `fit` selects its sample and returns original-dimensional centroids. `fit_sample` uses every
 supplied row and returns `KMeansFit` with centroids, final training labels, PCA retained variance,
@@ -161,8 +162,8 @@ The library normalizes original cosine rows once during preparation, for both ra
 training; CLI and Python do not repeat that normalization. `dot`
 preserves input magnitudes.
 Both use negative-dot-product assignment and unit nonzero centroids. All three metrics
-use the same training assignment policy: automatic adaptive hierarchy probing at 3,136+
-clusters, exact flat assignment below that threshold, or explicit `assignment="exact"` /
+use the same training assignment policy: automatic selection between approximate hierarchy
+probing and exact flat assignment, or explicit `assignment="exact"` /
 `AssignmentPolicy::Exact`. This replaces the former large-L2 RaBitQ training heuristic.
 The hierarchy is rebuilt and its probe budget recalibrated each round; see
 [adaptive training](./adaptive-training-probes.md) for accuracy and convergence semantics.
