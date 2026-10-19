@@ -150,6 +150,20 @@ lscpu
 Capabilities do not prove which kernel an index selected: small centroid sets use the row path,
 for example. Inspect sampled stacks and inline frames when investigating actual kernel selection.
 
+## Complete clustering workflow
+
+The `kmeans` command stops after writing centroids. Its wall time does not include a final
+assignment of the source corpus. `KMeansFit::labels` describes the last training assignment,
+before the last centroid update, and projected labels also precede original-space reconstruction.
+For memberships against the returned model, perform a separate pass over every source row using
+the final original-dimensional centroids. Keep those centroids fixed during this pass.
+
+A complete performance comparison includes that pass, index construction when used,
+normalization and assignment workspace preparation, source reads, and membership output.
+Record training and final assignment separately; query-batch timings cannot establish
+full-corpus assignment throughput. The [adaptive training experiment](./adaptive-training-probes.md)
+also reports held-out diagnostics and final audits separately from training time.
+
 ## CPU sampling
 
 Profile separately from benchmarking: sampling adds overhead. For an assignment profile:

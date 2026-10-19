@@ -157,6 +157,9 @@ to x86 code must still compile and pass through the fallback on non-x86 CI targe
   `GATHERS_RANDOM_SEED` when comparing two implementations on identical generated data.
 - Report the CPU, target features, thread count, dataset shape, command, and before/after result for
   performance claims. Distinguish wall-clock improvements from isolated kernel improvements.
+- Keep M3 Max numeric benchmark results, raw reports and profiles private in `../benchmark`
+  beside the primary checkout. Commit methods, ideas and qualitative observations from those runs,
+  rather than their numeric results. Keep environment labels on measurements from other hardware.
 - Run `make lint` and the relevant targeted tests before review; run `make test` when Rust/Python
   integration or public behavior changes.
 - Run `make lint-ast test-ast` after changing Rust sources or ast-grep rules. These checks are

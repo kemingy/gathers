@@ -2,7 +2,10 @@
 
 This is an isolated experiment, not a change to default K-means training. The
 `adaptive_probe` Cargo benchmark compiles the hierarchy and exact matrix workspace
-privately. No benchmark hooks or new public library APIs are exported.
+privately. No benchmark hooks or new public library APIs are exported. Its exact
+baseline explicitly selects guarded flat assignment; the production library still
+retains its existing RaBitQ heuristic for large L2 training inputs. The experiment
+does not change that dispatch policy.
 
 For each approximate Lloyd round, the benchmark:
 
@@ -176,10 +179,12 @@ population recall guarantees or measure original-space reconstructed-centroid qu
 
 Build and run through the maintained Cargo benchmark. Parent directories for prepared
 caches must exist. A missing GIST cache is fitted and written using all source rows.
-Each generated cache has a `<prepared>.json` sidecar recording its source identity and
-preparation settings. Every reuse, including `--prepare-only`, validates that metadata;
-recreate older caches without it. The native shortcut of passing the same 128D L2
-source as `--prepared` does not require a sidecar.
+Each generated cache has a versioned `<prepared>.json` sidecar recording its source
+path, source/prepared file sizes and modification times, and preparation settings.
+Every reuse, including `--prepare-only`, validates that metadata; recreate older caches
+without the current schema. These are filesystem checks, not content hashes: changes
+that preserve both size and modification time require manual cache invalidation. The
+native shortcut of passing the same 128D L2 source as `--prepared` needs no sidecar.
 
 ```sh
 # One-time full-source GIST PCA128 preparation.
@@ -215,6 +220,15 @@ the source and `--prepared` paths; this avoids an unnecessary 128→128 PCA fit.
 to exercise the actual two-cleanup-round default. Raw JSONL results and preparation
 reports are under the local `/tmp/gathers-m5-stack/` measurement directory.
 
+## Result storage
+
+Keep M3 Max raw JSONL, numeric summaries, profiles and preparation reports in the
+private sibling `../benchmark` directory of the primary checkout, outside this
+repository. Repository updates from those runs should record methods, ideas and
+qualitative observations. Label
+measurements from other hardware with their actual environment; removing a machine
+label does not turn a private measurement into a portable result.
+
 ## Validation
 
 For the measured code, `make lint lint-ast test-ast test-rust` passed, including 37
@@ -226,3 +240,8 @@ without provenance metadata. `git diff --check` passes for the documentation upd
 `cargo check --offline -p gathers-cli --bench adaptive_probe --target TARGET` passed
 for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`. These are compile checks;
 runtime timing and dataset evidence above are from Apple Silicon.
+
+The cache validation now also covers same-size source and prepared-file replacements
+using deterministic modification times, bringing the adaptive integration suite to 38
+tests. Full-source SIFT completed ten grouped-assignment rounds with GEMM pilots and
+final audits after this fix; its M3 Max run output is kept in the private archive.
