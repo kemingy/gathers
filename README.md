@@ -13,7 +13,7 @@ For Python users, check the [Python README](./python/README.md).
 - [x] RaBitQ assignment
 - [x] Parallel with Rayon
 - [x] SIMD acceleration on `x86_64` and `aarch64` via [`pulp`](https://github.com/sarah-quinones/pulp)
-- [ ] mini batch K-means
+- [x] Native mini-batch training with e-means
 - [ ] Hierarchical K-means
 
 ## Installation
@@ -55,6 +55,10 @@ gathers kmeans -i vectors.fvecs -o centroids.fvecs -n 4096 \
 ```
 
 See the [reduction guide](./docs/reduction.md) for method trade-offs and implementation details.
+
+Select `--algorithm emeans --max-iter 3` for native Rust mini-batch training, including with PCA.
+See the [e-means guide](./docs/e-means.md) for Rust/Python usage, Rust benchmarks, and
+reference-comparison findings.
 
 To install the binary from a checkout, run `cargo install --path crates/cli`.
 For timing scope and CPU sampling, see the [profiling guide](./docs/profiling.md).

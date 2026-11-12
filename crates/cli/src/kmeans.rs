@@ -4,7 +4,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use argh::FromArgs;
 use gathers::distance::Distance;
-use gathers::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+use gathers::kmeans::{
+    KMeans, KMeansConfig, ReductionConfig, TrainingAlgorithm, TrainingParameters,
+};
 use gathers::sampling::sample_indices;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -24,9 +26,12 @@ pub(crate) struct Args {
     /// number of clusters; defaults to max(1, floor(rows^0.8 / 16))
     #[argh(option, short = 'n')]
     n_cluster: Option<u32>,
-    /// maximum number of iterations
-    #[argh(option, short = 'm', default = "10")]
-    max_iter: u32,
+    /// training rounds/passes; defaults to 10 for lloyd, 3 for emeans
+    #[argh(option, short = 'm')]
+    max_iter: Option<u32>,
+    /// training updates: lloyd (default) or native Rust emeans
+    #[argh(option, default = "String::from(\"lloyd\")")]
+    algorithm: String,
     /// training rows per cluster, at least 39; ignored when training-samples is set
     #[argh(option, default = "256")]
     samples_per_cluster: usize,
@@ -119,7 +124,8 @@ fn check_memory(
 
 pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     // Fail fast on flag errors before touching the input file.
-    ensure!(args.max_iter > 0, "max-iter must be positive");
+    let algorithm = args.algorithm.parse::<TrainingAlgorithm>()?;
+    ensure!(args.max_iter != Some(0), "max-iter must be positive");
     let distance = args.distance.parse::<Distance>()?;
     let reduction = match args.reduction.parse::<ReductionConfig>()? {
         ReductionConfig::PCA { output_dim, .. } => ReductionConfig::PCA {
@@ -147,6 +153,7 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     let num_vectors = reader.rows;
     let dim = reader.dim;
     let config = KMeansConfig {
+        algorithm,
         n_clusters: args.n_cluster,
         max_iter: args.max_iter,
         tolerance: 0.01,
@@ -217,6 +224,17 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
     let reconstruction_empty_clusters = fit.empty_clusters;
     let preserved_variance = fit.preserved_variance;
     let training_dim = fit.training_dim;
+    let max_iter = fit.parameters.max_iter();
+    let emeans_recipe = match fit.parameters {
+        TrainingParameters::Lloyd { .. } => None,
+        TrainingParameters::Emeans(recipe) => Some(serde_json::json!({
+            "max_iter": recipe.max_iter,
+            "batch_size": recipe.batch_size,
+            "alpha0": recipe.alpha0,
+            "revival_threshold": recipe.revival_threshold,
+            "total_steps": recipe.total_steps,
+        })),
+    };
     let centroids = fit.centroids;
     let num_centroids = centroids.len() / dim;
     fvecs::write(&args.output, &centroids, dim)?;
@@ -248,7 +266,9 @@ pub(crate) fn run(args: &Args, common: &crate::Args) -> Result<()> {
         "sample_read_ms": sample_read_ms,
         "num_centroids": num_centroids,
         "dim": dim,
-        "max_iter": args.max_iter,
+        "max_iter": max_iter,
+        "algorithm": args.algorithm,
+        "emeans_recipe": emeans_recipe,
         "seed": common.seed,
         "threads": rayon::current_num_threads(),
         "cpu": common.cpu,

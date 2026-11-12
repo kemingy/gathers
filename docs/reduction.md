@@ -32,6 +32,13 @@ supplied row and returns `KMeansFit` with centroids, final training labels, PCA 
 empty projected cluster count, and stage timings. Labels are not recomputed against the returned
 original-dimensional centroids. Both sampling settings are ignored by `fit_sample`.
 
+The same pipeline supports [native e-means](./e-means.md) through
+`TrainingAlgorithm::Emeans(EmeansConfig::default())`, CLI `--algorithm emeans`, or Python
+`algorithm="emeans"`. The common `max_iter` / `--max-iter` budget defaults to three passes
+for e-means or ten rounds for Lloyd; explicit positive values override either default.
+Lloyd may stop early using its tolerance. E-means uses exact mini-batch assignment and preserves
+the existing original-space reconstruction contract.
+
 For streaming, call `config.resolve(original_rows, dim)?` before loading vectors. The returned
 config contains explicit cluster count, sample size, and projection settings. Read only that
 sample and pass the resolved config to `KMeans::new(...).fit_sample(...)`. This preserves the

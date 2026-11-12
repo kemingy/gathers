@@ -1,6 +1,8 @@
 //! K-means clustering implementation.
 
 mod config;
+mod emeans;
+mod lloyd;
 #[cfg(not(feature = "perf"))]
 mod matrix;
 mod reduced;
@@ -10,7 +12,8 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 use aligned_vec::AVec;
-pub use config::{KMeansConfig, ReductionConfig};
+pub use config::{KMeansConfig, ReductionConfig, TrainingAlgorithm, TrainingParameters};
+pub use emeans::{EmeansConfig, EmeansRecipe};
 use log::debug;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
@@ -27,8 +30,14 @@ use crate::utils::{centroid_residual, normalize_nonzero_row, try_normalize_rows}
 const EPS: f32 = 1.0 / 1024.0;
 const MIN_POINTS_PER_CENTROID: usize = 39;
 const DEFAULT_SAMPLES_PER_CLUSTER: usize = 256;
-const LARGE_CLUSTER_THRESHOLD: usize = 1 << 28;
 const RAYON_BLOCK_SIZE: usize = 64;
+
+/// Algorithm output in training space, before shared centroid reconstruction.
+pub(crate) struct TrainingFit {
+    centroids: AVec<f32>,
+    labels: Vec<u32>,
+    parameters: TrainingParameters,
+}
 
 fn normalize_assignment_rows(vecs: &[f32], dim: usize, distance: Distance) -> Cow<'_, [f32]> {
     if distance != Distance::Cosine {
@@ -401,7 +410,7 @@ fn update_centroids_inner<R: Rng + ?Sized>(
     Ok(diff)
 }
 
-/// K-means clustering algorithm.
+/// Shared K-means training pipeline with selectable Lloyd or e-means updates.
 #[derive(Debug, Default)]
 pub struct KMeans {
     config: KMeansConfig,
@@ -496,7 +505,7 @@ impl KMeans {
         mut vecs: AVec<f32>,
         dim: usize,
         rng: &mut R,
-    ) -> Result<(AVec<f32>, Vec<u32>), KMeansError> {
+    ) -> Result<TrainingFit, KMeansError> {
         let num_clusters = self.config.n_clusters.expect("cluster count was resolved");
         // Center selected L2 rows so assignment uses smaller coordinates.
         let residual_mean =
@@ -523,67 +532,29 @@ impl KMeans {
             try_normalize_rows(&mut centroids, dim, true)?;
         }
 
-        let training_num = vecs.len() / dim;
-        let mut labels: Vec<u32> = vec![0; training_num];
-        let use_exact_assignment = assignment_distance == Distance::NegativeDotProduct
-            || vecs.len() <= LARGE_CLUSTER_THRESHOLD;
-        #[cfg(not(feature = "perf"))]
-        let mut matrix_workspace = if use_exact_assignment {
-            matrix::MatrixAssignmentWorkspace::try_new(
-                &vecs,
-                centroids.len() / dim,
-                dim,
-                assignment_distance,
-            )
-        } else {
-            None
+        let max_iter = self.config.max_iter.expect("iteration budget was resolved");
+        let mut fit = match self.config.algorithm {
+            TrainingAlgorithm::Lloyd => {
+                let trainer = lloyd::Lloyd::new(max_iter, self.config.tolerance);
+                trainer.fit(&vecs, dim, centroids, assignment_distance, rng)?
+            }
+            TrainingAlgorithm::Emeans(config) => {
+                let trainer = emeans::Emeans::new(config, max_iter);
+                trainer.fit(&vecs, dim, centroids, assignment_distance, rng)?
+            }
         };
-        debug!("start training");
-        for i in 0..self.config.max_iter {
-            let start_time = Instant::now();
-            if use_exact_assignment {
-                #[cfg(feature = "perf")]
-                base_assign(&vecs, &centroids, dim, assignment_distance, &mut labels);
-                #[cfg(not(feature = "perf"))]
-                if let Some(workspace) = &mut matrix_workspace {
-                    workspace.assign(&vecs, &centroids, dim, &mut labels);
-                } else {
-                    base_assign_parallel(&vecs, &centroids, dim, assignment_distance, &mut labels);
-                }
-            } else {
-                #[cfg(feature = "perf")]
-                rabitq_assign_inner(&vecs, &centroids, dim, &mut labels, rng);
-                #[cfg(not(feature = "perf"))]
-                rabitq_assign_parallel_inner(&vecs, &centroids, dim, &mut labels, rng);
-            }
-            let diff = update_centroids_inner(
-                &vecs,
-                &mut centroids,
-                dim,
-                &labels,
-                assignment_distance == Distance::NegativeDotProduct,
-                rng,
-            )?;
-            debug!("iter {} takes {} s", i, start_time.elapsed().as_secs_f32());
-            if diff < f64::from(self.config.tolerance) {
-                debug!("converged at iter {i}");
-                break;
-            }
-        }
 
         if let Some(mean) = residual_mean {
-            for centroid in centroids.chunks_mut(dim) {
+            for centroid in fit.centroids.chunks_mut(dim) {
                 for (value, offset) in centroid.iter_mut().zip(&mean) {
                     *value += *offset;
                 }
             }
         }
-
-        if !centroids.iter().all(|value| value.is_finite()) {
+        if !fit.centroids.iter().all(|value| value.is_finite()) {
             return Err(KMeansError::NumericalOverflow);
         }
-
-        Ok((centroids, labels))
+        Ok(fit)
     }
 }
 
@@ -668,7 +639,7 @@ mod tests {
         let values = (0..600).map(|value| vec![value as f32]).collect::<Vec<_>>();
         let model = KMeans::new(KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 1,
+            max_iter: Some(1),
             tolerance: 0.01,
             distance: Distance::SquaredEuclidean,
             use_residual: false,
@@ -704,7 +675,7 @@ mod tests {
         for samples_per_cluster in [0, 128, 512] {
             let model = KMeans::new(KMeansConfig {
                 n_clusters: Some(1),
-                max_iter: 1,
+                max_iter: Some(1),
                 samples_per_cluster,
                 training_samples: Some(39),
                 seed: Some(42),
@@ -723,7 +694,7 @@ mod tests {
             .collect::<Vec<_>>();
         let model = KMeans::new(KMeansConfig {
             n_clusters: Some(2),
-            max_iter: 2,
+            max_iter: Some(2),
             seed: Some(42),
             ..Default::default()
         });
@@ -751,7 +722,7 @@ mod tests {
             .collect::<Vec<_>>();
         let model = KMeans::new(KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 2,
+            max_iter: Some(2),
             tolerance: 1e-4,
             distance: Distance::SquaredEuclidean,
             use_residual: true,
@@ -784,7 +755,7 @@ mod tests {
         let fit = |distance| {
             KMeans::new(KMeansConfig {
                 n_clusters: Some(1),
-                max_iter: 1,
+                max_iter: Some(1),
                 tolerance: 0.01,
                 distance,
                 use_residual: false,
@@ -832,7 +803,7 @@ mod tests {
             .collect::<Vec<_>>();
         let centroids = KMeans::new(KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 3,
+            max_iter: Some(3),
             tolerance: 0.01,
             distance: Distance::Cosine,
             use_residual: false,
@@ -869,7 +840,7 @@ mod tests {
         let vectors = vec![vec![0.0, 0.0]; 40];
         let centroids = KMeans::new(KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 3,
+            max_iter: Some(3),
             tolerance: 0.01,
             distance: Distance::NegativeDotProduct,
             use_residual: false,
