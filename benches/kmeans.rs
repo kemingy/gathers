@@ -1,9 +1,10 @@
 use std::hint::black_box;
 
-use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use gathers::distance::Distance;
 use gathers::kmeans::{
-    KMeans, KMeansConfig, base_assign, base_assign_parallel, rabitq_assign_parallel,
+    EmeansConfig, KMeans, KMeansConfig, ReductionConfig, TrainingAlgorithm, base_assign,
+    base_assign_parallel, rabitq_assign_parallel,
 };
 use rabitq::RaBitQ;
 use rand::RngExt;
@@ -146,7 +147,7 @@ fn kmeans_benchmark(c: &mut Criterion) {
     let vecs = gathers::utils::as_continuous_vec(&[source]);
     let config = KMeansConfig {
         n_clusters: Some(NUM_CENTROIDS as u32),
-        max_iter: ITERATIONS as u32,
+        max_iter: Some(ITERATIONS as u32),
         tolerance: f32::MIN_POSITIVE,
         seed: Some(seed),
         ..Default::default()
@@ -179,6 +180,73 @@ fn kmeans_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+fn training_algorithm_benchmark(c: &mut Criterion) {
+    const NUM_VECTORS: usize = 100_000;
+    const NUM_CENTROIDS: u32 = 512;
+    const DIM: usize = 256;
+
+    let mut rng = seeded_rng();
+    let seed = rng.random();
+    let source: Vec<f32> = (0..NUM_VECTORS * DIM).map(|_| rng.random()).collect();
+    let vecs = gathers::utils::as_continuous_vec(&[source]);
+    let mut group = c.benchmark_group("training_algorithm");
+    group.sample_size(10);
+    // Report input rows, since Lloyd iterations and e-means passes do different work.
+    group.throughput(Throughput::Elements(NUM_VECTORS as u64));
+    for (metric, distance) in [
+        ("l2", Distance::SquaredEuclidean),
+        ("cos", Distance::Cosine),
+    ] {
+        for (space, reduction) in [
+            ("raw", ReductionConfig::None),
+            (
+                "pca128",
+                ReductionConfig::PCA {
+                    output_dim: 128,
+                    training_samples: None,
+                },
+            ),
+        ] {
+            for (name, algorithm, max_iter) in [
+                ("lloyd10", TrainingAlgorithm::Lloyd, 10),
+                (
+                    "emeans2",
+                    TrainingAlgorithm::Emeans(EmeansConfig::default()),
+                    2,
+                ),
+                (
+                    "emeans3",
+                    TrainingAlgorithm::Emeans(EmeansConfig::default()),
+                    3,
+                ),
+            ] {
+                let trainer = KMeans::new(KMeansConfig {
+                    algorithm,
+                    n_clusters: Some(NUM_CENTROIDS),
+                    max_iter: Some(max_iter),
+                    tolerance: f32::MIN_POSITIVE,
+                    distance,
+                    reduction,
+                    seed: Some(seed),
+                    ..Default::default()
+                });
+                group.bench_function(BenchmarkId::new(format!("{metric}/{space}"), name), |b| {
+                    b.iter_batched(
+                        || vecs.clone(),
+                        |input| trainer.fit_sample(black_box(input), DIM).unwrap(),
+                        BatchSize::LargeInput,
+                    )
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(assignment_benches, assignment_benchmark);
-criterion_group!(kmeans_benches, kmeans_benchmark);
+criterion_group!(
+    kmeans_benches,
+    kmeans_benchmark,
+    training_algorithm_benchmark
+);
 criterion_main!(kmeans_benches, assignment_benches);

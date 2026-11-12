@@ -71,7 +71,7 @@ class Gathers:
         self,
         vecs: np.ndarray,
         n_cluster: int | None = None,
-        max_iter: int = 10,
+        max_iter: int | None = None,
         *,
         distance: str = "l2",
         reduction: str = "auto",
@@ -80,6 +80,7 @@ class Gathers:
         training_samples: int | None = None,
         projection_training_samples: int | None = None,
         seed: int | None = None,
+        algorithm: str = "lloyd",
     ) -> np.ndarray:
         """
         Cluster vectors, choosing the cluster count automatically when n_cluster is None.
@@ -93,6 +94,9 @@ class Gathers:
         at most 100 * input dimension rows, or projection_training_samples if supplied.
         Cosine rows are normalized before fitting PCA and before projected dot training.
         Input arrays are unchanged. Set seed for reproducibility within the same build.
+        algorithm='emeans' selects native Rust e-means. max_iter=None selects ten Lloyd
+        rounds or three complete e-means passes. A positive max_iter overrides either
+        default; Lloyd may stop early when its centroid shifts converge.
 
         Returns:
             np.ndarray: Centroids in the original input dimension, even with reduction.
@@ -120,4 +124,5 @@ class Gathers:
             training_samples=training_samples,
             projection_training_samples=projection_training_samples,
             seed=seed,
+            algorithm=algorithm,
         )

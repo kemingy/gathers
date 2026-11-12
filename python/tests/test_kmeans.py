@@ -1,7 +1,9 @@
+import sys
+
 import numpy as np
 import pytest
 
-from gathers import Gathers
+from gathers import Gathers, kmeans_fit
 
 NUM = 1000
 CLUSTER = 10
@@ -51,11 +53,12 @@ def test_rabitq():
 
 @pytest.mark.parametrize("reduction", ["raw", "pca", "srht"])
 @pytest.mark.parametrize("distance", ["l2", "cos", "dot"])
-def test_fit_reduction_returns_original_space_means(reduction, distance):
+@pytest.mark.parametrize("algorithm", ["lloyd", "emeans"])
+def test_fit_reduction_returns_original_space_means(reduction, distance, algorithm):
     # A strided input also verifies the thin Python preprocessing preserves input data.
     data = (np.arange(40 * 6, dtype=np.float32).reshape(40, 6) + 1)[:, ::2]
     original = data.copy()
-    options = {"reduction": reduction, "distance": distance, "seed": 42}
+    options = {"reduction": reduction, "distance": distance, "seed": 42, "algorithm": algorithm}
     if reduction != "raw":
         options["reduced_dim"] = 1
     if reduction == "pca":
@@ -74,6 +77,48 @@ def test_fit_reduction_returns_original_space_means(reduction, distance):
     if distance != "l2":
         expected /= np.linalg.norm(expected)
     np.testing.assert_allclose(centroids[0], expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("options", [
+    {"algorithm": "unknown"},
+    {"algorithm": "emeans", "max_iter": 0},
+    {"algorithm": "emeans", "max_iter": -1},
+])
+def test_invalid_training_algorithm_options(options):
+    with pytest.raises(ValueError):
+        Gathers().fit(np.ones((80, 3), dtype=np.float32), 2, **options)
+
+
+def test_native_emeans_needs_no_faiss_and_is_seeded(monkeypatch):
+    monkeypatch.setitem(sys.modules, "faiss", None)
+    data = np.random.default_rng(11).normal(size=(257, 5)).astype(np.float32)
+    original = data.copy()
+    model = Gathers()
+    options = {"algorithm": "emeans", "max_iter": 3, "reduction": "raw", "seed": 22}
+    centroids = model.fit(data, 3, **options)
+    np.testing.assert_array_equal(centroids, model.fit(data, 3, **options))
+    np.testing.assert_array_equal(data, original)
+    assert centroids.shape == (3, 5)
+    assert np.isfinite(centroids).all()
+
+
+@pytest.mark.parametrize("train", [Gathers().fit, kmeans_fit], ids=["wrapper", "extension"])
+@pytest.mark.parametrize("algorithm, default_limit", [("lloyd", 10), ("emeans", 3)])
+def test_algorithm_aware_iteration_defaults_and_explicit_overrides(train, algorithm, default_limit):
+    data = np.random.default_rng(11).normal(size=(257, 5)).astype(np.float32)
+    options = {"algorithm": algorithm, "reduction": "raw", "seed": 22}
+    default = train(data, 3, **options)
+    np.testing.assert_array_equal(default, train(data, 3, max_iter=None, **options))
+    np.testing.assert_array_equal(default, train(data, 3, max_iter=default_limit, **options))
+    np.testing.assert_array_equal(default, train(data, 3, default_limit, **options))
+    one_pass = train(data, 3, max_iter=1, **options)
+    assert not np.array_equal(default, one_pass)
+    if algorithm == "emeans":
+        ten_passes = train(data, 3, max_iter=10, **options)
+        assert not np.array_equal(default, ten_passes)
+        np.testing.assert_array_equal(ten_passes, train(data, 3, 10, **options))
+    with pytest.raises(ValueError):
+        train(data, 3, max_iter=0, **options)
 
 
 @pytest.mark.parametrize("distance, expected", [("l2", 1), ("cos", 1), ("dot", 0)])

@@ -75,6 +75,113 @@ fn training_samples_before_loading_and_is_batch_size_independent() {
 }
 
 #[test]
+fn iteration_budget_defaults_follow_algorithm_and_explicit_limits_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 5, 1000);
+    for (algorithm, default_limit) in [("lloyd", 10), ("emeans", 3)] {
+        let mut default_centroids = None;
+        for limit in [None, Some(default_limit), Some(1), Some(10)] {
+            let mut command = cli();
+            command
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args(["-n", "2", "--reduction", "raw", "--algorithm", algorithm]);
+            if let Some(limit) = limit {
+                command.args(["--max-iter", &limit.to_string()]);
+            }
+            let report = json(&mut command);
+            let expected = limit.unwrap_or(default_limit);
+            assert_eq!(report["max_iter"], expected);
+            if algorithm == "emeans" {
+                assert_eq!(report["emeans_recipe"]["max_iter"], expected);
+            }
+            let actual = std::fs::read(&centroids).unwrap();
+            if limit.is_none() {
+                default_centroids = Some(actual);
+            } else if limit == Some(default_limit) {
+                assert_eq!(Some(actual), default_centroids);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_emeans_reports_recipe_and_preserves_original_centroid_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    let vectors = dir.path().join("vectors.fvecs");
+    let centroids = dir.path().join("centroids.fvecs");
+    fixture(&vectors, 5, 1000);
+    for distance in ["l2", "cos"] {
+        for reduction in ["raw", "pca", "srht"] {
+            let mut command = cli();
+            command
+                .args(["kmeans", "-i"])
+                .arg(&vectors)
+                .arg("-o")
+                .arg(&centroids)
+                .args([
+                    "-n",
+                    "2",
+                    "--algorithm",
+                    "emeans",
+                    "--max-iter",
+                    "2",
+                    "--distance",
+                    distance,
+                    "--reduction",
+                    reduction,
+                ]);
+            if reduction != "raw" {
+                command.args(["--reduced-dim", "2"]);
+            }
+            let report = json(&mut command);
+            assert_eq!(report["algorithm"], "emeans");
+            assert_eq!(report["max_iter"], 2);
+            assert_eq!(report["emeans_recipe"]["max_iter"], 2);
+            assert!(report["emeans_recipe"]["batch_size"].as_u64().unwrap() > 0);
+            assert_eq!(
+                report["emeans_recipe"]["revival_threshold"],
+                if reduction == "raw" {
+                    serde_json::json!(f64::from(0.1_f32))
+                } else {
+                    serde_json::json!(0.0)
+                }
+            );
+            assert_eq!(report["training_rows"], 512);
+            assert_eq!(report["dim"], 5);
+            let data = std::fs::read(&centroids).unwrap();
+            assert_eq!(data.len(), 2 * (5 + 1) * 4);
+            for row in data.as_chunks::<24>().0 {
+                assert_eq!(u32::from_le_bytes(row[..4].try_into().unwrap()), 5);
+                assert!(
+                    row[4..]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|value| f32::from_le_bytes(*value).is_finite())
+                );
+            }
+        }
+    }
+    for options in [
+        vec!["--algorithm", "emeans", "--max-iter", "0"],
+        vec!["--max-iter", "0"],
+    ] {
+        let result = cli()
+            .args(["kmeans", "-i", "/missing.fvecs", "-o", "unused.fvecs"])
+            .args(options)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("max-iter"));
+    }
+}
+
+#[test]
 fn automatic_pca_uses_source_metadata_and_raw_override_is_respected() {
     let dir = tempfile::tempdir().unwrap();
     let vectors = dir.path().join("large-sparse.fvecs");

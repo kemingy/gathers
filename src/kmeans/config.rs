@@ -3,8 +3,57 @@
 use std::str::FromStr;
 
 use crate::distance::Distance;
+use crate::kmeans::emeans::{EmeansConfig, EmeansRecipe};
 use crate::kmeans::{DEFAULT_SAMPLES_PER_CLUSTER, KMeansError, MIN_POINTS_PER_CENTROID};
 use crate::reduction::{ReductionError, checked_buffer_len};
+
+/// Update algorithm used after sampling and projection.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TrainingAlgorithm {
+    /// Full-batch Lloyd updates, controlled by `max_iter` and `tolerance`.
+    #[default]
+    Lloyd,
+    /// Exponential moving averages over shuffled mini-batches, followed by closing means.
+    Emeans(EmeansConfig),
+}
+
+/// Resolved update settings used by a completed fit, after sampling and projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrainingParameters {
+    /// Full-batch Lloyd settings.
+    Lloyd {
+        /// Maximum number of rounds; convergence can stop training earlier.
+        max_iter: u32,
+        /// Squared centroid-shift tolerance.
+        tolerance: f32,
+    },
+    /// E-means settings derived from the prepared training shape and pass budget.
+    Emeans(EmeansRecipe),
+}
+
+impl TrainingParameters {
+    /// Configured maximum number of Lloyd rounds or complete e-means passes.
+    pub fn max_iter(self) -> u32 {
+        match self {
+            Self::Lloyd { max_iter, .. } => max_iter,
+            Self::Emeans(recipe) => recipe.max_iter,
+        }
+    }
+}
+
+impl FromStr for TrainingAlgorithm {
+    type Err = KMeansError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "lloyd" => Ok(Self::Lloyd),
+            "emeans" => Ok(Self::Emeans(EmeansConfig::default())),
+            _ => Err(KMeansError::InvalidConfig(
+                "algorithm must be lloyd or emeans",
+            )),
+        }
+    }
+}
 
 /// Dimensionality reduction used during training; centroids retain the original dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -56,11 +105,14 @@ impl FromStr for ReductionConfig {
 /// Use [`Self::resolve`] with original source metadata before loading an external sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KMeansConfig {
+    /// Update algorithm, default [`TrainingAlgorithm::Lloyd`].
+    pub algorithm: TrainingAlgorithm,
     /// Cluster count; `None` derives floor(rows^0.8 / 16), bounded by 39 rows per cluster.
     pub n_clusters: Option<u32>,
-    /// Iteration limit, default 10.
-    pub max_iter: u32,
-    /// Absolute squared centroid-shift tolerance, default 1e-4.
+    /// Training budget: Lloyd rounds or complete shuffled e-means passes.
+    /// `None` resolves to 10 for Lloyd and 3 for e-means; explicit values must be positive.
+    pub max_iter: Option<u32>,
+    /// Lloyd squared centroid-shift tolerance, default 1e-4; ignored by e-means.
     pub tolerance: f32,
     /// Training metric, default squared Euclidean.
     pub distance: Distance,
@@ -83,8 +135,9 @@ pub struct KMeansConfig {
 impl Default for KMeansConfig {
     fn default() -> Self {
         Self {
+            algorithm: TrainingAlgorithm::default(),
             n_clusters: None,
-            max_iter: 10,
+            max_iter: None,
             tolerance: 1e-4,
             distance: Distance::default(),
             use_residual: false,
@@ -110,11 +163,19 @@ impl KMeansConfig {
                 "rows and dimension must be positive",
             ));
         }
-        if self.max_iter == 0 || !self.tolerance.is_finite() || self.tolerance <= 0.0 {
+        let max_iter = self.max_iter.unwrap_or(match self.algorithm {
+            TrainingAlgorithm::Lloyd => 10,
+            TrainingAlgorithm::Emeans(_) => 3,
+        });
+        if max_iter == 0
+            || (self.algorithm == TrainingAlgorithm::Lloyd
+                && (!self.tolerance.is_finite() || self.tolerance <= 0.0))
+        {
             return Err(KMeansError::InvalidConfig(
                 "iterations and finite tolerance must be positive",
             ));
         }
+        self.max_iter = Some(max_iter);
         let clusters = self.n_clusters.unwrap_or_else(|| {
             (((rows as f64).powf(0.8) / 16.0).floor().max(1.0) as u32)
                 .min((rows / MIN_POINTS_PER_CENTROID).min(u32::MAX as usize) as u32)
@@ -190,13 +251,49 @@ impl KMeansConfig {
                 "reduced dimension must be positive and smaller than input dimension",
             ));
         }
+        if let TrainingAlgorithm::Emeans(config) = self.algorithm {
+            config.resolve(
+                samples,
+                output_dim.unwrap_or(dim),
+                clusters as usize,
+                max_iter,
+            )?;
+        }
         Ok(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{KMeansConfig, ReductionConfig};
+    use super::{KMeansConfig, ReductionConfig, TrainingAlgorithm};
+    use crate::kmeans::EmeansConfig;
+
+    #[test]
+    fn iteration_defaults_follow_algorithm_and_explicit_limits_are_preserved() {
+        for (algorithm, default_limit) in [
+            (TrainingAlgorithm::Lloyd, 10),
+            (TrainingAlgorithm::Emeans(EmeansConfig::default()), 3),
+        ] {
+            let base = KMeansConfig {
+                algorithm,
+                n_clusters: Some(2),
+                ..Default::default()
+            };
+            for max_iter in [None, Some(1), Some(3), Some(10)] {
+                let resolved = KMeansConfig { max_iter, ..base }.resolve(1000, 3).unwrap();
+                assert_eq!(resolved.max_iter, Some(max_iter.unwrap_or(default_limit)));
+                assert_eq!(resolved.resolve(1000, 3).unwrap(), resolved);
+            }
+            assert!(
+                KMeansConfig {
+                    max_iter: Some(0),
+                    ..base
+                }
+                .resolve(1000, 3)
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn reduction_parse_error_names_the_offending_value() {

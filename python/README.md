@@ -20,8 +20,11 @@ centroids = gathers.fit(data)  # automatic cluster count
 labels = gathers.batch_assign(data, centroids)
 ```
 
-Key `fit` options (all keyword-only except `n_cluster`):
+Key `fit` options (`n_cluster` and `max_iter` also accept positional arguments):
 
+- `algorithm`: `"lloyd"` (default) or native Rust `"emeans"`. `max_iter=None` selects
+  ten Lloyd rounds or three complete shuffled e-means passes; a positive integer overrides
+  either default. Lloyd may stop early when centroid shifts converge.
 - `distance`: `"l2"` (default), `"cos"`, or `"dot"`. Cosine normalizes training rows;
   dot preserves magnitudes. `batch_assign` is approximate (RaBitQ) for l2, exact otherwise.
 - `reduction`: `"auto"` (default) uses PCA to 128 dimensions when the source has at least

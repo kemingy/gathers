@@ -237,6 +237,22 @@ impl MatrixAssignmentWorkspace {
         })
     }
 
+    // The source rows remain immutable across shuffled mini-batches. Compute their norms
+    // once using the same arithmetic as the ordinary constructor and ambiguity bounds.
+    pub(crate) fn cache_vector_norms(&self, vecs: &[f32], dim: usize) -> Vec<f32> {
+        vecs.par_chunks_exact(dim)
+            .map(|vector| matrix_norm(self.distance, vector))
+            .collect()
+    }
+
+    // Indices must describe the same row order used to gather the assignment batch.
+    pub(crate) fn gather_vector_norms(&mut self, source_norms: &[f32], indices: &[usize]) {
+        self.vector_norms.resize(indices.len(), 0.0);
+        for (norm, &source) in self.vector_norms.iter_mut().zip(indices) {
+            *norm = source_norms[source];
+        }
+    }
+
     pub(crate) fn assign(
         &mut self,
         vecs: &[f32],
@@ -495,6 +511,43 @@ mod tests {
         assert_eq!(matmul_block_size(1_000_000, 4096, 256), Some(128));
         assert_eq!(matmul_block_size(1_000_000, 4096, 512), Some(64));
         assert_eq!(matmul_block_size(1_000_000, 4096, 513), None);
+    }
+
+    #[test]
+    fn reused_workspace_gathers_norms_for_shuffled_batches_and_tails() {
+        for dim in [32, 63, 64, 129] {
+            let initial = vec![100.0; 3 * dim];
+            let vectors = (0..5 * dim)
+                .map(|index| ((index % 29) as f32 - 14.0) * 0.125)
+                .collect::<Vec<_>>();
+            let centroids = [vec![0.0; dim], vec![1.0; dim]].concat();
+            for distance in [Distance::SquaredEuclidean, Distance::NegativeDotProduct] {
+                let mut workspace = MatrixAssignmentWorkspace::try_new_with_threshold(
+                    &initial, 2, dim, distance, 0,
+                )
+                .unwrap();
+                let source_norms = workspace.cache_vector_norms(&vectors, dim);
+                for indices in [&[4][..], &[2, 0, 3][..], &[1, 4][..]] {
+                    let batch = indices
+                        .iter()
+                        .flat_map(|&source| {
+                            vectors[source * dim..(source + 1) * dim].iter().copied()
+                        })
+                        .collect::<Vec<_>>();
+                    workspace.gather_vector_norms(&source_norms, indices);
+                    let fresh = MatrixAssignmentWorkspace::try_new_with_threshold(
+                        &batch, 2, dim, distance, 0,
+                    )
+                    .unwrap();
+                    assert_eq!(workspace.vector_norms, fresh.vector_norms);
+                    let mut actual = vec![0; indices.len()];
+                    let mut expected = vec![0; indices.len()];
+                    workspace.assign(&batch, &centroids, dim, &mut actual);
+                    base_assign(&batch, &centroids, dim, distance, &mut expected);
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
     }
 
     #[test]

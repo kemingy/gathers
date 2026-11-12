@@ -6,7 +6,7 @@ use aligned_vec::{AVec, avec};
 use rand::{Rng, RngExt};
 
 use crate::distance::Distance;
-use crate::kmeans::{KMeans, ReductionConfig, cluster_means};
+use crate::kmeans::{KMeans, ReductionConfig, TrainingParameters, cluster_means};
 use crate::reduction::{PCA, Reduction, ReductionError, SRHT, checked_buffer_len, validate_shape};
 use crate::utils::{NormalizeRowsError, try_normalize_rows};
 
@@ -41,6 +41,8 @@ pub struct KMeansFit {
     pub labels: Vec<u32>,
     /// Dimension used for training assignment.
     pub training_dim: usize,
+    /// Resolved update settings actually used, after sampling and projection.
+    pub parameters: TrainingParameters,
     /// Empty final projected clusters reconstructed using an inverse transform; zero for raw fits.
     pub empty_clusters: usize,
     /// Retained variance fraction for PCA; absent for raw and SRHT fits.
@@ -76,11 +78,12 @@ impl KMeans {
         let start = Instant::now();
         let mut fit = match self.config.reduction {
             ReductionConfig::None => {
-                let (centroids, labels) = self.fit_raw(vectors, dim, rng)?;
+                let trained = self.fit_raw(vectors, dim, rng)?;
                 KMeansFit {
-                    centroids,
-                    labels,
+                    centroids: trained.centroids,
+                    labels: trained.labels,
                     training_dim: dim,
+                    parameters: trained.parameters,
                     empty_clusters: 0,
                     preserved_variance: None,
                     normalization_time: Duration::ZERO,
@@ -143,20 +146,21 @@ impl KMeans {
             Duration::ZERO
         };
         let start = Instant::now();
-        let (reduced_centroids, labels) = self.fit_raw(projected, training_dim, rng)?;
+        let trained = self.fit_raw(projected, training_dim, rng)?;
         let fit_time = start.elapsed();
         let start = Instant::now();
         let (centroids, empty_clusters) = reconstruct_original_centroids(
             projection,
             &vectors,
-            &reduced_centroids,
-            &labels,
+            &trained.centroids,
+            &trained.labels,
             self.config.distance,
         )?;
         Ok(KMeansFit {
             centroids,
-            labels,
+            labels: trained.labels,
             training_dim,
+            parameters: trained.parameters,
             empty_clusters,
             preserved_variance: None,
             normalization_time,
@@ -242,9 +246,77 @@ fn reconstruct_original_centroids<R: Reduction + ?Sized>(
 mod tests {
     use super::{KMeansError, reconstruct_original_centroids};
     use crate::distance::Distance;
-    use crate::kmeans::{KMeans, KMeansConfig, ReductionConfig};
+    use crate::kmeans::{
+        EmeansConfig, KMeans, KMeansConfig, ReductionConfig, TrainingAlgorithm, TrainingParameters,
+    };
     use crate::reduction::{PCA, Reduction, SRHT};
     use crate::utils::{NormalizeRowsError, as_continuous_vec};
+
+    #[test]
+    fn fit_reports_parameters_for_retained_rows_and_actual_training_dimension() {
+        let vectors = (0..78)
+            .map(|row| [row as f32, (row % 5) as f32, 1.0])
+            .collect::<Vec<_>>();
+        for algorithm in [
+            TrainingAlgorithm::Lloyd,
+            TrainingAlgorithm::Emeans(EmeansConfig::default()),
+        ] {
+            for reduction in [
+                ReductionConfig::None,
+                ReductionConfig::PCA {
+                    output_dim: 2,
+                    training_samples: None,
+                },
+                ReductionConfig::SRHT { output_dim: 2 },
+            ] {
+                let config = KMeansConfig {
+                    algorithm,
+                    n_clusters: Some(2),
+                    training_samples: Some(78),
+                    reduction,
+                    seed: Some(42),
+                    ..Default::default()
+                }
+                .resolve(1000, 3)
+                .unwrap();
+                let fit = KMeans::new(config)
+                    .fit_sample(as_continuous_vec(&vectors), 3)
+                    .unwrap();
+                assert_eq!(fit.labels.len(), 78);
+                assert_eq!(
+                    fit.training_dim,
+                    if reduction == ReductionConfig::None {
+                        3
+                    } else {
+                        2
+                    }
+                );
+                match fit.parameters {
+                    TrainingParameters::Lloyd {
+                        max_iter,
+                        tolerance,
+                    } => {
+                        assert_eq!(algorithm, TrainingAlgorithm::Lloyd);
+                        assert_eq!(max_iter, 10);
+                        assert_eq!(fit.parameters.max_iter(), 10);
+                        assert_eq!(tolerance, config.tolerance);
+                    }
+                    TrainingParameters::Emeans(recipe) => {
+                        assert!(matches!(algorithm, TrainingAlgorithm::Emeans(_)));
+                        assert_eq!(fit.parameters.max_iter(), 3);
+                        // Pinned 78-row recipe, independent of the original source size.
+                        assert_eq!(recipe.batch_size, 4);
+                        assert_eq!(recipe.total_steps, 60);
+                        assert!((recipe.alpha0 - 0.2616321893299979).abs() < 1e-12);
+                        assert_eq!(
+                            recipe.revival_threshold,
+                            if fit.training_dim <= 2 { 0.0 } else { 0.1 }
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn projected_centroids_average_without_overflow_or_unneeded_inverse() {
@@ -351,7 +423,7 @@ mod tests {
         ] {
             let model = KMeans::new(KMeansConfig {
                 n_clusters: Some(2),
-                max_iter: 2,
+                max_iter: Some(2),
                 seed: Some(42),
                 reduction,
                 ..Default::default()
@@ -393,7 +465,7 @@ mod tests {
         ] {
             let model = KMeans::new(KMeansConfig {
                 n_clusters: Some(1),
-                max_iter: 1,
+                max_iter: Some(1),
                 distance,
                 seed: Some(42),
                 reduction: ReductionConfig::PCA {
@@ -449,7 +521,7 @@ mod tests {
         crate::utils::try_normalize_rows(&mut projected, 1, true).unwrap();
         let config = KMeansConfig {
             n_clusters: Some(2),
-            max_iter: 2,
+            max_iter: Some(2),
             distance: Distance::Cosine,
             seed: Some(42),
             reduction: ReductionConfig::PCA {
@@ -475,7 +547,7 @@ mod tests {
     fn source_metadata_keeps_auto_pca_for_a_small_disk_loaded_sample() {
         let config = KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 1,
+            max_iter: Some(1),
             training_samples: Some(40),
             seed: Some(42),
             ..Default::default()
@@ -500,7 +572,7 @@ mod tests {
         let rows = (0..600).map(|row| [row as f32, 1.0]).collect::<Vec<_>>();
         let model = KMeans::new(KMeansConfig {
             n_clusters: Some(1),
-            max_iter: 1,
+            max_iter: Some(1),
             seed: Some(42),
             reduction: ReductionConfig::PCA {
                 output_dim: 1,

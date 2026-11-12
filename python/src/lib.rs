@@ -1,6 +1,6 @@
 use gathers::distance::Distance;
 use gathers::kmeans::{
-    KMeans, KMeansConfig, ReductionConfig, base_assign, base_assign_parallel,
+    KMeans, KMeansConfig, ReductionConfig, TrainingAlgorithm, base_assign, base_assign_parallel,
     rabitq_assign_parallel,
 };
 use gathers::utils::{as_continuous_vec, as_matrix};
@@ -95,7 +95,7 @@ fn batch_assign<'py>(
 
 /// Train a K-means and return the centroids.
 #[pyfunction]
-#[pyo3(signature = (source, n_cluster = None, max_iter = 10, *, distance = "l2", reduction = "auto", reduced_dim = None, samples_per_cluster = 256, training_samples = None, projection_training_samples = None, seed = None))]
+#[pyo3(signature = (source, n_cluster = None, max_iter = None, *, distance = "l2", reduction = "auto", reduced_dim = None, samples_per_cluster = 256, training_samples = None, projection_training_samples = None, seed = None, algorithm = "lloyd"))]
 #[allow(
     clippy::too_many_arguments,
     reason = "Translate the flat Python keyword interface directly"
@@ -103,7 +103,7 @@ fn batch_assign<'py>(
 fn kmeans_fit<'py>(
     source: PyReadonlyArray2<'py, f32>,
     n_cluster: Option<u32>,
-    max_iter: u32,
+    max_iter: Option<u32>,
     distance: &str,
     reduction: &str,
     reduced_dim: Option<usize>,
@@ -111,7 +111,11 @@ fn kmeans_fit<'py>(
     training_samples: Option<usize>,
     projection_training_samples: Option<usize>,
     seed: Option<u64>,
+    algorithm: &str,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let algorithm = algorithm
+        .parse::<TrainingAlgorithm>()
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let vecs = source.as_array();
     let dim = vecs.ncols();
     let distance = distance
@@ -145,6 +149,7 @@ fn kmeans_fit<'py>(
         }
     };
     let config = KMeansConfig {
+        algorithm,
         n_clusters: n_cluster,
         max_iter,
         distance,
